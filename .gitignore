@@ -1,0 +1,43 @@
+# 依赖与构建产物
+node_modules
+server/node_modules
+dist/
+server/dist/
+server/public/assets/
+server/public/index.html
+*.tsbuildinfo
+
+# 运行数据（数据库 / wiki 词条 / 门禁归档 / 日志）——含本地文件衍生内容，禁止入库
+data/
+server/data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.csv.bak
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 压缩包与备份
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.bak
+*.orig
+*~
+*.swp
+
+# 本地 agent 工作目录与编辑器
+.agents/
+.claude/
+.trae/
+agent/
+.vscode/
+.DS_Store

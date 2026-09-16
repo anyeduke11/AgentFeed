@@ -1,0 +1,334 @@
+import { Router } from 'express'
+import fs from 'fs/promises'
+import path from 'path'
+import { getDb } from '../db.js'
+
+export const wikiRouter = Router()
+
+const WIKI_DIR = path.join(process.cwd(), 'data', 'wiki', 'entries')
+
+// ---------------- 外部 llm-wiki 挂接：解析 / 预览 / 执行 ----------------
+
+interface ExtEntry {
+  file: string          // 绝对路径
+  topic: string         // 所在子目录（主题域）
+  title: string         // 首个 # 标题
+  summary: string       // 首段正文（≤200 字）
+  source: string        // **来源** 行（相对 KB 的源文件路径）
+  sourceBase: string    // 来源文件名
+  confidence: string    // **置信度**
+  tags: string[]        // **标签** 中的 #标签
+  updated: string       // 尾行 最后更新
+  chars: number         // 正文字符数
+  match: 'matched' | 'standalone' | 'already'
+  matchedFileId?: number
+  matchedTitle?: string
+}
+
+/** 非词条目录：脚本/原始材料/生成物等（目录级排除，文件不排除） */
+const SKIP_DIRS = new Set(['.git', '.kb', 'node_modules', 'raw', 'outputs', 'scripts', 'views', 'news-subscription'])
+
+/** 解析单个外部词条 md 的行内元数据（**来源**: / **置信度**: / **标签**: `#x`） */
+function parseExtEntry(fp: string, raw: string): ExtEntry {
+  const lines = raw.split(/\r?\n/)
+  const title = (lines.find(l => l.startsWith('# ')) || '').replace(/^#\s*/, '').trim()
+  const kv = (key: string) => {
+    const line = lines.find(l => l.replace(/\*/g, '').trimStart().startsWith(key))
+    return line ? line.split(':', 2)[1]?.trim() ?? '' : ''
+  }
+  const source = kv('来源')
+  const confidence = kv('置信度')
+  const tagLine = kv('标签') || ''
+  const tags = Array.from(tagLine.matchAll(/#([^\s`#]+)/g)).map(m => m[1])
+  const upLine = lines.filter(l => l.trim()).pop() || ''
+  const updated = (upLine.match(/最后更新[：:]\s*([0-9-]+)/) || [])[1] || ''
+  // 摘要：标题后第一段正文（跳过元数据行/分隔线/小节标题/表格/列表条目）
+  const body: string[] = []
+  for (const l of lines) {
+    const t = l.trim()
+    if (t.startsWith('# ')) continue
+    if (!body.length) {
+      if (!t || t === '---' || t.startsWith('#') || t.startsWith('**') || t.startsWith('|') || t.startsWith('>') || /^[-*]\s/.test(t) || /^\d+\.\s/.test(t)) continue
+    }
+    if (t === '---' || t.startsWith('#')) break
+    body.push(t)
+    if (body.join('').length >= 200) break
+  }
+  // 降级：严格首段为空（如纯列表型词条）时宽松收集首个非标题/分隔线内容
+  if (!body.length) {
+    for (const l of lines) {
+      const t = l.trim()
+      if (!t || t === '---' || t.startsWith('#') || t.startsWith('|') || /^\|[-\s|]+\|$/.test(t)) continue
+      body.push(t.replace(/^[-*]\s+/, '').replace(/\*\*/g, ''))
+      if (body.join('').length >= 200) break
+    }
+  }
+  let summary = body.join(' ').slice(0, 200)
+  if (body.join('').length > 200) summary += '…'
+  return {
+    file: fp, topic: path.basename(path.dirname(fp)),
+    title, summary, source, sourceBase: source ? path.basename(source) : '',
+    confidence, tags, updated, chars: raw.length, match: 'standalone'
+  }
+}
+
+/** 收集 + 解析外部 wiki 目录下全部词条 */
+async function collectExtEntries(dir: string): Promise<ExtEntry[]> {
+  const files: string[] = []
+  const walkMd = async (d: string) => {
+    for (const e of await fs.readdir(d, { withFileTypes: true }).catch(() => [])) {
+      const full = path.join(d, e.name)
+      if (e.isDirectory()) { if (!e.name.startsWith('.') && !SKIP_DIRS.has(e.name)) await walkMd(full) }
+      else if (e.name.toLowerCase().endsWith('.md')) files.push(full)
+    }
+  }
+  await walkMd(dir)
+  const entries: ExtEntry[] = []
+  for (const fp of files) {
+    const raw = await fs.readFile(fp, 'utf8').catch(() => '')
+    if (!raw) continue
+    entries.push(parseExtEntry(fp, raw))
+  }
+  return entries
+}
+
+/** 与库内文件比对：① 来源文件名 → files.name ② 去扩展名 ③ 路径后缀 / 标题 */
+async function matchExtEntries(entries: ExtEntry[]): Promise<void> {
+  const db = await getDb()
+  const fileRows = await (await db.prepare("SELECT id, name, path, title FROM files WHERE status = 'active'")).all() as any[]
+  const byName = new Map(fileRows.map((r: any) => [r.name, r]))
+  const existing = await (await db.prepare('SELECT entry_path FROM wiki_entries_meta')).all() as any[]
+  const existingSet = new Set((existing as any[]).map(r => String(r.entry_path)))
+  for (const e of entries) {
+    const stem = e.sourceBase ? e.sourceBase.replace(/\.[^.]+$/, '') : ''
+    const hit = (e.sourceBase && byName.get(e.sourceBase))
+      || (stem && byName.get(stem + '.md'))
+      || fileRows.find((r: any) => (e.sourceBase && r.path.endsWith('/' + e.sourceBase)) || (e.title && (r.title === e.title || r.name === e.title + '.md')))
+    const selfImported = existingSet.has(e.file)
+    e.match = selfImported ? 'already' : hit ? 'matched' : 'standalone'
+    if (hit) { e.matchedFileId = hit.id; e.matchedTitle = hit.title || hit.name }
+  }
+}
+
+function extStats(entries: ExtEntry[]) {
+  return {
+    total: entries.length,
+    matched: entries.filter(e => e.match === 'matched').length,
+    standalone: entries.filter(e => e.match === 'standalone').length,
+    already: entries.filter(e => e.match === 'already').length,
+    byTopic: Object.entries(entries.reduce((m, e) => { m[e.topic] = (m[e.topic] || 0) + 1; return m }, {} as Record<string, number>))
+      .map(([topic, count]) => ({ topic, count })).sort((a, b) => b.count - a.count)
+  }
+}
+
+wikiRouter.post('/import/preview', async (req, res) => {
+  try {
+    const dir = String(req.body?.dir || '').trim()
+    if (!dir) return res.json({ ok: false, message: '缺少目录路径' })
+    const st = await fs.stat(dir).catch(() => null)
+    if (!st || !st.isDirectory()) return res.json({ ok: false, message: `目录不存在或不可读：${dir}` })
+    const entries = await collectExtEntries(dir)
+    await matchExtEntries(entries)
+    res.json({ ok: true, dir, stats: extStats(entries), entries })
+  } catch (e: any) {
+    res.json({ ok: false, message: String(e?.message || e) })
+  }
+})
+
+/** 执行挂载：独立词条写 meta（file_id NULL，路径挂载不移动文件）；可挂接词条关联源文件并出队 */
+wikiRouter.post('/import', async (req, res) => {
+  try {
+    const dir = String(req.body?.dir || '').trim()
+    if (!dir) return res.status(400).json({ success: false, message: '缺少目录路径' })
+    const st = await fs.stat(dir).catch(() => null)
+    if (!st || !st.isDirectory()) return res.status(400).json({ success: false, message: `目录不存在或不可读：${dir}` })
+    const entries = await collectExtEntries(dir)
+    await matchExtEntries(entries)
+    const db = await getDb()
+    let imported = 0, linked = 0
+    for (const e of entries) {
+      if (e.match === 'already') continue
+      // 幂等刷新：同路径 imported 行先删后插（重复导入会刷新摘要/标签等解析结果）
+      await (await db.prepare(`DELETE FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).run([e.file])
+      const distilledAt = /^\d{4}-\d{2}-\d{2}$/.test(e.updated) ? `${e.updated} 00:00:00` : new Date().toISOString()
+      await (await db.prepare(
+        `INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, source_type, title, summary, tags, confidence)
+         VALUES (?, ?, 0, ?, 'imported', ?, ?, ?, ?)`
+      )).run([e.matchedFileId ?? null, e.file, distilledAt, e.title || path.basename(e.file, '.md'), e.summary, JSON.stringify(e.tags), e.confidence || null])
+      imported++
+      if (e.match === 'matched' && e.matchedFileId) {
+        // 源文件已被外部词条覆盖，标记 imported 从蒸馏队列剔除（AI 评估链路待 PDF/docx 入库后启用）
+        await (await db.prepare(`UPDATE files SET llm_state = 'imported' WHERE id = ?`)).run(e.matchedFileId)
+        linked++
+      }
+    }
+    res.json({ success: true, imported, linked, skipped: entries.filter(e => e.match === 'already').length, stats: extStats(entries) })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+/** 词条列表（含文件与领域信息；合并外部挂载的独立词条） */
+wikiRouter.get('/', async (req, res) => {
+  try {
+    const db = await getDb()
+    const { kw, domain, page = '1', limit = '50' } = req.query as Record<string, string>
+    let where = `WHERE f.status = 'active' AND wem.file_id IS NOT NULL`
+    const params: any[] = []
+    if (kw) {
+      where += ' AND (f.title LIKE ? OR f.summary LIKE ? OR wem.title LIKE ?)'
+      params.push(`%${kw}%`, `%${kw}%`, `%${kw}%`)
+    }
+    if (domain) {
+      where += ' AND d.name = ?'
+      params.push(domain)
+    }
+    const totalRow = await (await db.prepare(`SELECT COUNT(*) as cnt FROM wiki_entries_meta wem JOIN files f ON wem.file_id = f.id LEFT JOIN domains d ON f.domain_id = d.id ${where}`)).get(params) as any
+    const sql = `
+      SELECT wem.id as meta_id, wem.file_id as id, wem.entry_path, wem.entities_count, wem.distilled_at, wem.quality_score as conf,
+             'llm' as source_type,
+             COALESCE(NULLIF(wem.title, ''), NULLIF(f.title, ''), NULLIF(f.alias, ''), f.name) AS title,
+             f.source_agent as agent, f.ext, f.file_mtime, d.name as domain, d.color as domain_color, f.summary
+      FROM wiki_entries_meta wem
+      JOIN files f ON wem.file_id = f.id
+      LEFT JOIN domains d ON f.domain_id = d.id
+      ${where}
+    `
+    const rows = await (await db.prepare(sql)).all(params) as any[]
+    // 外部独立词条（file_id NULL：路径挂载，不关联库内文件）
+    let impWhere = `WHERE wem.file_id IS NULL`
+    const impParams: any[] = []
+    if (kw) {
+      impWhere += ' AND (wem.title LIKE ? OR wem.summary LIKE ?)'
+      impParams.push(`%${kw}%`, `%${kw}%`)
+    }
+    if (domain) impWhere += ' AND 0' // 独立词条无领域归属，不参与领域过滤
+    const impRows = await (await db.prepare(`
+      SELECT wem.id as meta_id, wem.entry_path, wem.distilled_at, wem.title, wem.summary, wem.tags, wem.confidence as conf,
+             'imported' as source_type
+      FROM wiki_entries_meta wem ${impWhere}
+    `)).all(impParams) as any[]
+    for (const r of impRows) {
+      r.id = `m${r.meta_id}`
+      r.agent = '外部挂载'; r.ext = '.md'; r.domain = '外部 Wiki'; r.domain_color = '#7A5AA8'
+      r.tags = r.tags ? JSON.parse(r.tags) : []
+    }
+    // 合并排序（蒸馏时间倒序）+ 内存分页
+    const merged = [...rows, ...impRows].sort((a, b) => String(b.distilled_at || '').localeCompare(String(a.distilled_at || '')))
+    const total = merged.length
+    const start = (parseInt(page) - 1) * parseInt(limit)
+    const items = merged.slice(start, start + parseInt(limit))
+    // 补充编号（No.XXX / 外部 M.XX）与标签
+    const tagStmt = await db.prepare('SELECT t.name FROM file_tags ft JOIN tags t ON ft.tag_id = t.id WHERE ft.file_id = ?')
+    for (const r of items) {
+      if (r.source_type === 'imported') { r.no = 'M' + String(r.meta_id).padStart(3, '0'); continue }
+      r.no = String(r.id).padStart(3, '0')
+      r.tags = (await tagStmt.all(r.id) as any[]).map(t => t.name)
+    }
+    res.json({ items, total, page: parseInt(page), limit: parseInt(limit) })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/** 存量回填：已蒸馏词条标题为空的行，从 entry.md 首行 `# 标题` 提取（启动后台执行，不阻塞） */
+export async function backfillWikiTitles(): Promise<number> {
+  const db = await getDb()
+  const rows = await (await db.prepare(`SELECT id, entry_path FROM wiki_entries_meta WHERE file_id IS NOT NULL AND (title IS NULL OR title = '')`)).all() as any[]
+  let n = 0
+  for (const r of rows) {
+    const raw = await fs.readFile(r.entry_path, 'utf8').catch(() => '')
+    const m = raw.match(/^#\s+(.+?)\s*$/m)
+    if (!m) continue
+    await (await db.prepare('UPDATE wiki_entries_meta SET title = ? WHERE id = ?')).run([m[1].trim(), r.id])
+    n++
+  }
+  return n
+}
+
+/** 外部独立词条详情（路径挂载：直接读外部卷文件） */
+wikiRouter.get('/imported/:metaId', async (req, res) => {
+  try {
+    const db = await getDb()
+    const metaId = parseInt(req.params.metaId)
+    const row = await (await db.prepare(
+      'SELECT id as meta_id, entry_path, distilled_at, title, summary, tags, confidence as conf FROM wiki_entries_meta WHERE id = ? AND file_id IS NULL'
+    )).get(metaId) as any
+    if (!row) return res.status(404).json({ success: false, message: '词条不存在' })
+    let content = ''
+    let readable = true
+    try {
+      content = await fs.readFile(row.entry_path, 'utf8')
+    } catch {
+      readable = false // 外部卷未挂载或文件被移动
+    }
+    res.json({
+      id: `m${row.meta_id}`,
+      no: 'M' + String(row.meta_id).padStart(3, '0'),
+      title: row.title, summary: row.summary, content,
+      tags: row.tags ? JSON.parse(row.tags).map((n: string) => ({ name: n })) : [],
+      conf: row.conf, distilled_at: row.distilled_at,
+      llm_state: 'imported', source_type: 'imported',
+      path: row.entry_path, agent: '外部挂载', ext: '.md',
+      domainPath: '外部 Wiki', readable
+    })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/** 词条详情：摘要 + 要点 + 实体 + 关系 + 回链 */
+wikiRouter.get('/:fileId', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.params.fileId)
+    const row = await (await db.prepare(`
+      SELECT wem.file_id as id, wem.title as wiki_title, wem.entities_count, wem.distilled_at, wem.quality_score as conf,
+             f.title, f.name, f.alias, f.summary, f.path, f.source_agent as agent, f.ext, f.llm_state,
+             d.name as domain, d2.name as parent_domain
+      FROM wiki_entries_meta wem
+      JOIN files f ON wem.file_id = f.id
+      LEFT JOIN domains d ON f.domain_id = d.id
+      LEFT JOIN domains d2 ON d.parent_id = d2.id
+      WHERE wem.file_id = ?
+    `)).get(fileId) as any
+    if (!row) return res.status(404).json({ success: false, message: '词条不存在' })
+
+    const entryDir = path.join(WIKI_DIR, String(fileId))
+    const readJson = async (name: string) => {
+      try {
+        return JSON.parse(await fs.readFile(path.join(entryDir, name), 'utf8'))
+      } catch {
+        return []
+      }
+    }
+    let content = ''
+    try {
+      content = await fs.readFile(path.join(entryDir, 'entry.md'), 'utf8')
+    } catch { /* 词条文件缺失时降级 */ }
+
+    const entities = await readJson('entities.json')
+    const relations = await readJson('relations.json')
+    const points = await readJson('points.json')
+
+    const tagStmt = await db.prepare('SELECT t.name, ft.source FROM file_tags ft JOIN tags t ON ft.tag_id = t.id WHERE ft.file_id = ?')
+    const tags = await tagStmt.all(fileId) as any[]
+
+    res.json({
+      ...row,
+      no: String(fileId).padStart(3, '0'),
+      // 展示标题：蒸馏词条标题优先，退回源文件标题/文件名；orig_title 保留入库时的原始标题
+      title: row.wiki_title || row.title || row.alias || row.name,
+      orig_title: row.title,
+      alias: row.alias,
+      domainPath: row.parent_domain ? `${row.parent_domain} / ${row.domain}` : row.domain,
+      content,
+      points,
+      entities,
+      relations,
+      tags
+    })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
