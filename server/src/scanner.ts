@@ -104,7 +104,8 @@ export interface IngestOutcome {
 /**
  * 单文件入库：门禁评估 + 元数据提取 + upsert（全量扫描与 watcher 增量共用）。
  * 墓碑语义：门禁拦截/清理只把 files 行置 deleted（wiki 词条/向量等知识资产保留），
- * 文件恢复后同 id 复活、零重蒸馏。full=true 直接恢复；增量时文件 mtime+size 未变
+ * 文件恢复后同 id 复活、零重蒸馏。full=true 且无 skipped 门禁记录时直接恢复，
+ * 带 skipped 记录的墓碑走门禁重评；增量时文件 mtime+size 未变
  * 且无 skipped 门禁记录则免 md5 复活（外部卷掉线重挂自愈），有变化走正常流程翻回 active。
  */
 async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: any, full: boolean, rootBindings: RootBinding[]): Promise<IngestOutcome> {
@@ -114,8 +115,13 @@ async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: 
 
   if (existing && existing.status === 'deleted') {
     if (full) {
-      await db.exec(`UPDATE files SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ${existing.id}`)
-      return { restored: true }
+      // skipped 门禁记录在案的墓碑不得短路复活：落入下方门禁重评，
+      // 否则复活后 mtime+size 未变会被增量快路径永久豁免（P0-④）
+      const rec = await getGateRecord(db, fp)
+      if (rec?.status !== 'skipped') {
+        await db.exec(`UPDATE files SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ${existing.id}`)
+        return { restored: true }
+      }
     }
     const unchanged = existing.size === stat.size && existing.file_mtime === stat.mtime.toISOString()
     if (unchanged) {
