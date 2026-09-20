@@ -14,6 +14,8 @@ export interface ScanOptions {
   full?: boolean
   /** 台账来源：manual（挂载/手动）/ rescan（单根重扫）/ boot / interval（周期增量） */
   source?: string
+  /** 越过单轮墓碑配额护栏：仅用于人确认过「这些文件真的删了」之后的清理，自动扫描永不为真 */
+  force?: boolean
 }
 
 export interface ScanResult {
@@ -22,6 +24,66 @@ export interface ScanResult {
   updated: number
   deleted: number
   gated: number
+  /** 本轮被配额护栏挡下来的软删批次（root + 数量 + 原因），供日志与看板告警 */
+  sweepSkipped?: SweepSkip[]
+}
+
+export interface SweepSkip { root: string; count: number; reason: 'empty-walk' | 'over-cap' }
+
+/**
+ * 单轮扫描每个根允许的墓碑化文件数上限，超过即判定「读取现场异常」而不是「文件真被删了」。
+ * 事故依据（2026-09-20）：lingxi-claw 根下若干目录是指向 WPS 安装目录的符号链接，
+ * walk() 以 entry.isDirectory() 判断不进符号链接目录，一次增量扫描把 13,673 个仍在磁盘上的
+ * 文件整批墓碑化，且此后每轮都看不到它们、再没有自愈通道。
+ */
+export const SWEEP_TOMBSTONE_CAP = 200
+
+/** 文件归属：匹配的最深（最长）根；不匹配任何本次扫描根则不参与软删 */
+function ownerRoot(roots: string[], p: string): string | null {
+  let best: string | null = null
+  for (const r of roots) {
+    if ((p === r || p.startsWith(r + '/')) && (!best || r.length > best.length)) best = r
+  }
+  return best
+}
+
+/**
+ * 软删计划（纯函数，便于不依赖磁盘/数据库验证配额语义）：
+ * 把「active 但本轮没走到」的行的候选按所属根分组，逐根裁决——
+ * 该根本轮走到 0 个文件 → empty-walk（读取通道整体异常，最危险，全部放弃）；
+ * 候选数超上限 → over-cap（放弃该根，其他根照常清理，不连坐）。
+ */
+export function planTombstoneSweep(params: {
+  roots: string[]
+  walkedCountByRoot: Map<string, number>
+  seenPaths: Set<string>
+  activeRows: { id: number; path: string }[]
+  cap?: number
+}): { deleteIds: number[]; skipped: SweepSkip[] } {
+  const cap = params.cap ?? SWEEP_TOMBSTONE_CAP
+  const candidates = new Map<string, number[]>()
+  for (const row of params.activeRows) {
+    if (params.seenPaths.has(row.path)) continue
+    const owner = ownerRoot(params.roots, row.path)
+    if (!owner) continue
+    const ids = candidates.get(owner)
+    if (ids) ids.push(row.id)
+    else candidates.set(owner, [row.id])
+  }
+  const deleteIds: number[] = []
+  const skipped: SweepSkip[] = []
+  for (const [root, ids] of candidates) {
+    if ((params.walkedCountByRoot.get(root) ?? 0) === 0) {
+      skipped.push({ root, count: ids.length, reason: 'empty-walk' })
+      continue
+    }
+    if (ids.length > cap) {
+      skipped.push({ root, count: ids.length, reason: 'over-cap' })
+      continue
+    }
+    deleteIds.push(...ids)
+  }
+  return { deleteIds, skipped }
 }
 
 async function md5File(filePath: string): Promise<string> {
@@ -278,9 +340,12 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
 
   const seenPaths = new Set<string>()
 
+  const walkedCountByRoot = new Map<string, number>()
+
   for (const root of roots) {
     const files: string[] = []
     await walk(root, extSet, cfg.excludeDirsEnabled ? cfg.excludeDirs : [], cfg.pathWhitelistEnabled ? cfg.pathWhitelist : [], files)
+    walkedCountByRoot.set(root, files.length)
     for (let i = 0; i < files.length; i += 32) {
       // 分批事务（32 文件/批）：合并 fsync 使 WAL 写放大降一个量级；批间留出 checkpoint 与蒸馏写者的窗口。
       // 事务内含每文件的读取/md5 IO，批次刻意偏小以约束事务时长（busy_timeout 5s 之内）
@@ -299,32 +364,27 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
     }
   }
 
-  // 软删范围必须限定在本次扫描涉及的根之内——单根扫描/重扫不能动其他根的文件
-  // 严格边界：path = 根 或 LIKE 根 + '/%'（裸 LIKE root% 会误伤 /foo/bar2 这类兄弟目录）
-  const rootEsc = roots.map(r => {
-    const p = r.replace(/'/g, "''")
-    return `(path = '${p}' OR path LIKE '${p}/%')`
+  // 软删候选统一在 JS 侧按「最深的所属根」归组后再定额放行：
+  // 1) 旧实现在 SQL 里拼 seen 集合（path NOT IN (96K 个字面量)）会顶到 SQLite 语句长度上限；
+  // 2) 更关键的是配额——一轮自动扫描不得整批清空一个根（见 planTombstoneSweep 的事故依据）。
+  const activeRows = await (await db.prepare("SELECT id, path FROM files WHERE status = 'active'")).all() as any[]
+  const force = !!options.force
+  const sweep = planTombstoneSweep({
+    roots,
+    walkedCountByRoot,
+    seenPaths,
+    activeRows,
+    cap: force ? Infinity : SWEEP_TOMBSTONE_CAP
   })
-  const rootScope = rootEsc.length > 0 ? `(${rootEsc.join(' OR ')})` : `(0)`
-
-  if (options.full && seenPaths.size > 0) {
-    const escaped = Array.from(seenPaths).map(p => `'${p.replace(/'/g, "''")}'`).join(',')
-    const sql = `UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE status = 'active' AND path NOT IN (${escaped}) AND path LIKE ${rootScope}`
-    await db.exec(sql)
-    const changesRow = await (await db.prepare('SELECT changes() AS c')).get() as any
-    stats.deleted += changesRow.c
-  } else if (!options.full) {
-    const activeStmt = await db.prepare("SELECT id, path FROM files WHERE status = 'active'")
-    const activeFiles = await activeStmt.all() as any[]
-    const inScope = (p: string) => roots.some(r => p === r || p.startsWith(r + '/'))
-    const toDelete = activeFiles.filter(f => !seenPaths.has(f.path) && inScope(f.path))
-    if (toDelete.length > 0) {
-      for (const f of toDelete) {
-        await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ${f.id}`)
-      }
-      stats.deleted += toDelete.length
-    }
+  for (const s of sweep.skipped) {
+    console.warn(`[scan] 跳过清理：根「${s.root}」本轮有 ${s.count} 个 active 文件未走到（${s.reason === 'empty-walk' ? '该根本轮走到 0 个文件，疑似卷未挂载/权限变化/符号链接子树' : `超过单轮上限 ${SWEEP_TOMBSTONE_CAP}`}），维持现状不墓碑化；确认确已删除请用 force 扫描`)
   }
+  if (sweep.skipped.length > 0) stats.sweepSkipped = sweep.skipped
+  for (let i = 0; i < sweep.deleteIds.length; i += 100) {
+    const chunk = sweep.deleteIds.slice(i, i + 100)
+    await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.join(',')})`)
+  }
+  stats.deleted += sweep.deleteIds.length
 
   // 卸载扫描根的孤儿清理（全量/增量都跑）：没有任何 scan_roots 行覆盖的 active 文件墓碑化。
   // 禁用根仍有行、保持冷存储语义；被删除的根则让文件从此无任何清理通道，会继续出现在看板与 MCP 检索里。

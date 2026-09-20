@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { getDb } from '../db.js'
-import { scan, ScanOptions } from '../scanner.js'
+import { scan, ScanOptions, SweepSkip } from '../scanner.js'
 import { restartWatcherForRoots } from '../watcher.js'
 import { resolveAgentDirs } from '../agents.js'
 import { normalizeRootPath } from '../gate.js'
@@ -10,11 +10,11 @@ export const scanRouter = Router()
 /** 全局扫描运行态（watcher 状态 + 最近一次扫描结果） */
 export const scanState = {
   watcherRunning: false,
-  lastScan: null as null | { at: string; scanned: number; added: number; updated: number; deleted: number },
+  lastScan: null as null | { at: string; scanned: number; added: number; updated: number; deleted: number; sweepSkipped?: SweepSkip[] },
   lastScanAt: null as string | null
 }
 
-export function recordScan(result: { scanned: number; added: number; updated: number; deleted: number }) {
+export function recordScan(result: { scanned: number; added: number; updated: number; deleted: number; sweepSkipped?: SweepSkip[] }) {
   scanState.lastScan = { at: new Date().toISOString(), ...result }
 }
 
@@ -140,8 +140,9 @@ scanRouter.post('/roots/:id/rescan', async (req, res) => {
 
 scanRouter.post('/run', async (req, res) => {
   try {
-    const { roots, full } = req.body as ScanOptions & { roots?: string[] }
-    const result = await scan({ roots: roots || [], full: !!full, source: 'manual' })
+    // force=true 越过单轮墓碑配额护栏：仅在人确认「这些文件确实删了」之后用于放行清理
+    const { roots, full, force } = req.body as ScanOptions & { roots?: string[] }
+    const result = await scan({ roots: roots || [], full: !!full, force: !!force, source: 'manual' })
     recordScan(result)
     res.json({ success: true, ...result })
   } catch (e: any) {

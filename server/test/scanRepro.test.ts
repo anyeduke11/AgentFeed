@@ -174,6 +174,29 @@ test('P1-⑤ 全文件代码占比超限的大文件不应仅凭头部 64KB 抽�
   assert.notEqual(row?.status, 'active', `大文件仅凭头部抽样绕过门禁入库（gate_sampled=${row?.gate_sampled}）`)
 })
 
+test('P1-⑫ 扫描根整轮走不到（卷掉线/符号链接子树）时，增量扫描不得把该根文件全量墓碑化', async () => {
+  // WHY: 2026-09-20 实机事故——lingxi-claw 根下若干目录是指向 WPS 安装目录的符号链接，
+  // walk() 以 entry.isDirectory() 判断不进符号链接目录，于是一次增量扫描把「没走到」当成「已删除」，
+  // 13,673 个仍在磁盘上的文件被整批墓碑化且再没有自愈通道。正确期望：该根本轮走到 0 个文件即判为
+  // 读取现场异常，放弃这一轮的清理（数据保持 active），而不是整批下线。
+  const root = await makeRoot({ 'a.md': LONG, 'b.md': LONG, 'c.md': LONG })
+  await mountRoot(root)
+  const fp = path.join(root, 'a.md')
+  await scan({ roots: [root], full: true, source: 'test' })
+  assert.equal((await fileRow(fp))?.status, 'active') // 控制：入库成功
+
+  await fs.rm(root, { recursive: true, force: true }) // 模拟挂载卷掉线：目录整体不可读
+  const res = await scan({ roots: [root], full: false, source: 'test' })
+  assert.equal((await fileRow(fp)).status, 'active', '根本轮 0 文件，却把该根文件墓碑化了（无护栏）')
+  assert.equal(res.sweepSkipped?.[0]?.reason, 'empty-walk')
+  assert.equal(res.deleted, 0)
+
+  // 卸载该根后走孤儿清理通道（护栏只管"本轮没走到"，不拦"根没了"）
+  await unmountRoot(root)
+  await scan({ roots: [], full: false, source: 'test' })
+  assert.equal((await fileRow(fp)).status, 'deleted', '根已卸载时孤儿清理应生效')
+})
+
 test('特征化（⑨ 拼接转义安全网）：路径含单引号与 SQL 片段应完整入库且不破坏表结构', async () => {
   // WHY: scanner/gate 全用字符串拼 SQL（仅靠逐处 '' 转义），此用例锁定「当前转义约定成立」；
   // 一旦任何一处漏转义，这里立刻红。它不验证期望行为缺口，属安全网特征化测试。
