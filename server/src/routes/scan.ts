@@ -3,6 +3,7 @@ import { getDb } from '../db.js'
 import { scan, ScanOptions } from '../scanner.js'
 import { restartWatcherForRoots } from '../watcher.js'
 import { resolveAgentDirs } from '../agents.js'
+import { normalizeRootPath } from '../gate.js'
 
 export const scanRouter = Router()
 
@@ -63,14 +64,16 @@ scanRouter.post('/roots', async (req, res) => {
   const { path } = req.body as Record<string, any>
   if (!path) return res.status(400).json({ success: false, message: 'path 必填' })
   try {
+    // 根路径归一化：尾斜杠会让「文件是否位于该根下」永久失配，也会让下面的 agent 目录映射漏绑
+    const rootPath = normalizeRootPath(String(path))
     // agent 绑定：挂载路径命中 KNOWN_AGENTS 目录映射时写入 agent 名（入库归属读绑定，不再猜路径）
-    const agentHit = resolveAgentDirs().find(a => a.path === String(path))
-    const escapedPath = String(path).replace(/'/g, "''")
+    const agentHit = resolveAgentDirs().find(a => a.path === rootPath)
+    const escapedPath = rootPath.replace(/'/g, "''")
     const agentVal = agentHit ? `'${agentHit.name.replace(/'/g, "''")}'` : 'NULL'
     await db.exec(`INSERT INTO scan_roots (path, agent) VALUES ('${escapedPath}', ${agentVal})`)
     const idRow = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
     // 新根后台全量扫描 + watcher 热重载（失败不阻塞响应）
-    scan({ roots: [String(path)], full: true, source: 'manual' }).then(recordScan).catch(() => {})
+    scan({ roots: [rootPath], full: true, source: 'manual' }).then(recordScan).catch(() => {})
     restartWatcherForRoots().then(n => { scanState.watcherRunning = n > 0 }).catch(() => {})
     res.json({ success: true, id: idRow.id })
   } catch (e: any) {
@@ -86,7 +89,7 @@ export async function bindAgentRoots(): Promise<number> {
   const dirs = resolveAgentDirs()
   let n = 0
   for (const r of rows) {
-    const hit = dirs.find(a => a.path === r.path)
+    const hit = dirs.find(a => a.path === normalizeRootPath(r.path))
     if (!hit) continue
     await db.exec(`UPDATE scan_roots SET agent = '${hit.name.replace(/'/g, "''")}' WHERE id = ${r.id}`)
     n++
