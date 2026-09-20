@@ -318,6 +318,15 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
     }
   }
 
+  // 卸载扫描根的孤儿清理（全量/增量都跑）：没有任何 scan_roots 行覆盖的 active 文件墓碑化。
+  // 禁用根仍有行、保持冷存储语义；被删除的根则让文件从此无任何清理通道，会继续出现在看板与 MCP 检索里。
+  await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active' AND NOT EXISTS (
+      SELECT 1 FROM scan_roots r WHERE files.path = r.path OR files.path LIKE r.path || '/%'
+    )`)
+  const orphanRow = await (await db.prepare('SELECT changes() AS c')).get() as any
+  stats.deleted += orphanRow.c
+
   return stats
 }
 
