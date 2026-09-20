@@ -19,6 +19,9 @@
       </button>
       <span class="cap mono">{{ queueSummary }}</span>
       <div class="sright">
+        <!-- 质量分补齐（M3）：手动触发一批 ≤200 篇，priority=0 不插队 -->
+        <span v-if="qbLabel" class="cap mono">{{ qbLabel }}</span>
+        <button class="btn sm" :disabled="qbRunning" :title="qbRunning ? '补齐进行中' : '给已蒸馏但缺质量分的文章批量补分（≤200 篇）'" @click="triggerBackfill">质量分补齐</button>
         <button class="btn sm" :class="{ primary: !onlyErr }" @click="onlyErr = false">全部通道</button>
         <button class="btn sm" :class="{ primary: onlyErr }" @click="onlyErr = true">仅看异常</button>
         <button class="btn sm danger" @click="retryAll"><Icon name="rotate" :size="14" /> 全部重试</button>
@@ -193,7 +196,8 @@ async function refresh() {
     llm.fetchLogs(),
     llm.fetchProviders(),
     api.stats.dashboard().then(d => { dash.value = d }),
-    api.llm.llmNodes().then(d => { activeNodes.value = d.nodes || [] }).catch(() => {})
+    api.llm.llmNodes().then(d => { activeNodes.value = d.nodes || [] }).catch(() => {}),
+    api.llm.qualityBackfillProgress().then(p => { qb.value = p }).catch(() => {})
   ])
   // 从 store 最近日志（5 条）提取每个文件的最近一次失败原因，供失败泳道展示
   const map: Record<number, string> = {}
@@ -231,6 +235,24 @@ async function retryAllFailed() {
   } finally {
     retryingAll.value = false
   }
+}
+
+// 质量分补齐：进度随 8s 轮询刷新；批未跑完时按钮禁用（后端也会拒绝重复触发）
+const qb = ref<any>({})
+const qbRunning = computed(() => !!qb.value.total && !qb.value.finished && qb.value.pending > 0)
+const qbLabel = computed(() => {
+  if (!qb.value.total) return ''
+  const parts = [`补齐 ${qb.value.done + qb.value.failed}/${qb.value.total}`]
+  if (qb.value.failed) parts.push(`失败 ${qb.value.failed}`)
+  if (qb.value.finished) parts.push('已完成')
+  return parts.join(' · ')
+})
+
+async function triggerBackfill() {
+  const r: any = await api.llm.qualityBackfill()
+  if (r?.success) ui.toast(r.total ? `已入队 ${r.total} 篇补齐 · 走队列低优先级执行` : r.message || '没有待补齐的文件')
+  else ui.toast(r?.message || '触发失败')
+  qb.value = await api.llm.qualityBackfillProgress().catch(() => qb.value)
 }
 
 onMounted(async () => {

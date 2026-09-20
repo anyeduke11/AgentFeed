@@ -17,10 +17,10 @@
         <span class="qchip" :class="{ paused: ui.queuePaused }">
           <span class="dot" :class="ui.queuePaused ? 'dot-pause' : 'dot-run'"></span>{{ ui.queuePaused ? '已暂停' : '运行中' }}
         </span>
-        <button class="btn ghost icon-btn" :title="ui.queuePaused ? '恢复队列' : '暂停队列'" @click="ui.togglePause()">
+        <button class="btn ghost icon-btn" :title="ui.queuePaused ? '恢复队列' : '暂停队列'" :aria-label="ui.queuePaused ? '恢复队列' : '暂停队列'" @click="ui.togglePause()">
           <Icon :name="ui.queuePaused ? 'play' : 'pause'" :size="18" />
         </button>
-        <button class="btn ghost icon-btn" title="切换紧凑视图" @click="ui.toggleDensity()">
+        <button class="btn ghost icon-btn" title="切换紧凑视图" aria-label="切换紧凑视图" @click="ui.toggleDensity()">
           <Icon name="density" :size="18" />
         </button>
         <span class="date-chip mono">{{ todayLabel }}</span>
@@ -30,7 +30,7 @@
     <div class="menu-drawer" :class="{ on: ui.menuOpen }" aria-label="导航抽屉">
       <div class="menu-head">
         <span class="brand-plate">调度站</span>
-        <button class="btn ghost icon-btn" style="margin-left:auto" @click="ui.toggleMenu(false)" title="关闭">
+        <button class="btn ghost icon-btn" style="margin-left:auto" @click="ui.toggleMenu(false)" title="关闭" aria-label="关闭导航抽屉">
           <Icon name="x" :size="18" />
         </button>
       </div>

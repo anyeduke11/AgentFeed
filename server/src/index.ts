@@ -3,7 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { getDb } from './db.js'
+import { getDb, checkpointWal } from './db.js'
 import { filesRouter } from './routes/files.js'
 import { domainsRouter } from './routes/domains.js'
 import { tagsRouter } from './routes/tags.js'
@@ -16,10 +16,13 @@ import { wikiRouter, backfillWikiTitles } from './routes/wiki.js'
 import { gateRouter } from './routes/gate.js'
 import { recommendRouter } from './routes/recommend.js'
 import { readingRouter } from './routes/reading.js'
+import { reportsRouter } from './routes/reports.js'
+import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
-import { scan, backfillRuleScores, backfillAliases } from './scanner.js'
+import { scan, backfillRuleScores, backfillAliases, backfillAgentAttribution } from './scanner.js'
 import { resolveAgentDirs } from './agents.js'
+import { bindAgentRoots } from './routes/scan.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -45,6 +48,7 @@ app.use('/api/wiki', wikiRouter)
 app.use('/api/gate', gateRouter)
 app.use('/api/recommend', recommendRouter)
 app.use('/api/reading', readingRouter)
+app.use('/api/reports', reportsRouter)
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
 
@@ -71,6 +75,10 @@ async function startWatcherForRoots() {
 app.listen(PORT, async () => {
   console.log(`knowledge dashboard listening on http://127.0.0.1:${PORT}`)
   await getDb()
+  // 存量扫描根自动绑定 agent：挂载时未写的（历史根）按 KNOWN_AGENTS 目录映射补齐
+  bindAgentRoots()
+    .then(n => { if (n > 0) console.log(`agent roots bound: ${n}`) })
+    .catch(e => console.error('agent root bind failed', e))
   await startWatcherForRoots()
   // 启动 LLM 队列调度器：自动恢复/补充 pending 蒸馏任务
   startLlmFeeder().catch((e) => console.error('llm feeder start failed', e))
@@ -84,10 +92,17 @@ app.listen(PORT, async () => {
   backfillAliases()
     .then((n) => { if (n > 0) console.log(`alias backfilled: ${n} files`) })
     .catch((e) => console.error('alias backfill failed', e))
+  // 存量归因回填：frontmatter 声明（文件头赢）不动，无声明按扫描根绑定重算（分批 200 不阻塞启动）
+  backfillAgentAttribution()
+    .then((n) => { if (n > 0) console.log(`source_agent backfilled: ${n} files`) })
+    .catch((e) => console.error('agent attribution backfill failed', e))
   // 词条标题回填：已蒸馏但标题为空的行，从 entry.md 首行提取（不阻塞启动）
   backfillWikiTitles()
     .then((n) => { if (n > 0) console.log(`wiki title backfilled: ${n} entries`) })
     .catch((e) => console.error('wiki title backfill failed', e))
+
+  // 每日推式出口：boot 补当天日报（已存在幂等跳过），此后每 5 分钟跨天检查自动生成
+  startDailyReportJob()
 
   // Agent 根自动扫描：watcher 只覆盖运行期变化，启动兜底 + 周期增量补齐停机期间的文件变更。
   // 范围 = KNOWN_AGENTS 已解析存在且已挂载启用的扫描根（Qoder、LingxiClaw 等自动纳入）
@@ -104,7 +119,7 @@ app.listen(PORT, async () => {
       const enabled = new Set(rootRows.map((r: any) => r.path))
       const roots = dirs.map(a => a.path).filter(p => enabled.has(p))
       if (roots.length === 0) return
-      const result = await scan({ roots, full: false })
+      const result = await scan({ roots, full: false, source: reason })
       recordScan(result)
       console.log(`agent rescan(${reason}): ${roots.length} root(s) · ${Date.now() - t0}ms · +${result.added} ~${result.updated} -${result.deleted} 门禁${result.gated}`)
     } finally {
@@ -113,4 +128,17 @@ app.listen(PORT, async () => {
   }
   setTimeout(() => { agentRescan('boot').catch(e => console.error('agent rescan failed', e)) }, 15 * 1000)
   setInterval(() => { agentRescan('interval').catch(e => console.error('agent rescan failed', e)) }, AGENT_RESCAN_MS)
+
+  // WAL 治理：boot 截断存量 WAL（排在 15s 重扫之前），此后每 10 分钟 best-effort 截断；
+  // 其他进程（如 MCP 子进程）持锁时本轮放弃（busy / null），下轮再试
+  setTimeout(() => {
+    checkpointWal().then(r => {
+      if (r) console.log(`wal checkpoint(boot): busy=${r.busy} frames=${r.frames} -> ${r.checkpointed}`)
+    }).catch(e => console.error('wal checkpoint failed', e))
+  }, 3 * 1000)
+  setInterval(() => {
+    checkpointWal().then(r => {
+      if (r && r.checkpointed > 0) console.log(`wal checkpoint(interval): frames=${r.frames} -> ${r.checkpointed}`)
+    }).catch(e => console.error('wal checkpoint failed', e))
+  }, 10 * 60 * 1000)
 })

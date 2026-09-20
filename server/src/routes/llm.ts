@@ -7,6 +7,7 @@ import { nodesCacheSync, getHealth, pruneNodeOverrides } from '../llm/distillNod
 import { getProviders, getDefaultModel, getDefaultProvider, mergeProvidersWithPresets } from '../llm/llmClient.js'
 import { resetModelsInstance } from '../llm/index.js'
 import { probeOllamaModels, getOllamaEnabledModels, getOllamaModelTypes, getEmbeddingConfig, callEmbedding, searchEmbeddings, countEmbeddings, guessModelType } from '../llm/embeddings.js'
+import { readFileHead, getTriageBreakerState, resetTriageBreaker } from '../llm/llmWorker.js'
 
 export const llmRouter = Router()
 
@@ -272,12 +273,15 @@ llmRouter.get('/logs/service', async (req, res) => {
         await fh.close()
       }
     } catch { /* 日志文件不存在时返回空列表 */ }
-    let arr = raw.split('\n').filter(Boolean).slice(-parseInt(lines))
+    let arr = raw.split('\n').filter(Boolean)
+    // total = 读取窗口（≤1MB 尾部）内的总行数（过滤前）：徽标展示数量与列表「再往前没有更多」语义一致
+    const total = arr.length
+    arr = arr.slice(-parseInt(lines))
     if (kw) {
       const k = kw.toLowerCase()
       arr = arr.filter(l => l.toLowerCase().includes(k))
     }
-    res.json({ items: arr, total: arr.length, file: logPath })
+    res.json({ items: arr, total, file: logPath })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e) })
   }
@@ -503,5 +507,81 @@ llmRouter.post('/embeddings/search', async (req, res) => {
   } catch (e: any) {
     console.error('embeddings search failed', e)
     res.json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+/** triage 预算兜底：body 未带 budgetTokens 且 config 未配置时的一次性防爆仓上限 */
+const TRIAGE_BUDGET_FALLBACK = 5_000_000
+
+/** triage 预算上限：body.budgetTokens 优先，其次 config 键 llm.triageBudgetTokens，最后兜底常量 */
+async function resolveTriageBudget(db: any, budgetTokens: unknown): Promise<number> {
+  if (Number(budgetTokens) > 0) return Math.floor(Number(budgetTokens))
+  const row = await (await db.prepare("SELECT value FROM config WHERE key = 'llm.triageBudgetTokens'")).get() as any
+  if (row && Number(row.value) > 0) return Math.floor(Number(row.value))
+  return TRIAGE_BUDGET_FALLBACK
+}
+
+/**
+ * 按需精选入队（pull 模式）：从积压中按 rule_score 挑未蒸馏文件投蒸馏队列。
+ * - 预算防爆仓：逐篇按文件头部字节/2 估 token，累计超限即停（当前这篇不入队）
+ * - 幂等：llm_state='done'（已有成功蒸馏产物）的文件不进候选；已在队列/运行中的按文件去重跳过
+ * - 熔断联动：连续失败熔断时拒绝新批次（resetTripped: true 可复位后继续）
+ */
+llmRouter.post('/triage-distill', async (req, res) => {
+  try {
+    const db = await getDb()
+    const { domains, limit, budgetTokens, resetTripped } = req.body || {}
+    const breaker = getTriageBreakerState()
+    if (breaker.tripped && !resetTripped) {
+      return res.json({
+        success: false, tripped: true, enqueued: 0, skipped: 0, budgetUsedTokens: 0,
+        message: `蒸馏熔断中（triage 批次已连续失败 ${breaker.consecutiveFailures} 次），已暂停消费；确认恢复后带 resetTripped: true 重试`
+      })
+    }
+    if (resetTripped) resetTriageBreaker()
+    const maxTokens = await resolveTriageBudget(db, budgetTokens)
+    // limit 语义 = 入队总数上限：未传默认 500；显式传值必须是正整数，否则 400 拒绝
+    // （旧逻辑 parseInt('0')=0 为 falsy 静默回退 500，曾把无意义的 limit:0 放大成真实入队）
+    let lim = 500
+    if (limit !== undefined) {
+      const n = Number(limit)
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+        return res.status(400).json({ success: false, error: 'limit 必须为正整数' })
+      }
+      lim = n
+    }
+    // 候选：active + 有内容（size>0，库内无 content 列以体积为证）+ 未成功蒸馏（llm_state != 'done'）
+    let where = "f.status = 'active' AND f.llm_state != 'done' AND COALESCE(f.size, 0) > 0"
+    const params: any[] = []
+    if (Array.isArray(domains) && domains.length) {
+      where += ` AND d.name IN (${domains.map(() => '?').join(', ')})`
+      params.push(...domains.map(String))
+    }
+    const candidates = await (await db.prepare(`
+      SELECT f.id, f.path FROM files f
+      LEFT JOIN domains d ON f.domain_id = d.id
+      WHERE ${where}
+      ORDER BY COALESCE(f.rule_score, 0) DESC, f.id ASC
+      LIMIT ${lim}`)).all(params) as any[]
+    const provider = await getDefaultProvider()
+    const model = await getDefaultModel()
+    let budgetUsed = 0
+    let enqueued = 0
+    for (const c of candidates) {
+      // 队列去重：同一文件已在内存队列/运行中时不重复投递（与 quality-backfill 同口径）
+      if (llmQueue.hasFile(c.id)) continue
+      // 与蒸馏同一截断口径（512KB 头部）估 token，避免「按整文件估」把大文件全部挡在预算外
+      const head = await readFileHead(c.path)
+      const tokens = Math.ceil(head.length / 2)
+      // 预算耗尽即停：当前这篇不入队，剩余候选一并计入 skipped
+      if (budgetUsed + tokens > maxTokens) break
+      budgetUsed += tokens
+      llmQueue.enqueue({ fileId: c.id, provider, model, prompt: '', options: { origin: 'triage' } })
+      enqueued++
+    }
+    res.json({ success: true, enqueued, skipped: candidates.length - enqueued, budgetUsedTokens: budgetUsed })
+  } catch (e: any) {
+    console.error('triage-distill trigger failed', e)
+    res.status(500).json({ success: false, message: String(e?.message || e) })
   }
 })

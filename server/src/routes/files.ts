@@ -3,6 +3,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from '../db.js'
 import { openFile, revealFile } from '../opener.js'
+import { buildReaderDoc } from '../reader.js'
 import { scan, ScanOptions } from '../scanner.js'
 import { llmQueue } from '../llm/index.js'
 import { getProviders, getDefaultModel } from '../llm/llmClient.js'
@@ -139,9 +140,90 @@ filesRouter.post('/:id/open', async (req, res) => {
       const f = await (await db.prepare('SELECT path FROM files WHERE id = ?')).get(fileId) as any
       const source = String(req.body?.source || 'other').replace(/'/g, "''").slice(0, 20)
       if (f) await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${fileId}, '${String(f.path).replace(/'/g, "''")}', '${source}')`)
+      // R1 回溯：池内文件返回上次阅读进度，供前端 toast「上次读到 X%」（读毕 100% 不再提示）
+      const rec = await (await db.prepare('SELECT progress FROM recommendations WHERE file_id = ?')).get(fileId) as any
+      if (rec && rec.progress > 0 && rec.progress < 100) (result as any).lastProgress = rec.progress
     } catch { /* 埋点失败不影响打开 */ }
   }
   res.json(result)
+})
+
+// ---- R4 站内阅读器 ----
+/** 站内渲染内容上限：2MB 截断（超大文件引导外部打开） */
+const READER_MAX_BYTES = 2 * 1024 * 1024
+/** 资源代理单文件上限 */
+const ASSET_MAX_BYTES = 5 * 1024 * 1024
+/** 资源代理后缀白名单（svg 作为 <img> 加载不执行脚本，另加 CSP sandbox 双保险） */
+const ASSET_EXTS: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.svg': 'image/svg+xml', '.svgz': 'image/svg+xml',
+}
+
+/** 校验目标路径在某个已启用扫描根内（与 opener.ts 根边界同模式） */
+export async function withinScanRoots(db: any, target: string): Promise<boolean> {
+  const roots = await (await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')).all() as any[]
+  // 严格边界：等根本身，或以其 + 路径分隔符为前缀（裸 startsWith 会误放行 /foo/bar2 这类兄弟目录）
+  return roots.some(r => target === r.path || target.startsWith(r.path + path.sep))
+}
+
+/** 站内阅读内容：md/html 清洗渲染后返回完整 html 文档（前端 iframe srcdoc 注入） */
+filesRouter.get('/:id/content', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.params.id)
+    const f = await (await db.prepare("SELECT path, name, title, ext FROM files WHERE id = ? AND status = 'active'")).get(fileId) as any
+    if (!f) return res.json({ success: false, message: '文件不存在或已删除' })
+    const ext = String(f.ext || path.extname(f.path)).toLowerCase()
+    if (!['.md', '.html', '.htm'].includes(ext)) {
+      return res.json({ success: false, unsupported: true, message: '站内仅支持 md / html 阅读，已为你准备外部打开' })
+    }
+    if (!(await withinScanRoots(db, f.path))) return res.json({ success: false, message: '文件不在已注册扫描根目录下' })
+    const stat = await fs.stat(f.path).catch(() => null)
+    if (!stat || !stat.isFile()) return res.json({ success: false, message: '文件已不在磁盘上' })
+    const fh = await fs.open(f.path, 'r')
+    try {
+      const len = Math.min(stat.size, READER_MAX_BYTES)
+      const buf = Buffer.alloc(len)
+      await fh.read(buf, 0, len, 0)
+      const truncated = stat.size > READER_MAX_BYTES
+      const { html, toc } = buildReaderDoc(buf.toString('utf8'), ext, fileId, f.title || f.name)
+      // R4-M2：进阅读器即记一次打开（source=reader，与外部打开并列），并带出池内进度供前端回位
+      const rec = await (await db.prepare('SELECT progress FROM recommendations WHERE file_id = ?')).get(fileId) as any
+      await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${fileId}, '${String(f.path).replace(/'/g, "''")}', 'reader')`)
+      res.json({ success: true, html, toc, title: f.title || f.name, truncated, inPool: !!rec, lastProgress: rec && rec.progress > 0 && rec.progress < 100 ? rec.progress : 0 })
+    } finally {
+      await fh.close()
+    }
+  } catch (e: any) {
+    console.error('reader content failed', e)
+    res.json({ success: false, message: '内容读取失败：' + String(e?.message || e) })
+  }
+})
+
+/** 站内阅读资源代理：相对路径图片经此读取（后缀白名单 + 5MB + 根边界 + CSP sandbox） */
+filesRouter.get('/:id/asset', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.params.id)
+    const rel = String(req.query.rel || '')
+    if (!rel || rel.includes('\0')) return res.status(404).end()
+    const f = await (await db.prepare("SELECT path FROM files WHERE id = ? AND status = 'active'")).get(fileId) as any
+    if (!f) return res.status(404).end()
+    const target = path.resolve(path.dirname(f.path), rel)
+    if (target === path.resolve(f.path) || !(await withinScanRoots(db, target))) return res.status(404).end()
+    const ext = path.extname(target).toLowerCase()
+    const mime = ASSET_EXTS[ext]
+    if (!mime) return res.status(404).end()
+    const stat = await fs.stat(target).catch(() => null)
+    if (!stat || !stat.isFile() || stat.size > ASSET_MAX_BYTES) return res.status(404).end()
+    // CSP sandbox：文档进唯一 origin，svg 内脚本即使直接访问也不执行
+    res.set('Content-Security-Policy', 'sandbox')
+    res.set('Content-Type', mime)
+    res.set('Cache-Control', 'private, max-age=86400')
+    res.send(await fs.readFile(target))
+  } catch {
+    res.status(404).end()
+  }
 })
 
 filesRouter.post('/:id/reveal', async (req, res) => {

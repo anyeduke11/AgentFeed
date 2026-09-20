@@ -16,18 +16,25 @@ export interface ExtractedMeta {
   agent: string | null
 }
 
-function inferAgent(filePath: string, scanRoots: string[], frontmatterAgent?: string): string | null {
+/** 扫描根 + agent 绑定（scan_roots.path / scan_roots.agent） */
+export interface RootBinding { path: string; agent: string | null }
+
+/** agent 归属：frontmatter 显式声明 > 扫描根绑定（挂载时写入，不再靠猜）> 根后首段目录名兜底（手工根无绑定时） */
+export function inferAgent(filePath: string, rootBindings: RootBinding[], frontmatterAgent?: string): string | null {
   if (frontmatterAgent) return frontmatterAgent
-  const relative = scanRoots
-    .map(r => {
-      const p = r.replace(/\/$/, '')
-      if (filePath.startsWith(p)) return filePath.slice(p.length + 1)
+  const bound = rootBindings.find(b => filePath === b.path || filePath.startsWith(b.path.replace(/\/$/, '') + path.sep))
+  if (bound?.agent) return bound.agent
+  const relative = rootBindings
+    .map(b => {
+      const p = b.path.replace(/\/$/, '')
+      if (filePath === p || filePath.startsWith(p + path.sep)) return filePath.slice(p.length + 1)
       return null
     })
     .filter(Boolean)[0]
   if (relative) {
     const parts = relative.split(path.sep)
-    if (parts.length > 0) return parts[0]
+    // 仅当存在目录段时兜底（文件直接位于根下没有可归因的目录名）
+    if (parts.length > 1 && parts[0]) return parts[0]
   }
   return null
 }
@@ -35,7 +42,7 @@ function inferAgent(filePath: string, scanRoots: string[], frontmatterAgent?: st
 /** 元数据提取只读文件头部，避免超大文件整读导致内存峰值（contentText 下游本来就有截断） */
 const HEAD_READ_LIMIT = 512 * 1024
 
-async function readHead(filePath: string, limit: number = HEAD_READ_LIMIT): Promise<string> {
+export async function readHead(filePath: string, limit: number = HEAD_READ_LIMIT): Promise<string> {
   const fh = await fs.open(filePath, 'r')
   try {
     const len = Math.min((await fh.stat()).size, limit)
@@ -87,7 +94,7 @@ export async function extractAliasFromFile(filePath: string, ext: string, fallba
   return aliasFromText(ext, text, fallback)
 }
 
-export async function extractMd(filePath: string, scanRoots: string[]): Promise<ExtractedMeta> {
+export async function extractMd(filePath: string, rootBindings: RootBinding[]): Promise<ExtractedMeta> {
   const raw = await readHead(filePath)
   let parsed: { data: any; content: string }
   try {
@@ -98,7 +105,7 @@ export async function extractMd(filePath: string, scanRoots: string[]): Promise<
   }
   const title = parsed.data?.title || parsed.data?.Title || null
   const date = parsed.data?.date || parsed.data?.Date || parsed.data?.created || null
-  const agent = inferAgent(filePath, scanRoots, parsed.data?.agent)
+  const agent = inferAgent(filePath, rootBindings, parsed.data?.agent)
   const contentText = parsed.content
     .replace(/^#+\s+.+$/gm, '')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
@@ -109,7 +116,7 @@ export async function extractMd(filePath: string, scanRoots: string[]): Promise<
   return { title, alias, date, source: null, contentText, agent }
 }
 
-export async function extractHtml(filePath: string, scanRoots: string[]): Promise<ExtractedMeta> {
+export async function extractHtml(filePath: string, rootBindings: RootBinding[]): Promise<ExtractedMeta> {
   const raw = await readHead(filePath)
   const $ = cheerio.load(raw)
   const title = $('title').text().trim() || $('h1').first().text().trim() || null
@@ -119,7 +126,7 @@ export async function extractHtml(filePath: string, scanRoots: string[]): Promis
     $('time').attr('datetime') ||
     null
   const source = $('meta[name="source"]').attr('content') || $('link[rel="canonical"]').attr('href') || null
-  const agent = inferAgent(filePath, scanRoots)
+  const agent = inferAgent(filePath, rootBindings)
   const contentText = $('body')
     .text()
     .replace(/\s+/g, ' ')

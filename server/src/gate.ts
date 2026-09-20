@@ -4,7 +4,11 @@ import { fileURLToPath } from 'url'
 import { getDb } from './db.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-export const GATE_ARCHIVE_DIR = path.join(__dirname, '../data/gate-archives')
+// 与 db.ts 同源的数据目录覆盖（归档目录跟随数据目录走，测试不污染仓库 server/data）
+const DATA_DIR = process.env.AGENTFEED_DATA_DIR
+  ? path.resolve(process.env.AGENTFEED_DATA_DIR)
+  : path.join(__dirname, '../data')
+export const GATE_ARCHIVE_DIR = path.join(DATA_DIR, 'gate-archives')
 
 const CSV_COLUMNS = ['path', 'name', 'ext', 'title', 'size', 'md5', 'gate_reason', 'created_at', 'updated_at']
 
@@ -251,62 +255,99 @@ export function isExcludedPath(fp: string, cfg: GateConfig, roots: string[] = []
   return false
 }
 
+/** 门禁裁决：ruleId/metric 记录命中的规则与实际指标值（gate_records 落库，质量口径可观测） */
+export interface GateVerdict {
+  pass: boolean
+  reason?: string
+  ruleId?: 'blacklist' | 'minSize' | 'minChars' | 'codeRatio'
+  metric?: number | string
+}
+
 /** Gate 2 + 3：大小与内容门禁（拦截则记入 gate_records，可恢复） */
-export function checkGate(fp: string, size: number, raw: string, cfg: GateConfig): { pass: boolean; reason?: string } {
+export function checkGate(fp: string, size: number, raw: string, cfg: GateConfig): GateVerdict {
   if (!cfg.enabled) return { pass: true }
   // 路径白名单：最高优先级，无视大小与内容门禁强制入库（蒸馏走常规 pending 队列）
   if (isPathWhitelisted(fp, cfg)) return { pass: true }
   // 文件黑名单：优先级高于文件名/关键词白名单（显式拦截压过便捷放行），命中记入 gate_records 可恢复
   if (cfg.blacklistEnabled) {
     const hit = matchBlacklist(fp, cfg.blacklist)
-    if (hit) return { pass: false, reason: `命中黑名单（${hit}）` }
+    if (hit) return { pass: false, reason: `命中黑名单（${hit}）`, ruleId: 'blacklist', metric: hit }
   }
   const base = path.basename(fp)
   // 白名单直通
   if (cfg.filenameWhitelistEnabled && cfg.filenameWhitelist.some(w => base.toLowerCase() === w.toLowerCase())) return { pass: true }
   if (cfg.keywordsEnabled && cfg.keywords.some(k => base.toLowerCase().includes(k.toLowerCase()))) return { pass: true }
   // Gate 2 大小下限
-  if (cfg.minSizeEnabled && size < cfg.minSize) return { pass: false, reason: `文件过小（${size}B < ${cfg.minSize}B）` }
+  if (cfg.minSizeEnabled && size < cfg.minSize) return { pass: false, reason: `文件过小（${size}B < ${cfg.minSize}B）`, ruleId: 'minSize', metric: size }
   // Gate 3 内容门禁：去 frontmatter、去代码围栏、去 md 语法符号后的有效字符数
   const noFence = raw.replace(/```[\s\S]*?```/g, '')
-  const text = noFence
-    .replace(/^---\n[\s\S]*?\n---\n/, '')
-    .replace(/^#+\s+.+$/gm, '')
-    .replace(/[#*_`~>\-|]/g, '')
-    .replace(/\s+/g, '')
-  if (cfg.minCharsEnabled && text.length < cfg.minChars) return { pass: false, reason: `正文过短（${text.length} 字符 < ${cfg.minChars}）` }
+  const text = countEffectiveChars(raw)
+  if (cfg.minCharsEnabled && text < cfg.minChars) return { pass: false, reason: `正文过短（${text} 字符 < ${cfg.minChars}）`, ruleId: 'minChars', metric: text }
   // Gate 3 代码占比（围栏行 / 总行）
   const totalLines = raw.split('\n').length
   const keptLines = noFence.split('\n').length
   const codeLines = totalLines - keptLines
   if (cfg.codeRatioEnabled && totalLines > 0 && codeLines / totalLines > cfg.codeRatio) {
-    return { pass: false, reason: `代码占比过高（${Math.round((codeLines / totalLines) * 100)}% > ${Math.round(cfg.codeRatio * 100)}%）` }
+    return { pass: false, reason: `代码占比过高（${Math.round((codeLines / totalLines) * 100)}% > ${Math.round(cfg.codeRatio * 100)}%）`, ruleId: 'codeRatio', metric: codeLines / totalLines }
   }
   return { pass: true }
 }
 
-/** Gate 1 存量清洗：对已入库但命中排除规则的记录级联删除。
- *  排除判断与 isExcludedPath 一致（扫描根相对），避免误删挂载为扫描根的 agent 目录内容。 */
+/** 有效正文字符数：去 frontmatter、去代码围栏、去 md 语法符号（checkGate / checkGateSample 共用） */
+function countEffectiveChars(raw: string): number {
+  return raw
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^---\n[\s\S]*?\n---\n/, '')
+    .replace(/^#+\s+.+$/gm, '')
+    .replace(/[#*_`~>\-|]/g, '')
+    .replace(/\s+/g, '')
+    .length
+}
+
+/**
+ * 大文件抽样门禁：超过 SIZE_ANALYZE_LIMIT 的文件只读头部（64KB）评估，
+ * 跑黑名单 + 正文字符下限（codeRatio 抽样不可靠，跳过）。优先级与 checkGate 一致：
+ * 路径白名单 > 黑名单 > 文件名/关键词白名单 > 大小下限（真实 size）> 字符下限（抽样）。
+ */
+export function checkGateSample(fp: string, size: number, head: string, cfg: GateConfig): GateVerdict {
+  if (!cfg.enabled) return { pass: true }
+  if (isPathWhitelisted(fp, cfg)) return { pass: true }
+  if (cfg.blacklistEnabled) {
+    const hit = matchBlacklist(fp, cfg.blacklist)
+    if (hit) return { pass: false, reason: `命中黑名单（${hit}）`, ruleId: 'blacklist', metric: hit }
+  }
+  const base = path.basename(fp)
+  if (cfg.filenameWhitelistEnabled && cfg.filenameWhitelist.some(w => base.toLowerCase() === w.toLowerCase())) return { pass: true }
+  if (cfg.keywordsEnabled && cfg.keywords.some(k => base.toLowerCase().includes(k.toLowerCase()))) return { pass: true }
+  if (cfg.minSizeEnabled && size < cfg.minSize) return { pass: false, reason: `文件过小（${size}B < ${cfg.minSize}B）`, ruleId: 'minSize', metric: size }
+  if (cfg.minCharsEnabled) {
+    const text = countEffectiveChars(head)
+    if (text < cfg.minChars) return { pass: false, reason: `正文过短（${text} 字符 < ${cfg.minChars}，抽样头部）`, ruleId: 'minChars', metric: text }
+  }
+  return { pass: true }
+}
+
+/** Gate 1 存量清洗：对已入库但命中排除规则的记录墓碑化（知识资产保留，规则调整后可复活）。
+ *  排除判断与 isExcludedPath 一致（扫描根相对），避免误伤挂载为扫描根的 agent 目录内容。 */
 export async function purgeExcludedFiles(cfg: GateConfig): Promise<number> {
   const db = await getDb()
   const rootRows = await (await db.prepare('SELECT path FROM scan_roots')).all() as any[]
   const roots = rootRows.map((r: any) => r.path)
-  const rows = await (await db.prepare('SELECT id, path FROM files')).all() as any[]
-  let purged = 0
+  const rows = await (await db.prepare("SELECT id, path FROM files WHERE status = 'active'")).all() as any[]
+  const tombIds: number[] = []
   for (const r of rows) {
-    if (!isExcludedPath(r.path, cfg, roots)) continue
-    await db.exec(`DELETE FROM file_tags WHERE file_id = ${r.id}`)
-    await db.exec(`DELETE FROM file_versions WHERE file_id = ${r.id} OR related_file_id = ${r.id}`)
-    await db.exec(`DELETE FROM llm_feedback WHERE file_id = ${r.id}`)
-    await db.exec(`DELETE FROM llm_call_logs WHERE file_id = ${r.id}`)
-    await db.exec(`DELETE FROM wiki_entries_meta WHERE file_id = ${r.id}`)
-    await db.exec(`DELETE FROM files WHERE id = ${r.id}`)
-    purged++
+    if (isExcludedPath(r.path, cfg, roots)) tombIds.push(r.id)
+  }
+  let purged = 0
+  for (let i = 0; i < tombIds.length; i += 100) {
+    const chunk = tombIds.slice(i, i + 100)
+    await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id IN (${chunk.join(',')})`)
+    purged += chunk.length
   }
   return purged
 }
 
-export interface GateEntryIssue { entry: string; reason: string }
+export interface GateEntryIssue { entry: string; reason: string; fix?: string }
 export interface GateFieldValidity {
   field: string
   label: string
@@ -328,26 +369,26 @@ export interface GateFieldValidity {
 export function validateGateConfig(cfg: GateConfig): { masterEnabled: boolean; fields: GateFieldValidity[] } {
   const fields: GateFieldValidity[] = []
 
-  const field = (name: string, label: string, ruleEnabled: boolean, entries: string[], check: (e: string, ctx: { issue: (r: string) => void; warn: (r: string) => void }) => void): GateFieldValidity => {
+  const field = (name: string, label: string, ruleEnabled: boolean, entries: string[], check: (e: string, ctx: { issue: (r: string, fix?: string) => void; warn: (r: string, fix?: string) => void }) => void): GateFieldValidity => {
     const issues: GateEntryIssue[] = []
     const warnings: GateEntryIssue[] = []
     for (const raw of entries) {
       const e = String(raw).trim()
-      if (!e) { issues.push({ entry: String(raw), reason: '空条目' }); continue }
-      check(e, { issue: r => issues.push({ entry: e, reason: r }), warn: r => warnings.push({ entry: e, reason: r }) })
+      if (!e) { issues.push({ entry: String(raw), reason: '空条目', fix: '删除空条目' }); continue }
+      check(e, { issue: (r, fix) => issues.push({ entry: e, reason: r, fix }), warn: (r, fix) => warnings.push({ entry: e, reason: r, fix }) })
     }
     return { field: name, label, enabled: cfg.enabled && ruleEnabled, total: entries.length, issues, warnings }
   }
 
   // 排除目录：isExcludedPath 按 rel.split(path.sep) 后与条目精确比对，条目含分隔符永不命中
   fields.push(field('excludeDirs', '排除目录', cfg.excludeDirsEnabled, cfg.excludeDirs, (e, { issue }) => {
-    if (e.includes('/') || e.includes('\\')) issue('包含路径分隔符，目录按单级名称匹配，永远不会命中')
+    if (e.includes('/') || e.includes('\\')) issue('包含路径分隔符，目录按单级名称匹配，永远不会命中', `改为单级目录名「${e.split(/[\\/]/).pop()}」，匹配任意层级下的同名目录`)
   }))
 
   // 文件名白名单：basename 精确相等比对
   fields.push(field('filenameWhitelist', '文件名白名单', cfg.filenameWhitelistEnabled, cfg.filenameWhitelist, (e, { issue }) => {
-    if (e.includes('/')) issue('精确匹配文件名，不含路径，永远不会命中')
-    else if (e.includes('*') || e.includes('?')) issue('不支持通配符（精确匹配文件名）；包含匹配请用关键词白名单')
+    if (e.includes('/')) issue('精确匹配文件名，不含路径，永远不会命中', `去掉路径部分，只保留「${e.split('/').pop()}」`)
+    else if (e.includes('*') || e.includes('?')) issue('不支持通配符（精确匹配文件名）；包含匹配请用关键词白名单', '去掉通配符改为精确文件名，或把关键词移入「关键词白名单」')
   }))
 
   // 关键词白名单：basename 包含即放行，任意非空文本都有效
@@ -357,38 +398,38 @@ export function validateGateConfig(cfg: GateConfig): { masterEnabled: boolean; f
   fields.push(field('blacklist', '文件黑名单', cfg.blacklistEnabled, cfg.blacklist, (e, { issue, warn }) => {
     if (e.startsWith('/')) {
       if (!(e.length > 2 && e.endsWith('/'))) {
-        issue('以 / 开头但未以 / 结尾，按纯文本匹配文件名（几乎不会命中）；正则需写成 /…/ 形式')
+        issue('以 / 开头但未以 / 结尾，按纯文本匹配文件名（几乎不会命中）；正则需写成 /…/ 形式', `写成「${e}/」启用正则，或去掉开头的 / 改为纯文本匹配`)
         return
       }
-      try { new RegExp(e.slice(1, -1), 'i') } catch (err: any) { issue('正则语法错误：' + String(err?.message || err)) }
+      try { new RegExp(e.slice(1, -1), 'i') } catch (err: any) { issue('正则语法错误：' + String(err?.message || err), '修正正则语法（可在浏览器控制台 new RegExp 试写）') }
       return
     }
-    if (e.startsWith('^') || e.endsWith('$')) warn('疑似正则语法，将按纯文本匹配文件名；正则需写成 /…/ 形式')
+    if (e.startsWith('^') || e.endsWith('$')) warn('疑似正则语法，将按纯文本匹配文件名；正则需写成 /…/ 形式', '如需正则语义写成 /…/ 形式；纯文本匹配请去掉 ^ 和 $')
   }))
 
   // 路径白名单：绝对路径前缀匹配（条目尾部斜杠会被归一化）
   fields.push(field('pathWhitelist', '路径白名单', cfg.pathWhitelistEnabled, cfg.pathWhitelist, (e, { issue }) => {
-    if (!e.startsWith('/')) issue('请填写绝对路径（以 / 开头），相对路径永远不会命中')
+    if (!e.startsWith('/')) issue('请填写绝对路径（以 / 开头），相对路径永远不会命中', `改为绝对路径，如「${process.cwd()}/${e}」`)
     else if (e.replace(/\/+$/, '') === '') issue('根路径 / 条目会被忽略；如需放行全部请直接关闭门禁')
   }))
 
   // 数值规则：NaN/越界为无效，0 值形同关闭为存疑
-  const numeric = (name: string, label: string, ruleEnabled: boolean, v: number, check: (e: string, ctx: { issue: (r: string) => void; warn: (r: string) => void }) => void): GateFieldValidity => {
+  const numeric = (name: string, label: string, ruleEnabled: boolean, v: number, check: (e: string, ctx: { issue: (r: string, fix?: string) => void; warn: (r: string, fix?: string) => void }) => void): GateFieldValidity => {
     const issues: GateEntryIssue[] = []
     const warnings: GateEntryIssue[] = []
     const e = String(v)
-    if (!Number.isFinite(v)) issues.push({ entry: e, reason: '不是有效数值' })
-    else check(e, { issue: r => issues.push({ entry: e, reason: r }), warn: r => warnings.push({ entry: e, reason: r }) })
+    if (!Number.isFinite(v)) issues.push({ entry: e, reason: '不是有效数值', fix: '填入有效数字' })
+    else check(e, { issue: (r, fix) => issues.push({ entry: e, reason: r, fix }), warn: (r, fix) => warnings.push({ entry: e, reason: r, fix }) })
     return { field: name, label, enabled: cfg.enabled && ruleEnabled, total: 1, issues, warnings }
   }
-  const zeroWarn = (v: number) => (e: string, { warn }: { warn: (r: string) => void }) => {
-    if (v <= 0) warn('0 表示不拦截任何文件，形同关闭')
+  const zeroWarn = (v: number) => (e: string, { warn }: { warn: (r: string, fix?: string) => void }) => {
+    if (v <= 0) warn('0 表示不拦截任何文件，形同关闭', '改为大于 0 的数值，或关闭该规则开关')
   }
   fields.push(numeric('minSize', '最小文件大小', cfg.minSizeEnabled, cfg.minSize, zeroWarn(cfg.minSize)))
   fields.push(numeric('minChars', '最小正文字符', cfg.minCharsEnabled, cfg.minChars, zeroWarn(cfg.minChars)))
   fields.push(numeric('codeRatio', '代码占比上限', cfg.codeRatioEnabled, cfg.codeRatio, (e, { issue, warn }) => {
-    if (cfg.codeRatio < 0 || cfg.codeRatio > 1) issue('需在 0~1 之间')
-    else if (cfg.codeRatio <= 0) warn('0 表示不拦截任何文件，形同关闭')
+    if (cfg.codeRatio < 0 || cfg.codeRatio > 1) issue('需在 0~1 之间', '填入 0~1 之间的小数，如 0.6')
+    else if (cfg.codeRatio <= 0) warn('0 表示不拦截任何文件，形同关闭', '改为大于 0 的数值，或关闭该规则开关')
   }))
 
   return { masterEnabled: cfg.enabled, fields }

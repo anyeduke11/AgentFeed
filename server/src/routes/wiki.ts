@@ -2,6 +2,7 @@ import { Router } from 'express'
 import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from '../db.js'
+import { withinScanRoots } from './files.js'
 
 export const wikiRouter = Router()
 
@@ -125,6 +126,11 @@ wikiRouter.post('/import/preview', async (req, res) => {
   try {
     const dir = String(req.body?.dir || '').trim()
     if (!dir) return res.json({ ok: false, message: '缺少目录路径' })
+    // 与 open/reveal/asset 同一红线：读磁盘目标必须落在已启用扫描根内
+    const db = await getDb()
+    if (!(await withinScanRoots(db, path.resolve(dir)))) {
+      return res.json({ ok: false, message: '目录不在已启用扫描根内，仅支持从扫描根目录导入' })
+    }
     const st = await fs.stat(dir).catch(() => null)
     if (!st || !st.isDirectory()) return res.json({ ok: false, message: `目录不存在或不可读：${dir}` })
     const entries = await collectExtEntries(dir)
@@ -140,11 +146,15 @@ wikiRouter.post('/import', async (req, res) => {
   try {
     const dir = String(req.body?.dir || '').trim()
     if (!dir) return res.status(400).json({ success: false, message: '缺少目录路径' })
+    // 与 open/reveal/asset 同一红线：读磁盘目标必须落在已启用扫描根内
+    const db = await getDb()
+    if (!(await withinScanRoots(db, path.resolve(dir)))) {
+      return res.status(400).json({ success: false, message: '目录不在已启用扫描根内，仅支持从扫描根目录导入' })
+    }
     const st = await fs.stat(dir).catch(() => null)
     if (!st || !st.isDirectory()) return res.status(400).json({ success: false, message: `目录不存在或不可读：${dir}` })
     const entries = await collectExtEntries(dir)
     await matchExtEntries(entries)
-    const db = await getDb()
     let imported = 0, linked = 0
     for (const e of entries) {
       if (e.match === 'already') continue

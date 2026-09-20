@@ -50,6 +50,24 @@ readingRouter.post('/rate', async (req, res) => {
   }
 })
 
+/** 阅读进度（R1）：25/50/75/100 手动挡。仅池内文件生效（预览打开不记进度）；进度仅展示不参与排序 */
+readingRouter.post('/progress', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.body?.fileId)
+    const progress = parseInt(req.body?.progress)
+    if (isNaN(fileId)) return res.json({ success: false, message: 'fileId 必填' })
+    if (isNaN(progress) || progress < 0 || progress > 100) return res.json({ success: false, message: 'progress 需为 0~100' })
+    const row = await (await db.prepare('SELECT id FROM recommendations WHERE file_id = ?')).get(fileId) as any
+    if (!row) return res.json({ success: false, message: '仅推荐池内文件支持进度记录' })
+    await db.exec(`UPDATE recommendations SET progress = ${progress}, last_progress_at = CURRENT_TIMESTAMP WHERE id = ${row.id}`)
+    res.json({ success: true, progress })
+  } catch (e: any) {
+    console.error('reading progress failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
 /** 执行队列：到期优先（逾期置顶），附带统计 */
 readingRouter.get('/exec', async (req, res) => {
   try {
@@ -118,6 +136,21 @@ readingRouter.post('/exec/:id/dismiss', async (req, res) => {
   }
 })
 
+/** 周阅读目标（R3）：写 config 键 reading.weeklyGoal */
+readingRouter.post('/goal', async (req, res) => {
+  try {
+    const goal = parseInt(req.body?.weeklyGoal)
+    if (isNaN(goal) || goal < 1 || goal > 100) return res.json({ success: false, message: '目标需为 1~100 的整数' })
+    const db = await getDb()
+    await db.exec(`INSERT INTO config (key, value, type, description) VALUES ('reading.weeklyGoal', '${goal}', 'number', '周阅读目标（打分去重篇数）')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+    res.json({ success: true, weeklyGoal: goal })
+  } catch (e: any) {
+    console.error('reading goal failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
 /** 阅读统计（总览回顾区块用） */
 readingRouter.get('/stats', async (req, res) => {
   try {
@@ -138,15 +171,56 @@ readingRouter.get('/stats', async (req, res) => {
       WHERE e.status = 'pending' AND e.due_at < datetime('now', '-7 days')
       ORDER BY e.due_at ASC LIMIT 3`)).all() as any[]
     const staleCount = await (await db.prepare("SELECT COUNT(*) AS n FROM exec_queue WHERE status = 'pending' AND due_at < datetime('now', '-7 days')")).get() as any
+    // 薄弱点（M3）：按领域聚合本周低星（≤2）与逾期堆积，加权取 Top3（低星与逾期同为薄弱信号）
+    const lowStarRows = await (await db.prepare(`
+      SELECT COALESCE(d.name, '未分类') AS name, COUNT(*) AS n
+      FROM reading_feedback rf JOIN files f ON f.id = rf.file_id LEFT JOIN domains d ON f.domain_id = d.id
+      WHERE rf.stars <= 2 AND rf.created_at >= datetime('now', '-7 days')
+      GROUP BY d.id`)).all() as any[]
+    const staleRows = await (await db.prepare(`
+      SELECT COALESCE(d.name, '未分类') AS name, COUNT(*) AS n
+      FROM exec_queue e JOIN files f ON f.id = e.file_id LEFT JOIN domains d ON f.domain_id = d.id
+      WHERE e.status = 'pending' AND e.due_at < datetime('now', '-7 days')
+      GROUP BY d.id`)).all() as any[]
+    const wmap = new Map<string, { name: string; lowStars: number; stale: number }>()
+    for (const r of lowStarRows) wmap.set(r.name, { name: r.name, lowStars: r.n, stale: 0 })
+    for (const r of staleRows) {
+      const w = wmap.get(r.name) || { name: r.name, lowStars: 0, stale: 0 }
+      w.stale = r.n
+      wmap.set(r.name, w)
+    }
+    const weakDomains = [...wmap.values()]
+      .map(w => ({ ...w, total: w.lowStars + w.stale }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 3)
+    // 在读停滞（R1）：进度 >14 天未更新且未到 100%，周卡提示（不自动改状态）
+    const stalled = await (await db.prepare(`
+      SELECT r.file_id, COALESCE(NULLIF(f.title, ''), f.name) AS title, r.progress, r.last_progress_at
+      FROM recommendations r JOIN files f ON f.id = r.file_id
+      WHERE r.status != 'archived' AND r.progress > 0 AND r.progress < 100
+        AND r.last_progress_at IS NOT NULL AND r.last_progress_at < datetime('now', '-14 days')
+      ORDER BY r.last_progress_at ASC LIMIT 3`)).all() as any[]
+    const stalledCount = await (await db.prepare(`
+      SELECT COUNT(*) AS n FROM recommendations
+      WHERE status != 'archived' AND progress > 0 AND progress < 100
+        AND last_progress_at IS NOT NULL AND last_progress_at < datetime('now', '-14 days')`)).get() as any
+    // 周目标（R3）：config 键 reading.weeklyGoal（默认 5），完成 = 本周打分去重篇数
+    const goalRow = await (await db.prepare("SELECT value FROM config WHERE key = 'reading.weeklyGoal'")).get() as any
+    const ratedFiles = await (await db.prepare("SELECT COUNT(DISTINCT file_id) AS n FROM reading_feedback WHERE created_at >= datetime('now', '-7 days')")).get() as any
     res.json({
       opened7: opened7.n,
       openedFiles7: openedFiles.n,
       rated7: rated7.n,
+      weeklyGoal: Math.max(1, parseInt(goalRow?.value) || 5),
+      ratedFiles7: ratedFiles.n,
       avgStars: avgStars.v ? Number(Number(avgStars.v).toFixed(1)) : null,
       dist,
       doneWeek: doneWeek.n,
       staleCount: staleCount.n,
       stale,
+      weakDomains,
+      stalledCount: stalledCount.n,
+      stalled,
       pool: { total: poolRow.n || 0, unread: poolRow.unread || 0 }
     })
   } catch (e: any) {

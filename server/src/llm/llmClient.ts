@@ -95,8 +95,22 @@ const PROVIDER_ERROR_HINTS: Array<{ type?: string; status?: number; hint: string
 ]
 
 /**
+ * 内部错误码（非服务商 HTTP 错误，来自 callLlm / 蒸馏工人 / 治理链路）→ 中文说明。
+ * 与 PROVIDER_ERROR_HINTS 一同落库，前端按结构渲染，用户不必再猜 llm_output_not_json 是什么。
+ */
+const INTERNAL_ERROR_HINTS: Array<{ code: string; hint: string }> = [
+  { code: 'llm_output_not_json', hint: '模型没有按约定返回 JSON（flash 级模型偶发输出截断或格式漂移），系统已强制 json_object 模式，重试通常可恢复' },
+  { code: 'llm_json_parse_failed', hint: '模型输出无法解析为 JSON（多为长输出被截断），可减小批次大小或重试' },
+  { code: 'empty_llm_response', hint: '模型返回空响应（流式通道偶发），重试通常可恢复' },
+  { code: 'no_llm_provider', hint: '未配置可用的 LLM 服务商，请在 设置 → AI 设置 添加服务商并填入 API Key' },
+  { code: 'model_not_found', hint: '模型不存在，可在 设置 → AI 设置 → 服务商 行刷新模型列表后重试' },
+]
+
+/**
  * 把服务商 HTTP 错误（形如 `429: {"error":{"type":"quota_exceeded_error","message":"..."}}`，pi-ai formatProviderError 产物）
- * 翻译为「【状态码 type】中文说明 + 服务端消息 + 截断原始响应」，便于在日志管理中直接排错。
+ * 或内部错误码（llm_output_not_json 等）翻译为结构化 JSON 信封落库：
+ * { kind: 'provider'|'internal', code, status?, message?, hint, raw? }
+ * 前端解析后分行渲染「错误码 / HTTP 状态 / 说明 / 服务端消息 / 原始响应」；无法结构化的保留纯文本（兼容旧行）。
  */
 export function friendlyLlmError(raw: unknown): string {
   let text = String(raw ?? '').trim()
@@ -116,14 +130,27 @@ export function friendlyLlmError(raw: unknown): string {
     serverMsg = String(err?.message || '')
   } catch { /* body 非 JSON（如连接错误），保留原文 */ }
   const hit = PROVIDER_ERROR_HINTS.find(h => (h.type && type === h.type) || (h.status !== undefined && h.status === status && !type))
-  if (!hit && !type && !serverMsg) return status ? `【${status}】${text}` : text.slice(0, 800)
-  const parts = [
-    status || type ? `【${status ?? ''}${type ? (status ? ' ' : '') + type : ''}】` : '',
-    hit?.hint || '',
-    serverMsg ? `服务端消息：${serverMsg}` : '',
-    text.length > 500 ? `原始响应：${text.slice(0, 500)}…` : '',
-  ].filter(Boolean)
-  return parts.join(' ').trim()
+  if (hit || type || serverMsg) {
+    return JSON.stringify({
+      kind: 'provider',
+      code: type || `http_${status}`,
+      status,
+      message: serverMsg || undefined,
+      hint: hit?.hint || '服务商返回了未分类错误，见服务端消息或原始响应',
+      raw: text.length > 500 ? text.slice(0, 500) + '…' : undefined,
+    })
+  }
+  // 内部错误码：llm_output_not_json / llm_json_parse_failed: …（允许带明细后缀）
+  const iHit = INTERNAL_ERROR_HINTS.find(h => text === h.code || text.startsWith(h.code + ':') || text.startsWith(h.code + '：'))
+  if (iHit) {
+    const detail = text.slice(iHit.code.length).replace(/^[:：]\s*/, '')
+    return JSON.stringify({ kind: 'internal', code: iHit.code, message: detail || undefined, hint: iHit.hint })
+  }
+  // 网络层失败（连接重置 / 超时 / DNS 等）
+  if (/timeout|timed?\s?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed|socket hang up|aborted?/i.test(text)) {
+    return JSON.stringify({ kind: 'internal', code: 'network_error', message: text.slice(0, 300), hint: '网络连接失败或超时：检查本机网络与服务商可达性；系统已自动重试仍失败' })
+  }
+  return status ? `【${status}】${text}` : text.slice(0, 800)
 }
 
 /** 调用日志状态细分：failed 按错误特征归入 限流（429/quota）/超时（abort/网络），与日志页过滤项对应 */

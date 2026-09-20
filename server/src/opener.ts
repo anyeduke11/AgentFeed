@@ -11,7 +11,8 @@ export async function openFile(fileId: number): Promise<{ success: boolean; mess
   }
   const rootStmt = await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')
   const root = await rootStmt.all() as any[]
-  const allowed = root.some(r => file.path.startsWith(r.path))
+  // 严格边界：裸 startsWith 会误放行 /foo/bar2 这类兄弟目录
+  const allowed = root.some(r => file.path === r.path || file.path.startsWith(r.path + path.sep))
   if (!allowed) {
     return { success: false, message: '文件不在已注册扫描根目录下' }
   }
@@ -49,7 +50,7 @@ export async function revealFile(fileId: number): Promise<{ success: boolean; me
   }
   const rootStmt = await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')
   const root = await rootStmt.all() as any[]
-  const allowed = root.some(r => file.path.startsWith(r.path))
+  const allowed = root.some(r => file.path === r.path || file.path.startsWith(r.path + path.sep))
   if (!allowed) {
     return { success: false, message: '文件不在已注册扫描根目录下' }
   }

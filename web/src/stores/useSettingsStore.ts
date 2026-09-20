@@ -7,6 +7,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const loading = ref(false)
   const roots = ref<any[]>([])
   const scanStatus = ref<any>({ watcherRunning: false, lastScan: null })
+  const scanJobs = ref<any[]>([])
+  const scanJobsTotal = ref(0)
 
   async function fetchConfig() {
     loading.value = true
@@ -30,6 +32,12 @@ export const useSettingsStore = defineStore('settings', () => {
     scanStatus.value = await api.scan.status()
   }
 
+  async function fetchScanJobs() {
+    const r = await api.scan.jobs()
+    scanJobs.value = r.items || []
+    scanJobsTotal.value = r.total || scanJobs.value.length
+  }
+
   async function addRoot(path: string) {
     const r = await api.scan.addRoot(path)
     await fetchRoots()
@@ -50,5 +58,5 @@ export const useSettingsStore = defineStore('settings', () => {
     return api.scan.rescanRoot(id)
   }
 
-  return { config, loading, roots, scanStatus, fetchConfig, updateConfig, fetchRoots, fetchScanStatus, addRoot, removeRoot, toggleRoot, rescanRoot }
+  return { config, loading, roots, scanStatus, scanJobs, scanJobsTotal, fetchConfig, updateConfig, fetchRoots, fetchScanStatus, fetchScanJobs, addRoot, removeRoot, toggleRoot, rescanRoot }
 })

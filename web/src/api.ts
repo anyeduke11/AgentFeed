@@ -23,6 +23,7 @@ export const api = {
       return getJSON<any>(`${base}/files${qs ? '?' + qs : ''}`)
     },
     open: (id: number, source?: string) => post(`${base}/files/${id}/open`, source ? { source } : undefined),
+    content: (id: number) => getJSON<{ success: boolean; html?: string; toc?: { level: number; text: string; id: string }[]; title?: string; truncated?: boolean; unsupported?: boolean; inPool?: boolean; lastProgress?: number; message?: string }>(`${base}/files/${id}/content`),
     reveal: (id: number) => post(`${base}/files/${id}/reveal`),
     update: (id: number, data: any) => patch(`${base}/files/${id}`, data),
     batchLlmTag: (fileIds: number[]) => post(`${base}/files/batch-llm-tag`, { fileIds }),
@@ -53,7 +54,7 @@ export const api = {
     proposalReject: (id: number) => post(`${base}/tags/proposals/${id}/reject`),
     scanNormalize: () => post(`${base}/tags/scan/normalize`),
     scanSemantic: (batchSize = 400) => post(`${base}/tags/scan/semantic`, { batchSize }),
-    scanLevel: (maxCount = 2, batchSize = 400) => post(`${base}/tags/scan/level`, { maxCount, batchSize }),
+    scanLevel: (minCount = 50, batchSize = 50) => post(`${base}/tags/scan/level`, { minCount, batchSize }),
     scanStatus: () => getJSON<any>(`${base}/tags/scan/status`),
     stats: () => getJSON<any>(`${base}/tags/stats`),
     exportUrl: (format: 'json' | 'csv' = 'json') => `${base}/tags/export?format=${format}`,
@@ -68,6 +69,7 @@ export const api = {
     removeRoot: (id: number) => del(`${base}/scan/roots/${id}`),
     rescanRoot: (id: number) => post(`${base}/scan/roots/${id}/rescan`),
     status: () => getJSON<any>(`${base}/scan/status`),
+    jobs: () => getJSON<{ success: boolean; total: number; items: any[] }>(`${base}/scan/jobs`),
     run: (roots?: string[], full?: boolean) => post(`${base}/scan/run`, { roots, full })
   },
   config: {
@@ -106,7 +108,9 @@ export const api = {
     saveOllamaConfig: (payload: any) => post(`${base}/llm/ollama/config`, payload),
     embeddingsStatus: () => getJSON<any>(`${base}/llm/embeddings/status`),
     embeddingsBackfill: () => post(`${base}/llm/embeddings/backfill`),
-    embeddingsSearch: (query: string, topK = 5) => post(`${base}/llm/embeddings/search`, { query, topK })
+    embeddingsSearch: (query: string, topK = 5) => post(`${base}/llm/embeddings/search`, { query, topK }),
+    qualityBackfill: () => post(`${base}/llm/quality-backfill`),
+    qualityBackfillProgress: () => getJSON<any>(`${base}/llm/quality-backfill`)
   },
   wiki: {
     list: (params?: Record<string, string>) => {
@@ -137,13 +141,16 @@ export const api = {
     update: (id: number, data: { status?: string }) => patch(`${base}/recommend/${id}`, data),
     remove: (id: number) => del(`${base}/recommend/${id}`),
     curated: () => getJSON<{ items: any[]; lastAt: string | null }>(`${base}/recommend/curated`),
-    curate: () => post(`${base}/recommend/curate`)
+    curate: () => post(`${base}/recommend/curate`),
+    daily: () => getJSON<{ items: any[]; date: string }>(`${base}/recommend/daily`)
   },
   reading: {
     rate: (fileId: number, stars: number, execIntent: 'now' | 'later' | 'info') => post(`${base}/reading/rate`, { fileId, stars, execIntent }),
+    progress: (fileId: number, progress: number) => post(`${base}/reading/progress`, { fileId, progress }),
     exec: () => getJSON<{ items: any[]; counts: { pending: number; overdue: number; doneToday: number } }>(`${base}/reading/exec`),
     execDone: (id: number) => post(`${base}/reading/exec/${id}/done`),
     execDismiss: (id: number) => post(`${base}/reading/exec/${id}/dismiss`),
+    goal: (weeklyGoal: number) => post(`${base}/reading/goal`, { weeklyGoal }),
     stats: () => getJSON<any>(`${base}/reading/stats`)
   }
 }

@@ -36,7 +36,7 @@ scanRouter.get('/roots', async (req, res) => {
   const db = await getDb()
   const rows = await (await db.prepare(`
     SELECT r.*, (
-      SELECT COUNT(*) FROM files f WHERE f.status = 'active' AND (f.path LIKE r.path || '%' OR r.path = '/')
+      SELECT COUNT(*) FROM files f WHERE f.status = 'active' AND (f.path = r.path OR f.path LIKE r.path || '/%' OR r.path = '/')
     ) as files
     FROM scan_roots r ORDER BY r.created_at DESC
   `)).all()
@@ -63,15 +63,46 @@ scanRouter.post('/roots', async (req, res) => {
   const { path } = req.body as Record<string, any>
   if (!path) return res.status(400).json({ success: false, message: 'path 必填' })
   try {
+    // agent 绑定：挂载路径命中 KNOWN_AGENTS 目录映射时写入 agent 名（入库归属读绑定，不再猜路径）
+    const agentHit = resolveAgentDirs().find(a => a.path === String(path))
     const escapedPath = String(path).replace(/'/g, "''")
-    await db.exec(`INSERT INTO scan_roots (path) VALUES ('${escapedPath}')`)
+    const agentVal = agentHit ? `'${agentHit.name.replace(/'/g, "''")}'` : 'NULL'
+    await db.exec(`INSERT INTO scan_roots (path, agent) VALUES ('${escapedPath}', ${agentVal})`)
     const idRow = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
     // 新根后台全量扫描 + watcher 热重载（失败不阻塞响应）
-    scan({ roots: [String(path)], full: true }).then(recordScan).catch(() => {})
+    scan({ roots: [String(path)], full: true, source: 'manual' }).then(recordScan).catch(() => {})
     restartWatcherForRoots().then(n => { scanState.watcherRunning = n > 0 }).catch(() => {})
     res.json({ success: true, id: idRow.id })
   } catch (e: any) {
     res.status(409).json({ success: false, message: '路径已存在' })
+  }
+})
+
+/** 启动自动绑定：已挂载但未绑定 agent 的根，按 KNOWN_AGENTS 目录映射补写 agent 名 */
+export async function bindAgentRoots(): Promise<number> {
+  const db = await getDb()
+  const rows = await (await db.prepare('SELECT id, path FROM scan_roots WHERE agent IS NULL')).all() as any[]
+  if (rows.length === 0) return 0
+  const dirs = resolveAgentDirs()
+  let n = 0
+  for (const r of rows) {
+    const hit = dirs.find(a => a.path === r.path)
+    if (!hit) continue
+    await db.exec(`UPDATE scan_roots SET agent = '${hit.name.replace(/'/g, "''")}' WHERE id = ${r.id}`)
+    n++
+  }
+  return n
+}
+
+/** 扫描台账：最近 50 次扫描（来源/范围/计数/耗时/错误）+ 全量总数（日志 tab 徽标用） */
+scanRouter.get('/jobs', async (req, res) => {
+  try {
+    const db = await getDb()
+    const totalRow = await (await db.prepare('SELECT COUNT(*) AS c FROM scan_jobs')).get() as any
+    const rows = await (await db.prepare('SELECT * FROM scan_jobs ORDER BY id DESC LIMIT 50')).all()
+    res.json({ success: true, total: totalRow?.c ?? rows.length, items: rows })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: e.message })
   }
 })
 
@@ -96,7 +127,7 @@ scanRouter.post('/roots/:id/rescan', async (req, res) => {
     const db = await getDb()
     const row = await (await db.prepare('SELECT path FROM scan_roots WHERE id = ?')).get(parseInt(req.params.id)) as any
     if (!row) return res.status(404).json({ success: false, message: '扫描根不存在' })
-    const result = await scan({ roots: [row.path], full: true })
+    const result = await scan({ roots: [row.path], full: true, source: 'rescan' })
     recordScan(result)
     res.json({ success: true, ...result })
   } catch (e: any) {
@@ -107,7 +138,7 @@ scanRouter.post('/roots/:id/rescan', async (req, res) => {
 scanRouter.post('/run', async (req, res) => {
   try {
     const { roots, full } = req.body as ScanOptions & { roots?: string[] }
-    const result = await scan({ roots: roots || [], full: !!full })
+    const result = await scan({ roots: roots || [], full: !!full, source: 'manual' })
     recordScan(result)
     res.json({ success: true, ...result })
   } catch (e: any) {

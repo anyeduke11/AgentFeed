@@ -44,6 +44,7 @@
           <button class="btn xs" @click="copy(file.path)"><Icon name="copy" :size="12" /> 复制</button>
         </div>
         <div class="d-acts" style="margin-top:10px">
+          <button v-if="canReadInline" class="btn sm primary" @click="readInline"><Icon name="eye" :size="14" /> 站内阅读</button>
           <button class="btn sm" @click="openDoc"><Icon name="external" :size="14" /> 打开</button>
           <button class="btn sm" @click="reveal"><Icon name="folder" :size="14" /> 定位</button>
           <template v-if="file.status === 'deleted'">
@@ -80,6 +81,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from './Icon.vue'
 import { useUiStore } from '../stores/useUiStore'
 import { useFilesStore } from '../stores/useFilesStore'
@@ -95,6 +97,15 @@ const file = computed(() => {
   if (ui.drawerFileId === null) return null
   return files.items.find((f: any) => f.id === ui.drawerFileId) || null
 })
+
+// R4-M2 入口：md/html 支持站内阅读，先关抽屉再进阅读器（抽屉是全局挂载，路由切换不会自动关）
+const router = useRouter()
+const canReadInline = computed(() => /^\.md$|^\.html?$/i.test(String(file.value?.ext || '')))
+function readInline() {
+  const id = file.value?.id
+  ui.closeDrawer()
+  if (id) router.push(`/reader/${id}`)
+}
 
 watch(() => ui.drawerFileId, async (id) => {
   versions.value = []

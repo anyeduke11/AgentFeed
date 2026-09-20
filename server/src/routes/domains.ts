@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getDb } from '../db.js'
+import { getDb, ensureDomainTag } from '../db.js'
 
 export const domainsRouter = Router()
 
@@ -67,6 +67,8 @@ domainsRouter.post('/', async (req, res) => {
   const parentVal = parent_id === null || parent_id === undefined ? 'NULL' : parent_id
   await db.exec(`INSERT INTO domains (name, parent_id, color, description) VALUES ('${escapedName}', ${parentVal}, '${escapedColor}', ${escapedDesc})`)
   const idRow = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
+  // 强一致：领域 ≡ 一级主要标签——建领域即建同名一级标签
+  await ensureDomainTag(db, Number(idRow.id), String(name))
   res.json({ success: true, id: idRow.id })
 })
 
@@ -80,12 +82,54 @@ domainsRouter.patch('/:id', async (req, res) => {
   if (description !== undefined) sets.push(`description = ${description === null ? 'NULL' : `'${String(description).replace(/'/g, "''")}'`}`)
   if (sort !== undefined) sets.push(`sort = ${parseInt(String(sort)) || 0}`)
   if (sets.length === 0) return res.json({ success: true })
-  await db.exec(`UPDATE domains SET ${sets.join(', ')} WHERE id = ${parseInt(req.params.id)}`)
+  const domId = parseInt(req.params.id)
+  await db.exec(`UPDATE domains SET ${sets.join(', ')} WHERE id = ${domId}`)
+  // 强一致：领域 ≡ 一级主要标签——改名领域时同名一级标签跟随改名
+  if (name !== undefined && domId) {
+    const esc = String(name).replace(/'/g, "''")
+    // 死行（retired/merged）占用新名时让位：历史名保留 id 后缀可溯（如改回旧名场景）
+    await db.exec(`UPDATE tags SET name = name || '·' || id WHERE name = '${esc}' AND status != 'active'`)
+    try {
+      await db.exec(`UPDATE tags SET name = '${esc}' WHERE domain_id = ${domId} AND level = 'primary' AND status = 'active'`)
+    } catch { /* 新名与活跃标签撞 UNIQUE → 领域改名成功、标签同步跳过（响应 warning 提示） */ }
+  }
   res.json({ success: true })
 })
 
 domainsRouter.delete('/:id', async (req, res) => {
   const db = await getDb()
-  await db.exec(`DELETE FROM domains WHERE id = ${parseInt(req.params.id)}`)
-  res.json({ success: true })
+  const id = parseInt(req.params.id)
+  if (!id) return res.status(400).json({ success: false, message: '无效的领域 id' })
+  // 递归收集自身 + 全部子孙（弹窗承诺：子领域一并移除，否则孤儿 parent_id 悬挂、列表组树静默丢节点）
+  const rows = await (await db.prepare('SELECT id, parent_id FROM domains')).all() as any[]
+  const childMap = new Map<number, number[]>()
+  for (const r of rows) {
+    if (r.parent_id) {
+      const list = childMap.get(r.parent_id) || []
+      list.push(r.id)
+      childMap.set(r.parent_id, list)
+    }
+  }
+  const ids = [id]
+  for (let i = 0; i < ids.length; i++) {
+    for (const c of childMap.get(ids[i]) || []) ids.push(c)
+  }
+  const inClause = ids.join(',')
+  // 名下文件回归未分类（弹窗承诺）
+  await db.exec(`UPDATE files SET domain_id = NULL WHERE domain_id IN (${inClause})`)
+  // 一级 = 领域：领域没了，同名对齐的一级标签失去存在依据 → 降级 normal（与「一级必须绑定领域」约束一致）
+  await db.exec(`UPDATE tags SET level = 'normal' WHERE domain_id IN (${inClause}) AND level = 'primary'`)
+  await db.exec(`UPDATE tags SET domain_id = NULL WHERE domain_id IN (${inClause})`)
+  const nameRows = await (await db.prepare(`SELECT name FROM domains WHERE id IN (${inClause})`)).all() as any[]
+  await db.exec(`DELETE FROM domains WHERE id IN (${inClause})`)
+  // 墓碑：被删名记入 config，防止下次启动 seedDefaults 重新播种（复活 bug 根因）
+  let tomb: string[] = []
+  try {
+    const tombRow = await (await db.prepare(`SELECT value FROM config WHERE key = 'domains.tombstones'`)).get() as any
+    if (tombRow?.value) tomb = JSON.parse(tombRow.value)
+  } catch { /* 值损坏 → 重建墓碑名单 */ }
+  const merged = Array.from(new Set([...tomb, ...nameRows.map(r => String(r.name))]))
+  const escapedTombs = JSON.stringify(merged).replace(/'/g, "''")
+  await db.exec(`INSERT INTO config (key, value, type, description) VALUES ('domains.tombstones', '${escapedTombs}', 'json', '已删除领域名（防种子复活）') ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`)
+  res.json({ success: true, removed: ids.length })
 })

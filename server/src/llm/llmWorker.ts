@@ -27,21 +27,27 @@ async function md5(filePath: string): Promise<string> {
   return hash.digest('hex')
 }
 
-async function readFileSafe(filePath: string): Promise<string> {
-  // 只读头部 512KB：超大文件整读有 OOM 风险，蒸馏只需要头部内容
+/** 读取文件头部 ≤512KB 原始字节：蒸馏内容读取与 triage 预算预估共用（读失败返回空 Buffer，不阻塞调用方） */
+export async function readFileHead(filePath: string): Promise<Buffer> {
   const CAP = 512 * 1024
   try {
     const fh = await fs.open(filePath, 'r')
     try {
       const buf = Buffer.alloc(CAP)
       const { bytesRead } = await fh.read(buf, 0, CAP, 0)
-      return buf.slice(0, bytesRead).toString('utf8') + (bytesRead >= CAP ? '\n...(已截断)' : '')
+      return buf.slice(0, bytesRead)
     } finally {
       await fh.close()
     }
   } catch (e) {
-    return ''
+    return Buffer.alloc(0)
   }
+}
+
+async function readFileSafe(filePath: string): Promise<string> {
+  // 只读头部 512KB：超大文件整读有 OOM 风险，蒸馏只需要头部内容
+  const head = await readFileHead(filePath)
+  return head.toString('utf8') + (head.length >= 512 * 1024 ? '\n...(已截断)' : '')
 }
 
 function summarizeContent(content: string, maxChars = 4000): string {
@@ -62,8 +68,17 @@ const MAX_IMAGES = 3
 /** 单张图片原始字节上限 2MB（base64 后约 2.7MB） */
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024
 
-/** 提取文档内嵌本地图片引用：HTML <img src> + Markdown ![]()；远程/data URL 跳过，上限 limit 张 */
-export function extractLocalImageRefs(content: string, baseDir: string, limit = MAX_IMAGES): string[] {
+/** 严格边界：target 必须等于某根或位于根目录之下（裸 startsWith 会误放行兄弟目录，如 /roots/foo vs /roots/foobar） */
+function withinRoots(target: string, roots: string[]): boolean {
+  return roots.some(r => target === r || target.startsWith(r + path.sep))
+}
+
+/**
+ * 提取文档内嵌本地图片引用：HTML <img src> + Markdown ![]()；远程/data URL 跳过，上限 limit 张。
+ * allowedRoots 提供时仅放行落在任一根内的路径（fail-closed：文档内容不可信，
+ * 绝对路径或 ../ 逃逸到扫描根外的引用一律丢弃，防止任意文件读取随 base64 外发）。
+ */
+export function extractLocalImageRefs(content: string, baseDir: string, limit = MAX_IMAGES, allowedRoots?: string[]): string[] {
   const refs: string[] = []
   const re = /<img[^>]*\ssrc=["']([^"']+)["']|!\[[^\]]*\]\(([^)\s]+)/gi
   let m: RegExpExecArray | null
@@ -73,6 +88,7 @@ export function extractLocalImageRefs(content: string, baseDir: string, limit = 
     let decoded = raw
     try { decoded = decodeURIComponent(raw.split('#')[0]) } catch { /* 保留原串 */ }
     const abs = path.isAbsolute(decoded) ? decoded : path.resolve(baseDir, decoded)
+    if (allowedRoots && !withinRoots(abs, allowedRoots)) continue
     if (!IMG_MIME[path.extname(abs).toLowerCase()]) continue
     refs.push(abs)
   }
@@ -80,9 +96,9 @@ export function extractLocalImageRefs(content: string, baseDir: string, limit = 
 }
 
 /** 读取文档内嵌图片转 base64：缺失/超限/格式不符的图片跳过，不阻塞蒸馏 */
-export async function loadImagesForPrompt(content: string, baseDir: string): Promise<LlmImage[]> {
+export async function loadImagesForPrompt(content: string, baseDir: string, allowedRoots?: string[]): Promise<LlmImage[]> {
   const images: LlmImage[] = []
-  for (const abs of extractLocalImageRefs(content, baseDir)) {
+  for (const abs of extractLocalImageRefs(content, baseDir, MAX_IMAGES, allowedRoots)) {
     const mime = IMG_MIME[path.extname(abs).toLowerCase()]
     try {
       const st = await fs.stat(abs)
@@ -149,7 +165,37 @@ function safeParseWikiJson(text: string): {
   }
 }
 
+/* ---------- triage 熔断：按需精选批次的连续失败保护（内存态，重启自动清零） ---------- */
+
+/** 连续失败达到该次数即熔断：坏 provider 系统性故障时继续消费只会空转烧 token，把损失钉在阈值内 */
+const TRIAGE_FAIL_LIMIT = 5
+let triageConsecutiveFails = 0
+let triageTripped = false
+
+/** 一次 triage job 落定后更新计数：成功清零，连续失败达阈值置位（只统计 origin='triage' 的批次） */
+function recordTriageResult(success: boolean) {
+  if (success) {
+    triageConsecutiveFails = 0
+    return
+  }
+  triageConsecutiveFails++
+  if (triageConsecutiveFails >= TRIAGE_FAIL_LIMIT) triageTripped = true
+}
+
+/** 熔断状态查询（入队端点据此拒绝新批次） */
+export function getTriageBreakerState(): { tripped: boolean; consecutiveFailures: number } {
+  return { tripped: triageTripped, consecutiveFailures: triageConsecutiveFails }
+}
+
+/** 手动复位熔断（端点 resetTripped: true 时调用） */
+export function resetTriageBreaker() {
+  triageTripped = false
+  triageConsecutiveFails = 0
+}
+
 export async function processJob(job: LlmJob): Promise<void> {
+  // 熔断期间暂停消费 triage 批次（job 被静默丢弃，普通蒸馏/assess/curate/backfill/embed 不受影响）
+  if (job.options?.origin === 'triage' && getTriageBreakerState().tripped) return
   const type = job.options?.type || 'distill'
   if (type === 'assess') return processAssess(job)
   if (type === 'curate') return processCurate(job)
@@ -190,7 +236,10 @@ async function processDistill(job: LlmJob): Promise<void> {
     const domainNames = domainRows.map(r => r.name)
     const modelId = job.model || await getDefaultModel()
     // 视觉模型（OCR 等）：提取文档内嵌本地图片随消息发送；文本模型保持纯文本（发图会被服务端拒绝）
-    const images = supportsVision(modelId) ? await loadImagesForPrompt(content, path.dirname(filePath)) : []
+    // 附图边界：只允许源文件所在扫描根内的图片（文档内容不可信，越界引用一律丢弃）
+    const rootRows = await (await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')).all() as any[]
+    const scanRoots = rootRows.map(r => String(r.path)).filter(Boolean)
+    const images = supportsVision(modelId) ? await loadImagesForPrompt(content, path.dirname(filePath), scanRoots) : []
     const prompt = await buildPrompt(filePath, sanitized, domainNames)
       + (images.length ? `\n（附件：该文件内嵌图片 ${images.length} 张，请结合图片内容一并蒸馏）` : '')
 
@@ -273,6 +322,8 @@ async function processDistill(job: LlmJob): Promise<void> {
       error
     })
     await updateFileLlmState(db, job.fileId, status === 'success' ? 'done' : 'failed')
+    // triage 批次熔断统计：只统计带 origin='triage' 标记的 job，普通 push 蒸馏的成败不进计数
+    if (job.options?.origin === 'triage') recordTriageResult(status === 'success')
     // 蒸馏成功后自动向量化：投独立 embed 队列（失败自动重试、串行不打架），不占蒸馏并发、不阻塞下一个蒸馏任务
     if (status === 'success') {
       enqueueEmbed(job.fileId)

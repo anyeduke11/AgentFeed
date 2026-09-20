@@ -58,8 +58,9 @@
         </div>
         <div class="ttools">
           <input class="inp tsearch" v-model="kw" placeholder="搜索标签…" @input="onKwInput" />
-          <button class="chip" :class="{ on: chip === 'primary' }" @click="setChip('primary')" title="主要 = 规整后的一级标签，用于内容标记">主要（一级）</button>
-          <button class="chip" :class="{ on: chip === 'secondary' }" @click="setChip('secondary')" title="次要 = 二级标签，仅作历史记录，不用于标记">次要（二级）</button>
+          <button class="chip" :class="{ on: chip === 'primary' }" @click="setChip('primary')" title="一级 = 关键领域，挂靠领域树，用于内容标记">主要（一级）</button>
+          <button class="chip" :class="{ on: chip === 'secondary' }" @click="setChip('secondary')" title="二级 = 次要关键领域，仍参与标记，视觉降级">次要（二级）</button>
+          <button class="chip" :class="{ on: chip === 'normal' }" @click="setChip('normal')" title="普通标签（新建默认），可经治理选拔升为一级 / 二级">普通</button>
           <button class="chip" :class="{ on: chip === 'all' }" @click="setChip('all')">全部有效</button>
           <button class="chip" :class="{ on: chip === 'retired' }" @click="setChip('retired')">已停用</button>
           <button class="btn ghost icon-btn" @click="loadTags(true)" title="刷新" aria-label="刷新标签"><Icon name="refresh" :size="14" /></button>
@@ -68,10 +69,15 @@
           <span class="cap">正在合并「<b>{{ merging.name }}</b>」：点击墙上任一标签作为合并目标</span>
           <button class="btn xs" @click="merging = null">取消合并</button>
         </div>
-        <div class="tagwall" :class="{ picking: !!merging }">
-          <span v-for="t in tags" :key="t.id" class="tagc tagpick" :class="{ sel: selected?.id === t.id, src: merging?.id === t.id }"
-            :title="merging ? `点击将「${merging.name}」合并进「${t.name}」` : `来源：${sourceLabel(t.source)} · 挂载 ${t.file_count ?? 0} 篇`" @click="wallClick(t)">
-            <span class="dot" :style="{ background: sourceColor(t.source) }"></span>{{ t.name }}
+        <div class="trow mergebar" v-if="pickingParent">
+          <span class="cap">正在将「<b>{{ pickingParent.name }}</b>」设为次要：点击墙上任一<b>一级</b>标签作为挂靠父级</span>
+          <button class="btn xs" @click="pickingParent = null">取消</button>
+        </div>
+        <div class="tagwall" :class="{ picking: !!merging || !!pickingParent }">
+          <span v-for="t in wallTags" :key="t.id" class="tagc tagpick" :class="{ sel: selected?.id === t.id, src: merging?.id === t.id, sec: t.level === 'secondary' }"
+            :title="merging ? `点击将「${merging.name}」合并进「${t.name}」` : (t.level === 'primary' ? `领域标签（同名领域对齐）· 挂载 ${t.file_count ?? 0} 篇` : `来源：${sourceLabel(t.source)} · 挂载 ${t.file_count ?? 0} 篇`)" @click="wallClick(t)">
+            <span class="dot" :style="{ background: t.level === 'primary' && t.domain_color ? t.domain_color : sourceColor(t.source) }"></span>{{ t.name }}
+            <i class="pn" v-if="t.level === 'secondary' && t.parent_name">{{ t.parent_name }}</i>
             <span class="cnt mono">{{ t.file_count ?? 0 }}</span>
             <span class="tacts" v-if="t.status !== 'retired'" @click.stop>
               <button class="ta-btn" title="合并到其他标签（点击后选择目标）" :aria-label="`合并 ${t.name}`" @click="startMerge(t)"><Icon name="arrowRight" :size="11" /></button>
@@ -89,8 +95,33 @@
           <span class="lg"><span class="dot dot-ink"></span>规则自动</span>
           <span class="lg"><span class="dot" style="background:#2456A6"></span>手动添加</span>
           <span class="lg"><span class="dot" style="background:#1E8E5A"></span>蒸馏生成</span>
-          <span class="lg muted">主要 = 规整后的一级标签（用于标记）；次要 = 二级标签（仅存档）；合并后的旧名筛选/打标自动跟随</span>
+          <span class="lg muted">一级 = 领域（与同名领域对齐，色带同源）；二级 = 一级的子标签（树形挂靠，仍参与标记）；普通 = 其余标签；父级合并/停用后子标签回落「未挂靠」</span>
         </div>
+      </div>
+
+      <!-- 标签树：一级 → 二级 树形关联 -->
+      <div class="sect">
+        <div class="sect-head">
+          <span class="sq"></span><h2 class="stitle">标签树</h2>
+          <div class="sright cap mono">挂靠 {{ attachedSecCount }} 个二级 · 未挂靠 {{ orphanSecondary.length }} 个</div>
+        </div>
+        <div class="tagtree" v-if="tagTree.length || orphanSecondary.length">
+          <div v-for="node in tagTree" :key="node.id" class="tt-node">
+            <div class="tt-parent">
+              <span class="tagc tagpick" :title="`领域「${node.name}」· 查看标签详情`" @click="openTag(node)"><span class="dot" :style="{ background: node.domain_color || '#2456A6' }"></span>{{ node.name }} <span class="cnt mono">{{ node.file_count ?? 0 }}</span></span>
+            </div>
+            <div class="tt-children">
+              <span v-for="c in node.children" :key="c.id" class="tagc sec tagpick" :title="`查看「${c.name}」详情`" @click="openTag(c)">{{ c.name }} <span class="cnt mono">{{ c.file_count ?? 0 }}</span></span>
+            </div>
+          </div>
+          <div class="tt-node" v-if="orphanSecondary.length">
+            <div class="tt-parent"><span class="tagc sec">未挂靠</span></div>
+            <div class="tt-children">
+              <span v-for="c in orphanSecondary" :key="c.id" class="tagc sec tagpick" :title="`查看「${c.name}」详情，可在详情面板补挂父级`" @click="openTag(c)">{{ c.name }} <span class="cnt mono">{{ c.file_count ?? 0 }}</span></span>
+            </div>
+          </div>
+        </div>
+        <div class="cap" style="padding:0 14px 12px" v-else>暂无树形关联：接受「AI 二级选拔」提案或在详情面板把标签设为次要并挂靠到一级后，会在这里展示。</div>
       </div>
 
       <!-- 标签详情 -->
@@ -110,10 +141,20 @@
               <button class="btn sm" @click="restoreOp">恢复使用</button>
             </template>
             <template v-else>
-              <button class="chip" :class="{ on: selected.level === 'primary' }" @click="setLevelOp('primary')" title="主要 = 规整后的一级标签，用于内容标记">主要（一级）</button>
-              <button class="chip" :class="{ on: selected.level === 'secondary' }" @click="setLevelOp('secondary')" title="次要 = 二级标签，仅作历史记录">次要（二级）</button>
+              <button class="chip" :class="{ on: selected.level === 'primary' }" @click="setLevelOp('primary')" title="一级即领域：与同名领域自动对齐，无同名领域时自动创建">主要（一级）</button>
+              <button class="chip" :class="{ on: selected.level === 'secondary' }" @click="setLevelOp('secondary')" title="二级 = 一级的子标签，树形挂靠某个一级标签，仍参与标记">次要（二级）</button>
+              <button class="chip" :class="{ on: selected.level === 'normal' }" @click="setLevelOp('normal')" title="普通 = 日常标记标签，可随时选拔升级">普通</button>
               <button class="btn sm danger" @click="retireOp">停用</button>
             </template>
+          </div>
+          <div class="trow" v-if="selected.status !== 'retired' && selected.level === 'secondary'">
+            <span class="cap">挂靠一级：</span>
+            <span class="tagc" :class="{ sec: !selected.parent_name }">{{ selected.parent_name || '未挂靠' }}</span>
+            <input class="inp" style="max-width:200px" v-model="parentKw" placeholder="搜索一级标签补挂 / 换父" @keyup.enter="findParentCands" />
+            <button class="btn sm" @click="findParentCands">查找</button>
+            <span v-for="c in parentCands" :key="c.id" class="tagc tagpick" :title="`点击挂靠到「${c.name}」`" @click="attachParent(c)">
+              <Icon name="check" :size="12" /> {{ c.name }} <span class="cnt mono">{{ c.file_count ?? 0 }}</span>
+            </span>
           </div>
           <div class="trow" v-if="selected.status !== 'retired'">
             <span class="cap">合并到：</span>
@@ -142,11 +183,11 @@
           <div class="trow">
             <button class="btn sm" :disabled="!!scan.running" @click="runNormalize" title="全半角/大小写/空格变体的确定性归并，同步完成"><Icon name="zap" :size="13" /> 规则归一</button>
             <button class="btn sm" :disabled="!!scan.running" @click="runScan('semantic')" title="AI 语义相似度归组，产出合并建议"><Icon name="activity" :size="13" /> AI 语义归组</button>
-            <button class="btn sm" :disabled="!!scan.running" @click="runScan('level')" title="AI 判定低频过细标签，产出降级建议"><Icon name="filter" :size="13" /> AI 次要判定</button>
+            <button class="btn sm" :disabled="!!scan.running" @click="runScan('level')" title="AI 从高频普通标签中挑具备领域概念的，产出设为二级领域的建议"><Icon name="filter" :size="13" /> AI 二级选拔</button>
             <span class="cap">规则归一自动生效；AI 扫描后台执行，结果进入待审建议</span>
           </div>
           <div class="trow" v-if="scan.running">
-            <span class="cap mono">{{ scan.running === 'semantic' ? 'AI 语义归组' : 'AI 次要判定' }}进行中：{{ scan.done }}/{{ scan.total }} {{ scan.message }}</span>
+            <span class="cap mono">{{ scan.running === 'semantic' ? 'AI 语义归组' : 'AI 二级选拔' }}进行中：{{ scan.done }}/{{ scan.total }} {{ scan.message }}</span>
           </div>
           <div class="trow" v-else-if="scan.lastError">
             <span class="cap" style="color:var(--fail)">上次扫描出错：{{ scan.lastError }}</span>
@@ -155,8 +196,9 @@
           <div class="statgrid" v-if="stats">
             <div class="statc"><b class="mono">{{ stats.total }}</b><span>标签总数</span></div>
             <div class="statc"><b class="mono">{{ stats.active }}</b><span>有效</span></div>
-            <div class="statc" title="规整后的一级标签，用于内容标记"><b class="mono">{{ stats.primary }}</b><span>主要（一级）</span></div>
-            <div class="statc" title="二级标签，仅作历史记录"><b class="mono">{{ stats.secondary }}</b><span>次要（二级）</span></div>
+            <div class="statc" title="一级关键领域，挂靠领域树"><b class="mono">{{ stats.primary }}</b><span>主要（一级）</span></div>
+            <div class="statc" title="二级次要领域，仍参与标记"><b class="mono">{{ stats.secondary }}</b><span>次要（二级）</span></div>
+            <div class="statc" title="普通标签（新建默认），可经治理选拔升级"><b class="mono">{{ stats.normal }}</b><span>普通</span></div>
             <div class="statc"><b class="mono">{{ stats.merged }}</b><span>已合并</span></div>
             <div class="statc"><b class="mono">{{ stats.retired }}</b><span>已停用</span></div>
             <div class="statc"><b class="mono">{{ stats.orphan }}</b><span>零挂载</span></div>
@@ -171,12 +213,12 @@
           </div>
 
           <details>
-            <summary>待审建议（{{ proposals.length }}）—— 语义归组合并 / 次要标签降级</summary>
+            <summary>待审建议（{{ proposals.length }}）—— 语义归组合并 / 二级领域选拔</summary>
             <div>
-              <div v-if="!proposals.length" class="cap">暂无待审建议。运行 AI 语义归组 / 次要判定后，结果会在这里逐条确认。</div>
+              <div v-if="!proposals.length" class="cap">暂无待审建议。运行 AI 语义归组 / 二级选拔后，结果会在这里逐条确认。</div>
               <div v-for="p in proposals" :key="p.id" class="pcard">
                 <div class="trow">
-                  <span class="chip on">{{ p.kind === 'semantic' ? '语义归组' : '次要判定' }}</span>
+                  <span class="chip on">{{ p.kind === 'semantic' ? '语义归组' : '二级选拔' }}</span>
                   <span class="cap mono">{{ p.created_at }}</span>
                   <span style="flex:1"></span>
                   <button class="btn xs primary" @click="acceptProposal(p)"><Icon name="check" :size="12" /> 接受</button>
@@ -190,7 +232,7 @@
                   </span>
                 </div>
                 <div v-else class="trow">
-                  <span class="cap">降为次要：</span>
+                  <span class="cap">设为次要领域：</span>
                   <span v-for="m in pMembers(p.members)" :key="m" class="tagc">{{ m }}</span>
                 </div>
                 <div class="cap" v-if="p.reason">{{ p.reason }}</div>
@@ -220,7 +262,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import Icon from '../components/Icon.vue'
 import { useDomainsStore } from '../stores/useDomainsStore'
 import { useUiStore } from '../stores/useUiStore'
@@ -257,9 +299,12 @@ function sourceLabel(s?: string) {
 const tags = ref<any[]>([])
 const tagTotal = ref(0)
 const kw = ref('')
-const chip = ref<'primary' | 'secondary' | 'all' | 'retired'>('primary')
+const chip = ref<'primary' | 'secondary' | 'normal' | 'all' | 'retired'>('primary')
 const loading = ref(false)
 const LIMIT = 200
+
+// 墙上渲染列表：挂靠父级选拔中只显示可作父级的一级标签
+const wallTags = computed(() => pickingParent.value ? tags.value.filter((t: any) => t.level === 'primary') : tags.value)
 
 function chipParams(): Record<string, string> {
   if (chip.value === 'retired') return { status: 'retired' }
@@ -298,6 +343,21 @@ const editName = ref('')
 const related = ref<any[]>([])
 const mergeKw = ref('')
 const mergeCands = ref<any[]>([])
+// ---- 二级挂靠：手动点选一级父标签（树形关联） ----
+const pickingParent = ref<any>(null)
+const parentKw = ref('')
+const parentCands = ref<any[]>([])
+// ---- 标签树：全量 active 标签按 parent_tag_id 组树 ----
+const treeTags = ref<any[]>([])
+const tagTree = computed(() => {
+  const kids = treeTags.value.filter((t: any) => t.level === 'secondary' && t.parent_tag_id)
+  return treeTags.value
+    .filter((t: any) => t.level === 'primary')
+    .map((p: any) => ({ ...p, children: kids.filter((k: any) => k.parent_tag_id === p.id) }))
+    .filter((p: any) => p.children.length)
+})
+const orphanSecondary = computed(() => treeTags.value.filter((t: any) => t.level === 'secondary' && !t.parent_tag_id))
+const attachedSecCount = computed(() => treeTags.value.filter((t: any) => t.level === 'secondary' && t.parent_tag_id).length)
 
 async function openTag(t: any) {
   if (selected.value?.id === t.id) { selected.value = null; return }
@@ -305,6 +365,8 @@ async function openTag(t: any) {
   editName.value = t.name
   mergeKw.value = ''
   mergeCands.value = []
+  parentKw.value = ''
+  parentCands.value = []
   try { related.value = await api.tags.related(t.id) } catch { related.value = [] }
 }
 
@@ -312,6 +374,7 @@ async function openTag(t: any) {
 const merging = ref<any>(null)
 
 function wallClick(t: any) {
+  if (pickingParent.value) { quickAttach(t); return }
   if (merging.value) { quickMerge(t); return }
   openTag(t)
 }
@@ -343,6 +406,21 @@ async function quickRetire(t: any) {
   loadGov()
 }
 
+// 点选一级父标签，把「选拔中」的标签树形挂靠进去
+async function quickAttach(parent: any) {
+  const child = pickingParent.value
+  if (!child) return
+  if (parent.id === child.id) return ui.toast('不能挂靠到自身')
+  if (parent.level !== 'primary') return ui.toast('只能挂靠到一级标签')
+  pickingParent.value = null
+  const r = await api.tags.update(child.id, { level: 'secondary', parentTagId: parent.id })
+  if (r.success === false) return ui.toast(r.message || '挂靠失败')
+  ui.toast(`已将「${child.name}」挂靠到「${parent.name}」`)
+  if (selected.value?.id === child.id) { selected.value.level = 'secondary'; selected.value.parent_name = parent.name }
+  loadTags(true)
+  loadGov()
+}
+
 async function saveName() {
   const name = editName.value.trim()
   if (!name || !selected.value || name === selected.value.name) return
@@ -353,12 +431,22 @@ async function saveName() {
   loadTags(true)
 }
 
-async function setLevelOp(level: 'primary' | 'secondary') {
+async function setLevelOp(level: 'primary' | 'secondary' | 'normal') {
+  // 二级强制挂靠：进入父级选拔模式，点选墙上一级标签后携带 parentTagId 提交
+  if (level === 'secondary') {
+    if (selected.value.level === 'secondary') return
+    pickingParent.value = selected.value
+    parentKw.value = ''
+    parentCands.value = []
+    ui.toast(`请点击墙上任一一级标签，将「${selected.value.name}」挂靠进去`)
+    return
+  }
   const r = await api.tags.update(selected.value.id, { level })
   if (r.success === false) return ui.toast(r.message || '操作失败')
   selected.value.level = level
+  selected.value.parent_name = null
   const row = tags.value.find((x: any) => x.id === selected.value.id)
-  if (row) row.level = level
+  if (row) { row.level = level; row.parent_name = null }
   loadGov()
 }
 
@@ -398,6 +486,27 @@ async function mergeInto(dst: any) {
   loadGov()
 }
 
+async function findParentCands() {
+  const k = parentKw.value.trim()
+  if (!k) return
+  try {
+    const r = await api.tags.list({ kw: k, status: 'active', level: 'primary', limit: '10' })
+    parentCands.value = (r.items || []).filter((x: any) => x.id !== selected.value.id)
+  } catch { parentCands.value = [] }
+}
+
+async function attachParent(c: any) {
+  const r = await api.tags.update(selected.value.id, { level: 'secondary', parentTagId: c.id })
+  if (r.success === false) return ui.toast(r.message || '挂靠失败')
+  ui.toast(`已挂靠到「${c.name}」`)
+  selected.value.parent_name = c.name
+  const row = tags.value.find((x: any) => x.id === selected.value.id)
+  if (row) row.parent_name = c.name
+  parentKw.value = ''
+  parentCands.value = []
+  loadGov()
+}
+
 // ---- 标签治理 ----
 const scan = ref<any>({ running: '', total: 0, done: 0, message: '', lastError: '', lastResult: null })
 const stats = ref<any>(null)
@@ -409,6 +518,7 @@ async function loadGov() {
   try { scan.value = await api.tags.scanStatus() } catch { /* 保持现状 */ }
   try { stats.value = await api.tags.stats() } catch { /* 保持现状 */ }
   try { proposals.value = await api.tags.proposals('pending') } catch { /* 保持现状 */ }
+  try { treeTags.value = (await api.tags.list({ status: 'active', sort: 'name', limit: '5000' })).items || [] } catch { /* 保持现状 */ }
 }
 
 async function runNormalize() {
@@ -452,7 +562,7 @@ function pMembers(m: string): string[] {
 async function acceptProposal(p: any) {
   const r: any = await api.tags.proposalAccept(p.id)
   if (r.success === false) return ui.toast(r.message || '接受失败')
-  ui.toast(p.kind === 'semantic' ? `已合并，转移 ${r.moved} 处挂载` : `已降级 ${r.downgraded} 个次要标签`)
+  ui.toast(p.kind === 'semantic' ? `已合并，转移 ${r.moved} 处挂载` : `已设为次要 ${r.downgraded} 个标签`)
   proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
   loadTags(true)
   loadGov()

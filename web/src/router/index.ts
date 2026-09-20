@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/pipeline', component: () => import('../views/Pipeline.vue') },
     { path: '/domains', component: () => import('../views/Domains.vue') },
     { path: '/supply', component: () => import('../views/Supply.vue') },
+    { path: '/reader/:id', component: () => import('../views/Reader.vue') },
     { path: '/settings', component: () => import('../views/Settings.vue') }
   ]
 })

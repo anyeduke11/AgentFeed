@@ -24,15 +24,20 @@ tagsRouter.get('/', wrap(async (req, res) => {
   const whereSql = where.length ? ' WHERE ' + where.join(' AND ') : ''
   const lim = Math.max(1, Math.min(5000, parseInt(limit) || 200))
   const off = Math.max(0, parseInt(offset) || 0)
-  const orderSql = sort === 'name' ? 't.name' : 'file_count DESC, t.name'
+  // 排序：按名字时纯字典序；默认按级档（一级→二级→普通）+ 挂载数
+  const orderSql = sort === 'name'
+    ? 't.name'
+    : "CASE t.level WHEN 'primary' THEN 0 WHEN 'secondary' THEN 1 ELSE 2 END, file_count DESC, t.name"
   const items = await (await db.prepare(`
-    SELECT t.*, COUNT(ft.file_id) AS file_count FROM tags t
-    LEFT JOIN file_tags ft ON ft.tag_id = t.id${whereSql}
+    SELECT t.*, pt.name AS parent_name, d.color AS domain_color, COUNT(ft.file_id) AS file_count FROM tags t
+    LEFT JOIN file_tags ft ON ft.tag_id = t.id
+    LEFT JOIN tags pt ON pt.id = t.parent_tag_id
+    LEFT JOIN domains d ON d.id = t.domain_id${whereSql}
     GROUP BY t.id ORDER BY ${orderSql} LIMIT ${lim} OFFSET ${off}
-  `)).all(...params) as any[]
+  `)).all(params) as any[]
   const totalRow = await (await db.prepare(`
     SELECT COUNT(DISTINCT t.id) AS n FROM tags t LEFT JOIN file_tags ft ON ft.tag_id = t.id${whereSql}
-  `)).get(...params) as any
+  `)).get(params) as any
   res.json({ items, total: Number(totalRow?.n || 0) })
 }))
 
@@ -43,7 +48,8 @@ tagsRouter.post('/', wrap(async (req, res) => {
   try {
     const escapedName = String(name).replace(/'/g, "''")
     const escapedColor = String(color || '#67c23a').replace(/'/g, "''")
-    await db.exec(`INSERT INTO tags (name, color) VALUES ('${escapedName}', '${escapedColor}')`)
+    // 手动新建默认普通标签：一级/二级走治理（详见 PATCH level）
+    await db.exec(`INSERT INTO tags (name, color, level) VALUES ('${escapedName}', '${escapedColor}', 'normal')`)
     const idRow = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
     await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('create', '{"id":${idRow.id},"name":"${escapedName}"}')`)
     res.json({ success: true, id: idRow.id })
@@ -67,8 +73,40 @@ tagsRouter.patch('/:id', wrap(async (req, res) => {
   }
   if (color !== undefined) sets.push(`color = '${String(color).replace(/'/g, "''")}'`)
   if (level !== undefined) {
-    if (!['primary', 'secondary'].includes(level)) return res.status(400).json({ success: false, message: 'level 仅支持 primary/secondary' })
-    sets.push(`level = '${level}'`)
+    if (!['primary', 'secondary', 'normal'].includes(level)) return res.status(400).json({ success: false, message: 'level 仅支持 primary/secondary/normal' })
+    if (level === 'primary') {
+      // 一级 = 就是领域：显式 domainId（校验存在，垃圾值 fail loud 与 parentTagId 对齐）优先；
+      // 否则按本次请求生效名（改名同请求时取新名）同名锚定，缺则自动创建（配色由领域列表接口兜底）
+      let domainId: number | null = null
+      if (req.body?.domainId != null) {
+        const did = parseInt(req.body.domainId)
+        const dom = did ? await (await db.prepare('SELECT id FROM domains WHERE id = ?')).get([did]) as any : null
+        if (!dom) return res.status(400).json({ success: false, message: 'domainId 必须指向已存在的领域' })
+        domainId = dom.id
+      } else {
+        const cur = await (await db.prepare('SELECT name FROM tags WHERE id = ?')).get([id]) as any
+        const effectiveName = name !== undefined ? String(name).trim() : cur?.name
+        if (!effectiveName) return res.status(400).json({ success: false, message: '无法确定领域：标签缺少有效名称' })
+        const dom = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(effectiveName) as any
+        if (dom) domainId = dom.id
+        else {
+          await db.exec(`INSERT INTO domains (name) VALUES ('${effectiveName.replace(/'/g, "''")}')`)
+          const created = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(effectiveName) as any
+          domainId = created?.id ?? null
+        }
+      }
+      if (!domainId) return res.status(400).json({ success: false, message: '无法确定领域：显式 domainId 或按名称创建领域失败' })
+      sets.push(`level = 'primary'`, `domain_id = ${Number(domainId)}`, 'parent_tag_id = NULL')
+    } else if (level === 'secondary') {
+      // 二级 = 次要领域，树形挂靠在某个一级标签下（手动强制；AI 选拔提案接受后落「未挂靠」，由前端补挂）
+      const pid = req.body?.parentTagId != null ? parseInt(req.body.parentTagId) : NaN
+      if (!pid || pid === id) return res.status(400).json({ success: false, message: '设为二级需显式传 parentTagId（指向某个一级标签，且不能是自身）' })
+      const p = await (await db.prepare("SELECT id, level, status FROM tags WHERE id = ?")).get(pid) as any
+      if (!p || p.status !== 'active' || p.level !== 'primary') return res.status(400).json({ success: false, message: 'parentTagId 必须指向有效的 active 一级标签' })
+      sets.push(`level = 'secondary'`, `parent_tag_id = ${Number(pid)}`, 'domain_id = NULL')
+    } else {
+      sets.push(`level = '${level}'`, 'domain_id = NULL', 'parent_tag_id = NULL')
+    }
   }
   if (status !== undefined) {
     if (!['active', 'retired'].includes(status)) return res.status(400).json({ success: false, message: 'status 仅支持 active/retired' })
@@ -103,6 +141,8 @@ tagsRouter.post('/:id/retire', wrap(async (req, res) => {
   const db = await getDb()
   const id = parseInt(req.params.id)
   await db.exec(`UPDATE tags SET status = 'retired' WHERE id = ${id} AND status = 'active'`)
+  // 父级停用：其次级子标签回落「未挂靠」
+  await db.exec(`UPDATE tags SET parent_tag_id = NULL WHERE parent_tag_id = ${id}`)
   await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('retire', '{"id":${id}}')`)
   res.json({ success: true })
 }))
@@ -131,7 +171,7 @@ tagsRouter.get('/proposals', wrap(async (req, res) => {
   const params: any[] = [status]
   if (kind) { sql += ' AND kind = ?'; params.push(kind) }
   sql += ' ORDER BY created_at DESC LIMIT 500'
-  res.json(await (await db.prepare(sql)).all(...params))
+  res.json(await (await db.prepare(sql)).all(params))
 }))
 
 /** 接受建议：semantic=执行合并；level=批量降为次要 */
@@ -154,11 +194,11 @@ tagsRouter.post('/proposals/:id/accept', wrap(async (req, res) => {
     await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
     return res.json({ success: true, merged: memberIds.length, moved })
   }
-  // level：按名字批量降级（已被合并/停用的自动跳过）
+  // level：按名字批量降为次要（软挂：不指父，落「未挂靠」组，由前端补挂；已被合并/停用的自动跳过）
   let downgraded = 0
   for (const name of members) {
     const esc = String(name).replace(/'/g, "''")
-    await db.exec(`UPDATE tags SET level = 'secondary' WHERE name = '${esc}' AND status = 'active'`)
+    await db.exec(`UPDATE tags SET level = 'secondary', parent_tag_id = NULL WHERE name = '${esc}' AND status = 'active'`)
     downgraded++
   }
   await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
@@ -190,9 +230,9 @@ tagsRouter.post('/scan/semantic', wrap(async (req, res) => {
   res.json({ success: true })
 }))
 
-/** AI 次要标签判定：maxCount 为参与判定的挂载次数上限（默认 ≤2），后台异步 */
+/** AI 二级领域选拔：minCount 为参与选拔的普通标签挂载次数下限（默认 ≥50），后台异步 */
 tagsRouter.post('/scan/level', wrap(async (req, res) => {
-  const ok = startLevelScan(parseInt(req.body?.maxCount) || 2, parseInt(req.body?.batchSize) || 400)
+  const ok = startLevelScan(parseInt(req.body?.minCount) || 50, parseInt(req.body?.batchSize) || 50)
   if (!ok) return res.json({ success: false, message: `已有扫描任务（${scanState.running}）进行中` })
   res.json({ success: true })
 }))
