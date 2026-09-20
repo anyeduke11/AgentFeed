@@ -19,6 +19,10 @@ export async function startWatcher(roots: string[], onChange: (stats: any) => vo
     ignored: (fp: string) => isExcludedPath(fp, cfg, roots),
     persistent: true,
     ignoreInitial: true,
+    // chokidar 默认跟随符号链接并按链接路径上报，而 scanner 的 walk() 用 withFileTypes 判目录
+    // （symlink 为 false）永不跟随：watcher 收编的文件下一轮增量必然被清理下线，形成加删循环
+    //（生产实测 lingxi-claw 的 skills 符号链接子树 13776 个文件即如此）。两侧可见性必须对齐。
+    followSymlinks: false,
     awaitWriteFinish: {
       stabilityThreshold: 1000,
       pollInterval: 200

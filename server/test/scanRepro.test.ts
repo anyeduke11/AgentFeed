@@ -228,6 +228,36 @@ test('P1-⑬ 内容未变但 mtime 改变的墓碑，增量扫描必须复活并
   assert.equal(res.updated + res.added, 1, '复活应计入本轮台账')
 })
 
+test('P1-⑭ watcher 不得跟进符号链接子树：入库即会被扫描通道墓碑化的循环必须切断', async () => {
+  // WHY: chokidar 默认 followSymlinks:true 会深入符号链接目录，而 walk() 用 withFileTypes
+  // 的 entry.isDirectory()（对 symlink 为 false）永远不跟随。生产实测：lingxi-claw 的 skills/*
+  // 是指向 WPS 灵犀 app-support 的符号链接，watcher 先收编 13776 个文件，下一轮增量扫描
+  // 走不到它们即整批墓碑化（18:35 那一轮 -13741），且磁盘文件至今存在、再无自愈通道。
+  // 正确期望（与 walk 口径对齐）：watcher 不跟随符号链接，两侧对同一批文件可见性一致。
+  const outside = await fs.mkdtemp(path.join(ROOTS_TMP, 'symlink-target-'))
+  const root = await makeRoot({ 'real.md': LONG })
+  await mountRoot(root)
+  await fs.symlink(outside, path.join(root, 'linked'), 'dir')
+  await scan({ roots: [root], full: true, source: 'test' })
+  assert.equal((await fileRow(path.join(root, 'real.md')))?.status, 'active') // 控制：根本身在采
+
+  await startWatcher([root], () => {})
+  try {
+    const linkFile = path.join(outside, 'via-link.md')          // 真实路径
+    const asLink = path.join(root, 'linked', 'via-link.md')     // chokidar 上报的符号链接路径
+    await fs.writeFile(linkFile, LONG + '\n符号链接子树内的新文件。')
+    await new Promise(r => setTimeout(r, 2500)) // 给 watcher 足够时间（若跟随）入库
+    assert.equal(
+      await fileRow(asLink), undefined,
+      'watcher 跟进了符号链接目录并按链接路径入库：扫描通道走不到它，下一轮增量必然墓碑化（收编即下线）'
+    )
+    assert.equal(await fileRow(linkFile), undefined, 'watcher 按真实路径入库了链接目标文件')
+  } finally {
+    stopWatcher()
+    await fs.rm(outside, { recursive: true, force: true })
+  }
+})
+
 test('特征化（⑨ 拼接转义安全网）：路径含单引号与 SQL 片段应完整入库且不破坏表结构', async () => {
   // WHY: scanner/gate 全用字符串拼 SQL（仅靠逐处 '' 转义），此用例锁定「当前转义约定成立」；
   // 一旦任何一处漏转义，这里立刻红。它不验证期望行为缺口，属安全网特征化测试。
