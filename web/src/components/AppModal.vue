@@ -63,6 +63,7 @@
         <!-- 阅读打分（两维极简） -->
         <template v-else-if="ui.modal.type === 'rate'">
           <p style="font-size:13.5px;line-height:1.9;margin-bottom:10px">读完「<b>{{ rateTitle }}</b>」了吗？10 秒打个分：</p>
+          <div v-if="rateProgress > 0 && rateProgress < 100" class="notice" style="margin-bottom:10px;color:#B4651A">当前阅读进度 {{ rateProgress }}%，尚未读毕——补齐进度可在推荐池快捷档操作。</div>
           <div class="form-grid" style="margin-bottom:10px">
             <span class="fl">整体价值</span>
             <span class="stars" style="display:flex;gap:4px">
@@ -243,8 +244,13 @@ async function confirmRedistill() {
 async function confirmDomDel() {
   const d = delDomain.value
   if (d) {
-    await domains.removeDomain(d.id)
-    ui.toast(`已删除领域「${d.name}」`)
+    try {
+      const r = await domains.removeDomain(d.id)
+      ui.toast(`已删除领域「${d.name}」${r?.removed > 1 ? `（含 ${r.removed - 1} 个子领域，名下文件已回归未分类）` : '，名下文件已回归未分类'}`)
+    } catch (e: any) {
+      ui.toast(e?.message || '删除失败，请重试')
+      return
+    }
   }
   ui.closeModal()
 }
@@ -322,11 +328,13 @@ const rateTitle = computed(() => String(ui.modal?.opts?.title || ''))
 const rateFileId = computed(() => Number(ui.modal?.opts?.fileId) || 0)
 const rateStars = ref(0)
 const rateIntent = ref<'now' | 'later' | 'info'>('info')
+const rateProgress = ref(0)
 
 watch(() => ui.modal, (m) => {
   if (m?.type === 'rate') {
     rateStars.value = 0
     rateIntent.value = 'info'
+    rateProgress.value = Number(m.opts?.progress) || 0
   }
 })
 

@@ -16,7 +16,8 @@ export async function ensureTag(db: any, rawName: string): Promise<number | null
   const stmt = await db.prepare('SELECT id, status, merged_into FROM tags WHERE name = ?')
   let row = await stmt.get(name) as any
   if (!row) {
-    await db.exec(`INSERT OR IGNORE INTO tags (name) VALUES ('${name.replace(/'/g, "''")}')`)
+    // 自动创建的标签默认 normal（普通标签），一级/二级靠治理选拔，不再默认 primary
+    await db.exec(`INSERT OR IGNORE INTO tags (name, level) VALUES ('${name.replace(/'/g, "''")}', 'normal')`)
     row = await stmt.get(name) as any
   }
   if (!row) return null
@@ -40,6 +41,8 @@ export async function mergeTagsInto(db: any, canonicalId: number, memberIds: num
         SELECT file_id, ${Number(canonicalId)}, source FROM file_tags WHERE tag_id = ${Number(mid)}`)
       await db.exec(`DELETE FROM file_tags WHERE tag_id = ${Number(mid)}`)
       await db.exec(`UPDATE tags SET status = 'merged', merged_into = ${Number(canonicalId)} WHERE id = ${Number(mid)}`)
+      // 被合并标签若挂有次级子标签：子标签回落「未挂靠」（合并目标若为一级，前端可重挂）
+      await db.exec(`UPDATE tags SET parent_tag_id = NULL WHERE parent_tag_id = ${Number(mid)}`)
     }
     const detail = JSON.stringify({ canonicalId, members }).replace(/'/g, "''")
     await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('${op}', '${detail}')`)
@@ -101,13 +104,20 @@ export async function runNormalizeScan(): Promise<{ groups: number; mergedTags: 
   return { groups: groupCount, mergedTags }
 }
 
-async function loadActiveTags(maxFc?: number): Promise<Array<{ id: number; name: string; fc: number }>> {
+/** 载入 active 标签：可选 level 过滤 + 挂载频次上下限（供语义归组/分级选拔取数） */
+async function loadActiveTags(filter: { level?: string; minFc?: number; maxFc?: number } = {}): Promise<Array<{ id: number; name: string; fc: number }>> {
   const db = await getDb()
-  const cond = maxFc === undefined ? '' : `HAVING fc <= ${Number(maxFc)}`
+  const where = filter.level
+    ? `WHERE t.status = 'active' AND t.level = '${filter.level}'`
+    : `WHERE t.status = 'active'`
+  const having: string[] = []
+  if (filter.maxFc !== undefined) having.push(`fc <= ${Number(filter.maxFc)}`)
+  if (filter.minFc !== undefined) having.push(`fc >= ${Number(filter.minFc)}`)
+  const cond = having.length ? `HAVING ${having.join(' AND ')}` : ''
   const rows = await (await db.prepare(`
     SELECT t.id, t.name, COUNT(ft.file_id) AS fc
     FROM tags t LEFT JOIN file_tags ft ON ft.tag_id = t.id
-    WHERE t.status = 'active' AND t.level = 'primary'
+    ${where}
     GROUP BY t.id ${cond}
     ORDER BY fc DESC, t.name
   `)).all() as any[]
@@ -119,7 +129,7 @@ async function proposalExists(db: any, kind: string, canonical: string, members:
   const key = JSON.stringify([...members].sort())
   const row = await (await db.prepare(
     "SELECT id FROM tag_proposals WHERE status = 'pending' AND kind = ? AND canonical = ? AND members = ?"
-  )).get(kind, canonical, key) as any
+  )).get([kind, canonical, key]) as any
   return !!row
 }
 
@@ -127,7 +137,10 @@ async function callLlmJson(prompt: string): Promise<any | null> {
   const provider = await getDefaultProvider()
   const model = await getDefaultModel()
   const { text } = await callLlm(provider, model, prompt)
-  return parseLlmJson(text)
+  const data = parseLlmJson(text)
+  // 解析失败必须抛错（fail loud）：静默 null 会让扫描“0 提案 0 失败”地假成功
+  if (data == null) throw new Error(`llm_json_parse_failed: ${String(text).slice(0, 200)}`)
+  return data
 }
 
 /** AI 语义归组（后台）：分批送 LLM 找同义/变体组，产出待审 proposals */
@@ -184,51 +197,59 @@ ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
   }
 }
 
-/** AI 次要标签判定（后台）：低频标签分批送 LLM 判定是否应降为次要标签 */
-async function levelScanJob(maxCount: number, batchSize: number) {
+/** AI 二级领域选拔（后台）：从普通标签中挑高频且具备领域概念的候选，产出「设为次要领域」提案 */
+async function levelScanJob(minCount: number, batchSize: number) {
   const db = await getDb()
   try {
-    const tags = await loadActiveTags(maxCount)
+    const tags = await loadActiveTags({ level: 'normal', minFc: minCount })
     const batches: Array<typeof tags> = []
     for (let i = 0; i < tags.length; i += batchSize) batches.push(tags.slice(i, i + batchSize))
     scanState.total = batches.length
     scanState.done = 0
-    scanState.message = `次要标签判定：${tags.length} 个低频（≤${maxCount} 次）标签分 ${batches.length} 批`
+    scanState.message = `二级领域选拔：${tags.length} 个高频（≥${minCount} 次）普通标签分 ${batches.length} 批`
     let proposals = 0
     let failedBatches = 0
     for (const batch of batches) {
       const nameSet = new Set(batch.map(t => t.name))
-      const prompt = `你是内容管理系统的标签分级助手。下面是标签列表（n 为名字，c 为使用次数）。
-主标签应能代表一个主题概念、有检索归类价值；过于细节、碎片化、只对单篇内容有意义、或属于过度拆分的标签应归为次要标签（仅存档，不再用于标记）。
-从列表中挑出应归为次要的标签，宁缺勿滥（不超过列表的一半）。
+      const prompt = `你是内容管理系统的标签分级助手。下面是普通标签列表（n 为名字，c 为使用次数）。
+从中挑出能代表「次要关键领域」的标签：应是一个有检索归类价值的主题领域概念（如技术方向、方法论、业务域），且语义不与已有的一级领域重复；过于细节、只对单篇内容有意义的标签不要选。
+宁缺勿滥（不超过列表的一半）。
 输出 json：{"secondary":["标签名"],"reason":"整体说明"}
 
 标签列表：
 ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
-      try {
-        const data = await callLlmJson(prompt)
-        const names: string[] = (Array.isArray(data?.secondary) ? data.secondary : []).map(String).filter((n: string) => nameSet.has(n))
-        if (names.length) {
-          const key = JSON.stringify([...names].sort())
-          if (!(await proposalExists(db, 'level', 'secondary', names))) {
-            await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, reason)
-              VALUES ('level', 'secondary', '${key.replace(/'/g, "''")}', '${String(data?.reason || '').replace(/'/g, "''")}')`)
-            proposals++
+      // 每批最多尝试 2 次：flash 级模型偶发空响应/输出截断（llm_json_parse_failed），重试通常可恢复
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const data = await callLlmJson(prompt)
+          const names: string[] = (Array.isArray(data?.secondary) ? data.secondary : []).map(String).filter((n: string) => nameSet.has(n))
+          if (names.length) {
+            const key = JSON.stringify([...names].sort())
+            if (!(await proposalExists(db, 'level', 'secondary', names))) {
+              await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, reason)
+                VALUES ('level', 'secondary', '${key.replace(/'/g, "''")}', '${String(data?.reason || '').replace(/'/g, "''")}')`)
+              proposals++
+            }
+          }
+          break
+        } catch (e: any) {
+          if (attempt === 2) {
+            failedBatches++
+            scanState.lastError = String(e?.message || e)
+          } else {
+            await new Promise(r => setTimeout(r, 5000))
           }
         }
-      } catch (e: any) {
-        failedBatches++
-        scanState.lastError = String(e?.message || e)
       }
       scanState.done++
       await new Promise(r => setTimeout(r, 1000))
     }
     scanState.lastResult = { proposals, failedBatches }
-    scanState.message = `次要标签判定完成：新增 ${proposals} 条分级建议${failedBatches ? `（${failedBatches} 批失败）` : ''}`
+    scanState.message = `二级领域选拔完成：新增 ${proposals} 条分级建议${failedBatches ? `（${failedBatches} 批失败）` : ''}`
     await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('scan_level', '{"proposals":${proposals},"failedBatches":${failedBatches}}')`)
   } catch (e: any) {
     scanState.lastError = String(e?.message || e)
-    scanState.message = '次要标签判定失败'
+    scanState.message = '二级领域选拔失败'
   } finally {
     scanState.running = ''
     scanState.finishedAt = new Date().toISOString()
@@ -243,11 +264,12 @@ export function startSemanticScan(batchSize = 400): boolean {
   return true
 }
 
-export function startLevelScan(maxCount = 2, batchSize = 400): boolean {
+/** 启动二级选拔扫描：minCount 为参与选拔的普通标签挂载次数下限；batchSize 控制单批标签数（过大易触发输出截断） */
+export function startLevelScan(minCount = 50, batchSize = 50): boolean {
   if (scanState.running) return false
   scanState.running = 'level'
   scanState.lastError = ''
-  void levelScanJob(maxCount, batchSize)
+  void levelScanJob(minCount, batchSize)
   return true
 }
 
@@ -275,6 +297,7 @@ export async function tagStats(): Promise<any> {
   const active = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active'")
   const primary = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active' AND level = 'primary'")
   const secondary = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active' AND level = 'secondary'")
+  const normal = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'active' AND level = 'normal'")
   const merged = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'merged'")
   const retired = await one("SELECT COUNT(*) AS n FROM tags WHERE status = 'retired'")
   const used = await one('SELECT COUNT(DISTINCT tag_id) AS n FROM file_tags')
@@ -302,7 +325,7 @@ export async function tagStats(): Promise<any> {
     const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 14)
     trend.push({ month: fmtMD(start), newTags: byIdx.get(i) || 0 })
   }
-  return { total, active, primary, secondary, merged, retired, orphan: total - used, top, trend }
+  return { total, active, primary, secondary, normal, merged, retired, orphan: total - used, top, trend }
 }
 
 /** 批量导出（含挂载计数与生命周期字段） */
@@ -328,7 +351,8 @@ export async function importTags(items: Array<{ name?: string; color?: string }>
       if (await stmt.get(name)) { skipped++; continue }
       const esc = name.replace(/'/g, "''")
       const color = String(it?.color || '#67c23a').replace(/'/g, "''")
-      await db.exec(`INSERT OR IGNORE INTO tags (name, color) VALUES ('${esc}', '${color}')`)
+      // 导入的标签一律 normal：分级（一级须挂靠领域/二级）是治理动作，不做导入还原
+      await db.exec(`INSERT OR IGNORE INTO tags (name, color, level) VALUES ('${esc}', '${color}', 'normal')`)
       created++
     }
     await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('import', '${JSON.stringify({ created, skipped }).replace(/'/g, "''")}')`)

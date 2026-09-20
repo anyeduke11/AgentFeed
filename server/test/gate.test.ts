@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { checkGate, isExcludedPath, pathWhitelisted, matchBlacklist, validateGateConfig, GATE_DEFAULTS, GateConfig } from '../src/gate.js'
+import { checkGate, checkGateSample, isExcludedPath, pathWhitelisted, matchBlacklist, validateGateConfig, GATE_DEFAULTS, GateConfig } from '../src/gate.js'
 
 /** 以默认配置为基底覆盖部分字段 */
 const cfg = (over: Partial<GateConfig>): GateConfig => ({ ...GATE_DEFAULTS, ...over })
@@ -293,4 +293,44 @@ test('开关关闭：enabled=false（前端据此显示「已关闭」）', () =
   const out = validateGateConfig(cfg({ enabled: false, blacklistEnabled: false }))
   assert.equal(out.masterEnabled, false)
   for (const f of out.fields) assert.equal(f.enabled, false)
+})
+
+// ---- 大文件抽样门禁 checkGateSample：结构化裁决（ruleId + metric）使拦截口径可观测 ----
+
+test('抽样门禁：黑名单命中返回 ruleId=blacklist，metric 为命中条目', () => {
+  // WHY: gate_records 落库的 rule_id/gate_metric 是质量归因的依据，必须能回答「被哪条规则、以什么实际值拦截」
+  const out = checkGateSample('/x/a.tmp.md', 600000, LONG, cfg({ blacklist: ['*.tmp.md'] }))
+  assert.equal(out.pass, false)
+  assert.equal(out.ruleId, 'blacklist')
+  assert.equal(out.metric, '*.tmp.md')
+})
+
+test('抽样门禁：minSize 用真实字节数拦截并记录 metric', () => {
+  // WHY: 抽样只影响内容评估，大小仍按真实 size 判定——记录的 metric 必须就是真实 size
+  const out = checkGateSample('/x/big.md', 100, LONG, cfg({}))
+  assert.equal(out.pass, false)
+  assert.equal(out.ruleId, 'minSize')
+  assert.equal(out.metric, 100)
+})
+
+test('抽样门禁：头部正文过短返回 ruleId=minChars，metric 为抽样有效字符数', () => {
+  // WHY: 大文件头部全是目录/空行时照样应拦，metric 反映的是抽样段而非全文
+  const out = checkGateSample('/x/big.md', 600000, 'ab', cfg({}))
+  assert.equal(out.pass, false)
+  assert.equal(out.ruleId, 'minChars')
+  assert.equal(out.metric, 2)
+  assert.match(out.reason!, /抽样头部/)
+})
+
+test('抽样门禁：不评估 codeRatio（抽样占比不可靠）', () => {
+  // WHY: 头部 64KB 无法代表全文件行结构，若套用 codeRatio 会大量误杀合法大文件
+  const head = ['```js', 'const a = 1', 'const b = 2', 'const c = 3', 'const d = 4', 'const e = 5', 'const f = 6', '```'].join('\n')
+  const out = checkGateSample('/x/big.md', 600000, head + LONG, cfg({}))
+  assert.equal(out.pass, true)
+})
+
+test('抽样门禁：文件名白名单直通且通过时不带 ruleId', () => {
+  // WHY: pass=true 且无 ruleId/metric 才能保证合格文件不产生误导性的门禁记录
+  assert.deepEqual(checkGateSample('/x/AGENTS.md', 10, '短', cfg({})), { pass: true })
+  assert.deepEqual(checkGateSample('/x/big.md', 600000, LONG, cfg({})), { pass: true })
 })

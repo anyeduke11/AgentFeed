@@ -1,6 +1,6 @@
 # AgentFeed
 
-> 抓取本地 AI Agent 的工作产物，汇总、分拣、蒸馏成知识，再供给任意 Agent 消费。
+> 抓取本地 AI Agent 的工作产物，汇总、分拣为热知识缓存，按需蒸馏后供任意 Agent 消费。
 
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
@@ -10,8 +10,8 @@
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
 AgentFeed 把散落在各个 AI Agent 数据目录（Claude Code、Trae、Qoder、Coze、Workbuddy……）里的
-Markdown / HTML 产物统一采集入库：经过**门禁过滤 → 领域分拣 → LLM 蒸馏 → Wiki 沉淀**，
-最终通过 **Web 看板** 与 **MCP Server** 双出口，供人和任意 Agent 检索消费。
+Markdown / HTML 产物统一采集入库为**热知识缓存**：经**门禁过滤 → 领域分拣**完成分拣入库，**LLM 蒸馏**按队列增量补充摘要/标签等增强信息，Wiki 词条支持导入挂载，
+最终通过 **Web 看板** 与 **MCP Server** 双出口，供人和任意 Agent 按关键词（LIKE）检索消费。
 所有数据仅在本机流转，不出网关。
 
 ---
@@ -25,6 +25,8 @@ Markdown / HTML 产物统一采集入库：经过**门禁过滤 → 领域分拣
 - **🗂 领域分拣** — 树形领域体系（支持父子级联），文件按领域归类，配色贯穿全站
 - **🧠 LLM 蒸馏管线** — 队列化蒸馏（摘要/标签/实体/要点/关系），嵌入向量 + 规则评分双排序，失败自动重试回填
 - **📊 调度总览 + 数据看板** — 双 Tab 看板：今日流量/趋势/来源占比一屏尽览；Agent 生产卡可下钻二级目录，领域占比以彩色气泡图呈现
+- **📚 阅读推荐闭环** — 规则分 + LLM 质量分双排序推荐池，每日精选零成本轮转；阅读进度手动挡 + 滚动自动记录，续读自动回位；两维打分入执行队列，周目标环与薄弱领域/停滞提示复盘
+- **📖 站内阅读器** — md/html 沙箱渲染（双保险：服务端白名单清洗 + iframe 禁脚本，内容零脚本执行），目录侧栏、字号与夜间主题，图片资源经扫描根边界代理
 - **🔗 MCP Server** — stdio 方式暴露 `search_knowledge` / `read_entry` / `stats` 等 7 个工具，Trae / Claude Desktop / Cursor 直接挂载
 
 ## 🏗 架构
@@ -40,12 +42,12 @@ flowchart LR
         G[Gate 门禁<br/>过滤 + 归档]
     end
     subgraph 存储与服务
-        DB[(SQLite<br/>files / domains / wiki)]
+        DB[(SQLite<br/>19 表：files / wiki /<br/>recommendations…)]
         API[Express :5188<br/>REST API]
         LLM[蒸馏队列<br/>摘要 · 标签 · 嵌入]
     end
     subgraph 消费出口
-        WEB[Vue 3 看板<br/>总览 · 看板 · 库 · 分拣]
+        WEB[Vue 3 看板<br/>总览 · 看板 · 库 · 阅读闭环]
         MCP[MCP Server stdio<br/>7 个知识工具]
     end
     A1 & A2 & A3 & A4 & A5 --> W
@@ -83,6 +85,13 @@ open http://127.0.0.1:5188
 | `./service.sh build` | 强制重新构建 |
 | `npm test -w server` | 运行后端测试 |
 
+## 📖 阅读闭环
+
+1. **供给页**：从推荐池选文（每日精选自动置顶于总览页），25/50/75/100% 快捷挡记进度，或点「站内读」进入阅读器
+2. **站内阅读器**：滚动自动记进度，中途退出再进自动回位到上次位置；读毕 100% 提示打分
+3. **打分**：两维打分 10 秒完成（弹层预填当前进度），值得实操的进入总览页执行队列
+4. **复盘**：周卡展示目标完成环（目标可在线修改）、薄弱领域与在读停滞（>14 天未更新）提示
+
 ## 🔌 Agent 目录接入
 
 进入看板 **扫描页**，Agent 探测卡会列出本机已识别的 Agent 目录，点击即挂载为扫描根。
@@ -119,15 +128,18 @@ open http://127.0.0.1:5188
 AgentFeed/
 ├── service.sh            # 一键启停/构建脚本（端口 5188）
 ├── server/               # Express + SQLite 后端
-│   ├── src/routes/       #   REST API（files/domains/scan/stats/llm/wiki…）
+│   ├── src/routes/       #   REST API（files/reading/recommend/scan/stats/llm/wiki…）
 │   ├── src/llm/          #   蒸馏队列 / 嵌入 / 清洗 / 标签治理
+│   ├── src/reader.ts     #   站内阅读器管线（渲染/白名单清洗/TOC/图片代理）
+│   ├── src/ruleScore.ts  #   规则评分引擎
+│   ├── src/opener.ts     #   外部打开（扫描根边界校验）
 │   ├── src/scanner.ts    #   扫描器（门禁 + mtime/size 缓存）
 │   ├── src/watcher.ts    #   chokidar 实时监听
 │   ├── src/agents.ts     #   KNOWN_AGENTS 目录映射
-│   └── test/             #   node:test 单元测试
+│   └── test/             #   node:test 单元测试（含阅读器安全用例）
 ├── web/                  # Vue 3 + Vite 前端看板
-│   └── src/views/        #   总览 / 看板 / 库 / 分拣 / 管线 / 供给 / 设置
-└── docs/                 # 设计文档
+│   └── src/views/        #   总览 / 看板 / 库 / 分拣 / 管线 / 供给 / 阅读 / 设置
+└── docs/                 # 设计文档（阅读闭环 PRD · 阅读器 PRD · 门禁设计）
 ```
 
 ## 🔒 隐私与安全

@@ -75,13 +75,52 @@
         </tbody>
       </table>
       <div v-else class="cap" style="padding:14px">执行队列是空的 · 在发车区给读完的文章打分并选「立即试 / 稍后试」，到点这里会调起重读。</div>
-      <!-- 周卡（回顾区块）：本周阅读 / 打分分布 / 完成轮次 / 逾期堆积 -->
-      <div class="cap" style="padding:0 14px 12px">
-        本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池待读 {{ rstats.pool?.unread ?? 0 }}/{{ rstats.pool?.total ?? 0 }}
+      <!-- 周卡（回顾区块）：本周阅读 / 打分分布 / 完成轮次 / 逾期堆积 / 周目标环（R3） -->
+      <div class="cap" style="padding:0 14px 12px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px">
+        <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池待读 {{ rstats.pool?.unread ?? 0 }}/{{ rstats.pool?.total ?? 0 }}</span>
+        <span style="display:inline-flex;align-items:center;gap:6px;margin-left:auto">
+          <svg width="20" height="20" viewBox="0 0 36 36" role="img" :aria-label="`周目标完成 ${goalPct}%`">
+            <circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="5" />
+            <circle cx="18" cy="18" r="15" fill="none" :stroke="goalDone ? '#1E8E5A' : '#B4651A'" stroke-width="5" stroke-linecap="round" :stroke-dasharray="`${goalPct} ${100 - goalPct}`" stroke-dashoffset="25" />
+          </svg>
+          <template v-if="!editingGoal">
+            <span class="mono" :style="goalDone ? 'color:#1E8E5A' : ''">周目标 {{ rstats.ratedFiles7 ?? 0 }}/{{ rstats.weeklyGoal ?? 5 }} 篇{{ goalDone ? ' · 已达成' : '' }}</span>
+            <button class="btn xs" @click="startGoalEdit">改</button>
+          </template>
+          <template v-else>
+            <input class="inp" v-model="goalInput" type="number" min="1" max="100" style="width:64px;height:24px" @keyup.enter="saveGoal" @keyup.esc="editingGoal = false" />
+            <button class="btn xs primary" @click="saveGoal">存</button>
+          </template>
+        </span>
       </div>
       <div v-if="(rstats.staleCount ?? 0) > 0" class="notice" style="margin:0 14px 12px;color:#B4651A">
         有 {{ rstats.staleCount }} 篇到期超 7 天未执行，建议回顾或忽略：{{ (rstats.stale || []).map((s: any) => s.title).join('、') }}
       </div>
+      <!-- 薄弱点提示（M3）：按领域聚合本周低星与逾期堆积 -->
+      <div v-if="(rstats.weakDomains || []).length" class="notice" style="margin:0 14px 12px;color:#B4651A">
+        本周期薄弱领域：{{ (rstats.weakDomains || []).map((w: any) => `${w.name}（${[w.lowStars ? `低星 ${w.lowStars}` : '', w.stale ? `逾期 ${w.stale}` : ''].filter(Boolean).join(' · ')}）`).join('、') }}，建议优先补强。
+      </div>
+    </div>
+
+    <!-- 每日精选（M4 R2）：池内 unread 按分轮转 3 篇，池不足时池外高分补位 -->
+    <div class="sect" style="margin-bottom:16px">
+      <div class="sect-head">
+        <span class="sq"></span><h2 class="stitle">每日精选</h2>
+        <div class="sright"><span class="cap mono">{{ daily.date || '—' }} · 零成本轮转</span><router-link class="btn xs" to="/supply">推荐池</router-link></div>
+      </div>
+      <div v-if="daily.items?.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;padding:12px 14px">
+        <div v-for="(it, i) in daily.items" :key="it.file_id" class="bcard" style="cursor:pointer" @click="openDaily(it)">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="mono" style="font-size:11px;color:var(--dim)">TOP{{ i + 1 }}</span>
+            <span v-if="it.outOfPool" class="cap" style="color:#B4651A">池外推荐</span>
+            <span class="cap mono" style="margin-left:auto">{{ it.quality_score != null ? 'Q ' + it.quality_score : 'R ' + (it.score ?? it.rule_score ?? 0) }}</span>
+          </div>
+          <b style="font-size:13px;line-height:1.5;display:block;margin:4px 0 2px">{{ it.title }}</b>
+          <span class="cap">{{ it.domain_name || '未分类' }}<template v-if="it.ext"> · {{ String(it.ext).replace('.', '') }}</template></span>
+          <p class="cap" style="margin:6px 0 0;line-height:1.6;color:var(--dim)">{{ it.reason }}</p>
+        </div>
+      </div>
+      <div v-else class="cap" style="padding:14px">今日暂无精选 · 推荐池与库内有内容后这里每天自动换一批。</div>
     </div>
 
     <div class="ov-grid">
@@ -242,6 +281,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { useUiStore } from '../stores/useUiStore'
@@ -249,6 +289,7 @@ import { useLlmStore } from '../stores/useLlmStore'
 
 const ui = useUiStore()
 const llm = useLlmStore()
+const router = useRouter()
 
 const d = ref<any>({})
 const mcp = ref<any>({ week: 0, total: 0, byTool: [] })
@@ -256,6 +297,7 @@ const scan = ref<any>({})
 const scanning = ref(false)
 const exec = ref<any>({ items: [], counts: { pending: 0, overdue: 0, doneToday: 0 } })
 const rstats = ref<any>({})
+const daily = ref<any>({ items: [], date: '' })
 let timer: ReturnType<typeof setInterval> | null = null
 
 const todayLabel = computed(() => {
@@ -364,6 +406,32 @@ const starsDist = computed(() => {
   return Object.keys(dist).map(Number).sort((a, b) => b - a).map(s => `★${s}×${dist[s]}`).join(' ')
 })
 
+// ---- 周目标环（R3）：完成 = 本周打分去重篇数 ----
+const editingGoal = ref(false)
+const goalInput = ref('')
+const goalPct = computed(() => {
+  const goal = Math.max(1, rstats.value.weeklyGoal ?? 5)
+  return Math.min(100, Math.round(((rstats.value.ratedFiles7 ?? 0) / goal) * 100))
+})
+const goalDone = computed(() => (rstats.value.ratedFiles7 ?? 0) >= Math.max(1, rstats.value.weeklyGoal ?? 5))
+
+function startGoalEdit() {
+  goalInput.value = String(rstats.value.weeklyGoal ?? 5)
+  editingGoal.value = true
+}
+
+async function saveGoal() {
+  const g = parseInt(goalInput.value)
+  const r: any = await api.reading.goal(g)
+  if (r?.success) {
+    rstats.value.weeklyGoal = r.weeklyGoal
+    ui.toast(`周阅读目标已设为 ${r.weeklyGoal} 篇`)
+  } else {
+    ui.toast(r?.message || '目标设置失败')
+  }
+  editingGoal.value = false
+}
+
 function trendH(v: number) {
   const max = Math.max(1, ...(d.value.trend?.vals || []))
   return Math.max(4, Math.round((v / max) * 100))
@@ -416,6 +484,11 @@ async function refreshAll() {
 }
 
 async function openExec(e: any) {
+  // R4-M2 入口：md/html 站内优先（阅读器带回位与进度记录），其余外部打开
+  if (/^\.md$|^\.html?$/i.test(String(e.ext || ''))) {
+    router.push(`/reader/${e.file_id}`)
+    return
+  }
   const r: any = await api.files.open(e.file_id, 'exec')
   if (r?.success) ui.toast('已在本地打开 · 实操完记得回来点「完成」')
   else ui.toast(r?.message || '打开失败')
@@ -451,7 +524,13 @@ async function scanNow() {
 
 onMounted(async () => {
   await refreshAll()
+  api.recommend.daily().then((r: any) => { daily.value = r }).catch(() => {})
   timer = setInterval(refreshAll, 15000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })
+
+/** 每日精选（R4-M2）：改走站内阅读器——/content 记 source=reader 埋点，进入自动回位到上次进度 */
+function openDaily(it: any) {
+  router.push(`/reader/${it.file_id}`)
+}
 </script>

@@ -44,3 +44,39 @@ describe('视觉蒸馏：extractLocalImageRefs', () => {
     assert.ok(!refs.some(r => r.endsWith('a.svg')))
   })
 })
+
+describe('视觉蒸馏：图片路径扫描根边界（防内容诱导任意文件读取）', () => {
+  // 文档内容不可信：内嵌图片路径若可指向扫描根外（如 ~/.ssh），会被 base64 后外发 LLM API
+  const baseDir = '/roots/docs'
+  const roots = ['/roots/docs', '/roots/wiki']
+
+  test('根内相对路径正常解析', () => {
+    const refs = extractLocalImageRefs('<img src="assets/a.png">', baseDir, 3, roots)
+    assert.deepEqual(refs, [path.resolve(baseDir, 'assets/a.png')])
+  })
+
+  test('根内绝对路径放行', () => {
+    const refs = extractLocalImageRefs('![图](/roots/wiki/pic.jpg)', baseDir, 3, roots)
+    assert.deepEqual(refs, ['/roots/wiki/pic.jpg'])
+  })
+
+  test('根外绝对路径丢弃（敏感文件不可达）', () => {
+    const refs = extractLocalImageRefs('<img src="/Users/duke/.ssh/id_rsa.png">', baseDir, 3, roots)
+    assert.deepEqual(refs, [])
+  })
+
+  test('../ 相对路径逃逸到根外丢弃', () => {
+    const refs = extractLocalImageRefs('![逃逸](../../escape.png)', baseDir, 3, roots)
+    assert.deepEqual(refs, [])
+  })
+
+  test('兄弟目录前缀不误放行（/roots/docs vs /roots/docs2）', () => {
+    const refs = extractLocalImageRefs('<img src="/roots/docs2/evil.png">', baseDir, 3, ['/roots/docs'])
+    assert.deepEqual(refs, [])
+  })
+
+  test('allowedRoots 未传保持原行为（向后兼容）', () => {
+    const refs = extractLocalImageRefs('<img src="/Users/duke/.ssh/id_rsa.png">', baseDir)
+    assert.deepEqual(refs, ['/Users/duke/.ssh/id_rsa.png'])
+  })
+})

@@ -27,8 +27,9 @@ export const useDomainsStore = defineStore('domains', () => {
   }
 
   async function removeDomain(id: number) {
-    await api.domains.remove(id)
+    const r = await api.domains.remove(id)
     await fetchDomains()
+    return r
   }
 
   function findNode(id: number): { node: any; siblings: any[] } | null {

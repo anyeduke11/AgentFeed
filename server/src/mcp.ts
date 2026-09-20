@@ -4,6 +4,7 @@ import { z } from 'zod'
 import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from './db.js'
+import { searchKnowledgeCore } from './knowledge.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const WIKI_DIR = path.join(DATA_DIR, 'wiki', 'entries')
@@ -13,13 +14,29 @@ const server = new McpServer(
   { capabilities: { logging: {} } }
 )
 
-/** 工具调用落库（发车统计） */
-async function logToolCall(tool: string, client = 'unknown') {
+/** MCP 总闸：关闭后所有工具调用拒绝响应（config 表 mcp.enabled，缺省/异常视为开启） */
+async function isMcpEnabled(): Promise<boolean> {
   try {
     const db = await getDb()
-    const escapedTool = String(tool).replace(/'/g, "''")
-    const escapedClient = String(client).replace(/'/g, "''")
-    await db.exec(`INSERT INTO mcp_call_logs (tool, client) VALUES ('${escapedTool}', '${escapedClient}')`)
+    const row = await (await db.prepare("SELECT value FROM config WHERE key = 'mcp.enabled'")).get() as any
+    return row ? String(row.value) !== 'false' : true
+  } catch { return true }
+}
+
+function disabledResponse() {
+  return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'MCP 服务已停用（总闸关闭），可在看板发车区重新开启' }) }] }
+}
+
+/** 工具调用落库（发车统计；args 摘要截断 200 字符，供盘点 agent 实际查询内容） */
+async function logToolCall(tool: string, args?: unknown) {
+  try {
+    const db = await getDb()
+    let argsSummary: string | null = null
+    if (args !== undefined) {
+      const full = JSON.stringify(args)
+      argsSummary = full.length > 200 ? full.slice(0, 200) : full
+    }
+    await (await db.prepare('INSERT INTO mcp_call_logs (tool, client, args) VALUES (?, ?, ?)')).run([tool, 'unknown', argsSummary])
   } catch { /* 日志失败不影响工具调用 */ }
 }
 
@@ -27,47 +44,22 @@ const searchKnowledge = server.registerTool(
   'search_knowledge',
   {
     title: 'Search Knowledge',
-    description: 'Search wiki entries and files by query, domain, tags, or agent',
+    description: 'Search wiki entries and files by query, domain, tags, or agent; optional since/until (ISO date, inclusive) filter by file mtime',
     inputSchema: z.object({
       query: z.string().describe('Search query for title/summary/path'),
       domain: z.string().optional().describe('Domain name filter'),
       tags: z.array(z.string()).optional().describe('Tag names filter'),
       agent: z.string().optional().describe('Source agent filter'),
       limit: z.number().int().optional().describe('Max results'),
+      since: z.string().optional().describe('ISO 8601 date lower bound on file mtime (inclusive)'),
+      until: z.string().optional().describe('ISO 8601 date upper bound on file mtime (inclusive)'),
     }),
   },
   async (args, extra) => {
-    await logToolCall('search_knowledge')
+    if (!(await isMcpEnabled())) return disabledResponse()
+    await logToolCall('search_knowledge', args)
     const db = await getDb()
-    const limit = args.limit ?? 20
-    let sql = `SELECT f.id, f.title, f.summary, f.path, f.source_agent, f.file_mtime, d.name as domain_name
-               FROM files f
-               LEFT JOIN domains d ON f.domain_id = d.id
-               WHERE f.status = 'active'`
-    const params: any[] = []
-    if (args.query) {
-      sql += ` AND (f.title LIKE ? OR f.summary LIKE ? OR f.path LIKE ?)`
-      params.push(`%${args.query}%`, `%${args.query}%`, `%${args.query}%`)
-    }
-    if (args.domain) {
-      sql += ` AND d.name = ?`
-      params.push(args.domain)
-    }
-    if (args.agent) {
-      sql += ` AND f.source_agent = ?`
-      params.push(args.agent)
-    }
-    if (args.tags && args.tags.length > 0) {
-      sql += ` AND f.id IN (
-        SELECT ft.file_id FROM file_tags ft
-        JOIN tags t ON ft.tag_id = t.id
-        WHERE t.name IN (${args.tags.map(() => '?').join(',')})
-      )`
-      params.push(...args.tags)
-    }
-    sql += ` ORDER BY f.file_mtime DESC LIMIT ${limit}`
-    const stmt = await db.prepare(sql)
-    const rows = await stmt.all(params) as any[]
+    const rows = await searchKnowledgeCore(db, args)
     const results = rows.map((r) => {
       const entryPath = path.join(WIKI_DIR, String(r.id), 'entry.md')
       return {
@@ -95,7 +87,8 @@ server.registerTool(
     }),
   },
   async (args) => {
-    await logToolCall('read_entry')
+    if (!(await isMcpEnabled())) return disabledResponse()
+    await logToolCall('read_entry', args)
     const db = await getDb()
     const stmt = await db.prepare('SELECT path, title FROM files WHERE id = ?')
     const row = await stmt.get(args.id) as any
@@ -122,7 +115,8 @@ server.registerTool(
     }),
   },
   async (args) => {
-    await logToolCall('get_source')
+    if (!(await isMcpEnabled())) return disabledResponse()
+    await logToolCall('get_source', args)
     const db = await getDb()
     const stmt = await db.prepare('SELECT path FROM files WHERE id = ?')
     const row = await stmt.get(args.id) as any
@@ -140,6 +134,7 @@ server.registerTool(
     description: 'List all domains',
   },
   async () => {
+    if (!(await isMcpEnabled())) return disabledResponse()
     await logToolCall('list_domains')
     const db = await getDb()
     const rows = await (await db.prepare('SELECT name, parent_id FROM domains ORDER BY sort, name')).all() as any[]
@@ -155,6 +150,7 @@ server.registerTool(
     description: 'List distinct source agents',
   },
   async () => {
+    if (!(await isMcpEnabled())) return disabledResponse()
     await logToolCall('list_agents')
     const db = await getDb()
     const rows = await (await db.prepare('SELECT DISTINCT source_agent FROM files WHERE status = ?')).all('active') as any[]
@@ -170,6 +166,7 @@ server.registerTool(
     description: 'List all tags',
   },
   async () => {
+    if (!(await isMcpEnabled())) return disabledResponse()
     await logToolCall('list_tags')
     const db = await getDb()
     const rows = await (await db.prepare('SELECT name, color FROM tags ORDER BY name')).all() as any[]
@@ -184,6 +181,7 @@ server.registerTool(
     description: 'Get basic knowledge stats',
   },
   async () => {
+    if (!(await isMcpEnabled())) return disabledResponse()
     await logToolCall('stats')
     const db = await getDb()
     const filesRow = await (await db.prepare('SELECT COUNT(*) as cnt FROM files WHERE status = ?')).get('active') as any

@@ -89,7 +89,7 @@ recommendRouter.get('/preview', async (req, res) => {
                 + COALESCE(rh.n, 0) * 1.2 + COALESCE(f5.n, 0) * 1.5 + COALESCE(eq.n, 0) * 1.5) DESC,
                COALESCE(f.size, 0) DESC
       LIMIT ${lim}`
-    const rows = await (await db.prepare(sql)).all(...params) as any[]
+    const rows = await (await db.prepare(sql)).all(params) as any[]
     for (const r of rows) r.reason = ruleReason(r)
     res.json({ items: rows })
   } catch (e: any) {
@@ -169,6 +169,66 @@ recommendRouter.get('/curated', async (req, res) => {
     res.json({ items, lastAt: last?.at || null })
   } catch (e: any) {
     console.error('recommend curated failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/** 本地日历日期 YYYY-MM-DD（/daily 响应与日报生成共用的「日」口径） */
+export function localDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** 每日精选选取（/daily 端点与日报生成共用，保证同一天选取一致）：
+ *  今日 3 篇 = 池内 unread 按 score 降序 + 无状态窗口轮转（同一天结果确定，次日滑到下一窗）；
+ *  不足 3 篇用预览高分（未入池）补位并标「池外推荐」。零 LLM 成本。 */
+export async function selectDailyPicks(db: any, date?: string): Promise<any[]> {
+  const pool = await (await db.prepare(`
+      SELECT r.file_id, r.reason, r.reason_source,
+             COALESCE(NULLIF(f.title, ''), f.name) AS title, f.path, f.ext, f.size,
+             d.name AS domain_name, w.quality_score
+      FROM recommendations r
+      JOIN files f ON f.id = r.file_id
+      LEFT JOIN domains d ON f.domain_id = d.id
+      LEFT JOIN wiki_entries_meta w ON w.file_id = f.id
+      WHERE r.status = 'unread' AND f.status = 'active'
+      ORDER BY r.score DESC, r.id ASC`)).all() as any[]
+  const items: any[] = []
+  if (pool.length) {
+    // 本地日序号做窗口滑移：窗口大小 3，同一天多次请求一致；传入 date 时按该日历日本地零点取日序号（与当天 new Date() 等值）
+    const now = date
+      ? (() => { const [y, m, d] = date.split('-').map(Number); return new Date(y, m - 1, d) })()
+      : new Date()
+    const epochDay = Math.floor((now.getTime() - now.getTimezoneOffset() * 60000) / 86400000)
+    const start = (epochDay % Math.ceil(pool.length / 3)) * 3
+    for (const p of pool.slice(start, start + 3)) items.push({ ...p, outOfPool: false })
+  }
+  if (items.length < 3) {
+    // 池外补位：未入池高分预览（有质量分优先，规则分兜底）
+    const outside = await (await db.prepare(`
+      SELECT f.id AS file_id, COALESCE(NULLIF(f.title, ''), f.name) AS title, f.path, f.ext, f.size,
+             d.name AS domain_name, w.quality_score, COALESCE(f.rule_score, 0) AS rule_score
+      FROM files f
+      LEFT JOIN domains d ON f.domain_id = d.id
+      LEFT JOIN wiki_entries_meta w ON w.file_id = f.id
+      LEFT JOIN recommendations r ON r.file_id = f.id
+      WHERE f.status = 'active' AND r.id IS NULL
+      ORDER BY (w.quality_score IS NOT NULL) DESC,
+               (COALESCE(w.quality_score, 0) * 3 + COALESCE(f.rule_score, 0)) DESC,
+               COALESCE(f.size, 0) DESC
+      LIMIT ${3 - items.length}`)).all() as any[]
+    for (const o of outside) items.push({ ...o, reason: ruleReason(o), reason_source: 'rule', outOfPool: true })
+  }
+  return items
+}
+
+/** 每日精选（R2）：今日 3 篇 */
+recommendRouter.get('/daily', async (req, res) => {
+  try {
+    const db = await getDb()
+    const items = await selectDailyPicks(db)
+    res.json({ items, date: localDateStr(new Date()) })
+  } catch (e: any) {
+    console.error('recommend daily failed', e)
     res.status(500).json({ success: false, message: String(e) })
   }
 })

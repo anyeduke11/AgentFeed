@@ -20,7 +20,7 @@
       <div class="ov-col">
         <!-- MCP 服务状态 -->
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">MCP 服务状态</h2><div class="sright"><span v-if="showStdioTip" class="stb"><span class="dot dot-done"></span>stdio 随客户端启动<button class="stb-x" aria-label="关闭提示" title="关闭" @click="showStdioTip = false">×</button></span></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">MCP 服务状态</h2><div class="sright"><span class="cap">{{ mcpEnabled ? 'stdio 随客户端启动' : '已停用 · 工具调用将拒绝' }}</span><button class="switch" role="switch" :aria-checked="mcpEnabled ? 'true' : 'false'" aria-label="MCP 服务总闸" :disabled="mcpBusy" @click="toggleMcp"></button></div></div>
           <div class="kvgrid" style="padding:12px 14px">
             <span class="k">服务名</span><span class="mono">agentfeed-knowledge</span>
             <span class="k">版本</span><span class="mono">0.1.0</span>
@@ -138,11 +138,21 @@
               <tr v-for="r in pool" :key="r.id">
                 <td>
                   <b style="font-size:13px">{{ r.title || r.name }}</b>
+                  <span v-if="(r.progress || 0) > 0 && r.progress < 100" class="cap" style="margin-left:8px;color:#B4651A">· 在读中</span>
                   <br /><span class="cap">{{ r.reason }}<template v-if="r.created_at"> · {{ fmtTime(r.created_at) }} 收纳</template></span>
+                  <!-- 阅读进度（R1）：手动挡 25/50/75/100，仅展示不参与排序 -->
+                  <div v-if="r.status !== 'archived'" class="bar-mini" style="margin-top:5px">
+                    <span class="bar-track" style="width:72px"><span class="bar-fill" :style="{ width: (r.progress || 0) + '%' }"></span></span>
+                    <span class="mono" style="font-size:11.5px">{{ r.progress || 0 }}%</span>
+                    <span style="display:flex;gap:4px">
+                      <button v-for="p in [25, 50, 75, 100]" :key="p" class="btn xs" @click="setProgress(r, p)">{{ p }}%</button>
+                    </span>
+                  </div>
                 </td>
                 <td><span class="cap"><span class="dot" :style="{ background: statusColor(r.status) }"></span> {{ statusLabel(r.status) }}</span></td>
                 <td>
                   <span style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button v-if="/^\.md$|^\.html?$/i.test(r.ext || '')" class="btn xs" @click="openReader(r.file_id)"><Icon name="eye" :size="12" /> 站内读</button>
                     <button class="btn xs" @click="openFile(r.file_id, 'pool')"><Icon name="external" :size="12" /> 打开</button>
                     <button class="btn xs" @click="rateItem(r)"><Icon name="zap" :size="12" /> 打分</button>
                     <button class="btn xs" @click="removeFromPool(r)"><Icon name="trash" :size="12" /> 移出</button>
@@ -181,7 +191,7 @@
               <span class="fl">标签</span>
               <select class="inp" v-model="fTag" @change="fetchPreview">
                 <option value="">全部标签</option>
-                <option v-for="t in tags" :key="t.id" :value="t.name">{{ t.name }}（{{ t.file_count }}）</option>
+                <option v-for="t in tags" :key="t.id" :value="t.name">{{ t.parent_name ? `${t.name} · ${t.parent_name}` : t.name }}（{{ t.file_count }}）</option>
               </select>
               <span class="fl">关键词</span>
               <span style="display:flex;gap:8px">
@@ -229,17 +239,25 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { useUiStore } from '../stores/useUiStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
 import { api } from '../api'
 
 const ui = useUiStore()
+const router = useRouter()
+
+/** 站内阅读入口（R4-M2）：阅读器自动回位与进度记录，打开埋点由 /content 记 source=reader */
+function openReader(id: number) {
+  router.push(`/reader/${id}`)
+}
 const domains = useDomainsStore()
 const viewTab = ref<'agent' | 'reading'>('agent')
 const readTab = ref<'curated' | 'pool'>('curated')
 const mcp = ref<any>({ week: 0, total: 0, byTool: [] })
-const showStdioTip = ref(true)
+const mcpEnabled = ref(true)
+const mcpBusy = ref(false)
 const tab = ref('Trae')
 
 const vsub = computed(() => viewTab.value === 'agent'
@@ -273,8 +291,24 @@ const configText = computed(() => JSON.stringify({
   }
 }, null, 2))
 
-const maxToolCalls = computed(() => Math.max(1, ...(mcp.value.byTool || []).map((t: any) => t.calls)))
-const toolPct = (calls: number) => Math.round((calls / maxToolCalls.value) * 100)
+// 占比分母 = 全部工具调用总数（曾误用最大值：榜首恒 100%，各行占比和超 100%）
+const totalToolCalls = computed(() => (mcp.value.byTool || []).reduce((s: number, t: any) => s + (t.calls || 0), 0))
+const toolPct = (calls: number) => totalToolCalls.value ? Math.round((calls / totalToolCalls.value) * 100) : 0
+
+// MCP 总闸：失败回滚乐观更新
+async function toggleMcp() {
+  if (mcpBusy.value) return
+  mcpBusy.value = true
+  const next = !mcpEnabled.value
+  mcpEnabled.value = next
+  try {
+    await api.config.set({ 'mcp.enabled': { value: next } })
+  } catch {
+    mcpEnabled.value = !next
+  } finally {
+    mcpBusy.value = false
+  }
+}
 
 function fmtTime(t?: string) {
   if (!t) return '—'
@@ -286,6 +320,10 @@ function fmtTime(t?: string) {
 async function refresh() {
   if (viewTab.value === 'agent') {
     mcp.value = await api.stats.mcp()
+    api.config.get().then((cfg: any) => {
+      const entry = cfg?.['mcp.enabled']
+      if (entry) mcpEnabled.value = entry.value !== false
+    }).catch(() => {})
   } else {
     await Promise.all([fetchPreview(), fetchPool(), fetchCurated()])
   }
@@ -419,8 +457,19 @@ async function fetchPool() {
 
 async function openFile(id: number, source: 'preview' | 'pool') {
   const r: any = await api.files.open(id, source)
-  if (r?.success) ui.toast('已在本地打开 · 打开记一次浏览')
+  if (r?.success) ui.toast(r.lastProgress ? `已在本地打开 · 上次读到 ${r.lastProgress}%，继续加油` : '已在本地打开 · 打开记一次浏览')
   else ui.toast(r?.message || '打开失败')
+}
+
+// 阅读进度（R1）：行内快捷档，直接改本地行数据避免整表刷新
+async function setProgress(row: any, p: number) {
+  const r: any = await api.reading.progress(row.file_id, p)
+  if (r?.success) {
+    row.progress = p
+    ui.toast(p === 100 ? '已标记读毕 · 点「打分」完成阅读闭环' : `已记录进度 ${p}%`)
+  } else {
+    ui.toast(r?.message || '进度记录失败')
+  }
 }
 
 async function addToPool(item: any) {
@@ -434,7 +483,7 @@ async function addToPool(item: any) {
 }
 
 function rateItem(row: any) {
-  ui.openModal('rate', { fileId: row.file_id ?? row.id, title: row.title || row.name })
+  ui.openModal('rate', { fileId: row.file_id ?? row.id, title: row.title || row.name, progress: row.progress || 0 })
 }
 
 async function removeFromPool(row: any) {
