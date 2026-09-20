@@ -21,7 +21,7 @@ import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
 import { scan, backfillRuleScores, backfillAliases, backfillAgentAttribution } from './scanner.js'
-import { resolveAgentDirs } from './agents.js'
+import { resolveAgentDirs, selectPeriodicRoots } from './agents.js'
 import { bindAgentRoots } from './routes/scan.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -104,8 +104,8 @@ app.listen(PORT, async () => {
   // 每日推式出口：boot 补当天日报（已存在幂等跳过），此后每 5 分钟跨天检查自动生成
   startDailyReportJob()
 
-  // Agent 根自动扫描：watcher 只覆盖运行期变化，启动兜底 + 周期增量补齐停机期间的文件变更。
-  // 范围 = KNOWN_AGENTS 已解析存在且已挂载启用的扫描根（Qoder、LingxiClaw 等自动纳入）
+  // 启用根自动增量扫描：watcher 只覆盖运行期变化，启动兜底 + 周期增量补齐停机期间的文件变更。
+  // 范围 = 全部启用根，仅剔除本机不存在的 agent 目录（手工挂载的普通目录同样纳入）
   const AGENT_RESCAN_MS = 30 * 60 * 1000
   let agentScanBusy = false
   const agentRescan = async (reason: string) => {
@@ -114,10 +114,8 @@ app.listen(PORT, async () => {
     const t0 = Date.now()
     try {
       const db = await getDb()
-      const dirs = resolveAgentDirs().filter(a => a.exists)
       const rootRows = await (await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')).all() as any[]
-      const enabled = new Set(rootRows.map((r: any) => r.path))
-      const roots = dirs.map(a => a.path).filter(p => enabled.has(p))
+      const roots = selectPeriodicRoots(rootRows.map((r: any) => r.path), resolveAgentDirs())
       if (roots.length === 0) return
       const result = await scan({ roots, full: false, source: reason })
       recordScan(result)
