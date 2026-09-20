@@ -1,6 +1,7 @@
 import os from 'os'
 import path from 'path'
 import fs from 'fs'
+import { normalizeRootPath } from './gate.js'
 
 /** 国内外常见 agent 智能体的默认数据目录（home 下候选，按顺序取第一个存在的） */
 export interface KnownAgent {
@@ -59,4 +60,15 @@ export function resolveAgentDirs(): AgentDirInfo[] {
     }
     return { name: a.name, path: resolved, exists }
   })
+}
+
+/**
+ * 启动/周期增量扫描的根选择口径：只剔除「本机不存在的已知 agent 目录」，
+ * 其余启用根（含手工挂载的普通目录）一律保留。
+ * 反例：曾用「存在的 agent 目录 ∩ 启用根」，手工根因此失去自动增量通道——
+ * watcher 只覆盖运行期变化，停机期间的文件增改再没有人补齐。
+ */
+export function selectPeriodicRoots(enabledPaths: string[], agentDirs: AgentDirInfo[]): string[] {
+  const absent = new Set(agentDirs.filter(a => !a.exists).map(a => normalizeRootPath(a.path)))
+  return enabledPaths.filter(p => !absent.has(normalizeRootPath(p)))
 }
