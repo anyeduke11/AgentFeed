@@ -199,7 +199,9 @@ async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: 
     return {}
   }
   const currentMd5 = await md5File(fp)
-  if (existing && existing.md5 === currentMd5 && !full) return {}
+  // md5 快路径只豁免 active 行：墓碑行内容未变、mtime 已变（marketplace 整目录重克隆/搬移）时必须
+  // 走完入库流程翻回 active 并刷新 file_mtime，否则永久卡在 deleted 且每轮重复命中同一分支（P1-⑬）
+  if (existing && existing.md5 === currentMd5 && !full && existing.status !== 'deleted') return {}
 
   // 手动恢复豁免：gate_records 中 restored 的文件跳过门禁
   const gateRec = await getGateRecord(db, fp)
