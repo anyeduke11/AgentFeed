@@ -13,13 +13,10 @@ export async function startWatcher(roots: string[], onChange: (stats: any) => vo
   lastOnChange = onChange
   const cfg = await loadGateConfig()
   watcher = chokidar.watch(roots, {
-    ignored: (fp: string) => {
-      // 隐藏目录/文件：只看扫描根之后的部分（根本身可以是 .openclaw-autoclaw 这类隐藏目录）
-      const rootHit = roots.find(r => fp === r || fp.startsWith(r + '/'))
-      const rel = rootHit ? fp.slice(rootHit.length) : fp
-      if (rel.split('/').some(seg => seg.startsWith('.') && seg.length > 0)) return true
-      return isExcludedPath(fp, cfg, roots)
-    },
+    // 忽略规则与扫描 walk 的排除口径必须一致，否则「已入库的文件收不到实时增改」。
+    // walk() 只按 cfg.excludeDirs 剪枝（不额外跳隐藏目录），故这里也只信 isExcludedPath：
+    // 隐藏目录若不在排除名单（如 <root>/.claude），扫描会收编，watcher 就必须同样能跟改。
+    ignored: (fp: string) => isExcludedPath(fp, cfg, roots),
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: {
