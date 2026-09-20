@@ -110,6 +110,23 @@ test('P1-① 卸载扫描根后，其下 active 文件不得成为孤儿永久�
   )
 })
 
+test('P1-①b 尾部斜杠扫描根下的文件不得被孤儿清理误伤（生产回归：24116 文件险被墓碑化）', async () => {
+  // WHY: scan_roots.path 允许带尾斜杠（POST /api/roots 原样存），而 walk() 用 path.join 产出的
+  // 文件路径永远没有尾斜杠 → 「path = root OR path LIKE root || '/%'」对这类根永久失配，
+  // 该根下所有 active 文件都会被孤儿判定误认为是无主文件。实测生产库存在此形态根
+  // /Users/duke/Documents/，其下 24116 个 active 文件占全库 48435 个的 49.8%。
+  // 正确期望：覆盖判断前先归一化根路径，带尾斜杠的根与其子文件一样保持 active。
+  const root = await makeRoot({ 'note.md': LONG, 'sub/deep.md': LONG })
+  await mountRoot(root + '/') // 故意带尾斜杠挂载
+  await scan({ roots: [], full: true, source: 'test' })
+  const fp = path.join(root, 'sub', 'deep.md')
+  assert.equal((await fileRow(fp))?.status, 'active') // 控制：walk 确实收编了该文件
+  assert.equal(
+    (await fileRow(path.join(root, 'note.md'))).status, 'active',
+    '带尾斜杠的扫描根下的文件被孤儿清理误墓碑化'
+  )
+})
+
 test('P1-③ 全量扫描已入库的隐藏目录文件，watcher 必须同样能观测到其变更', async () => {
   // WHY: walk() 不跳隐藏目录、watcher 的 ignored 规则跳（watcher.ts 按「根后相对路径含点段」过滤），
   // 于是 .hidden 下文件能被扫描入库却永远等不到实时增改——双通道可见性不一致。

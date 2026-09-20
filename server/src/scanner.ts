@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url'
 import matter from 'gray-matter'
 import { getDb } from './db.js'
 import { getExtractor, extractMd, extractHtml, readHead, inferAgent, RootBinding } from './extractor.js'
-import { loadGateConfig, isExcludedPath, checkGate, checkGateSample, purgeExcludedFiles, archiveSkippedRecords, pathWhitelisted } from './gate.js'
+import { loadGateConfig, isExcludedPath, checkGate, checkGateSample, purgeExcludedFiles, archiveSkippedRecords, pathWhitelisted, normalizeRootPath } from './gate.js'
 import { computeRuleScore, RULE_SCORE_VERSION } from './ruleScore.js'
 import { extractAliasFromFile } from './extractor.js'
 
@@ -250,6 +250,14 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
   const extSet = new Set(['.html', '.md'])
   const stats: ScanResult = { scanned: 0, added: 0, updated: 0, deleted: 0, gated: 0 }
 
+  // 存量扫描根路径归一化（幂等，仅在存在脏行时写）：尾斜杠根会让所有「path 是否位于该根之下」
+  // 的判断永久失配（walk 产出的文件路径无尾斜杠），后果是该根的文件被孤儿清理误判为无主文件、
+  // 且其删除/排除规则永不生效。实测生产库 /Users/duke/Documents/ 一个尾斜杠根牵动 24116 个文件。
+  const dirtyRoots = await (await db.prepare("SELECT id, path FROM scan_roots WHERE length(path) > 1 AND path LIKE '%/'")).all() as any[]
+  for (const r of dirtyRoots) {
+    await db.exec(`UPDATE scan_roots SET path = '${normalizeRootPath(r.path).replace(/'/g, "''")}' WHERE id = ${r.id}`)
+  }
+
   const rootStmt = await db.prepare('SELECT path, agent FROM scan_roots WHERE enabled = 1')
   const rootRows = await rootStmt.all() as any[]
   const roots = options.roots.length > 0 ? options.roots : rootRows.map((r: any) => r.path)
@@ -322,7 +330,7 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
   // 禁用根仍有行、保持冷存储语义；被删除的根则让文件从此无任何清理通道，会继续出现在看板与 MCP 检索里。
   await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
     WHERE status = 'active' AND NOT EXISTS (
-      SELECT 1 FROM scan_roots r WHERE files.path = r.path OR files.path LIKE r.path || '/%'
+      SELECT 1 FROM scan_roots r WHERE files.path = rtrim(r.path, '/') OR files.path LIKE rtrim(r.path, '/') || '/%'
     )`)
   const orphanRow = await (await db.prepare('SELECT changes() AS c')).get() as any
   stats.deleted += orphanRow.c

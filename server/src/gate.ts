@@ -189,6 +189,14 @@ export async function loadGateConfig(): Promise<GateConfig> {
   return cfg
 }
 
+/** 扫描根路径归一化：去掉尾部斜杠（根 '/' 原样保留）。
+ *  walk() 用 path.join 产出的文件路径永不含尾斜杠，而未归一化的根会让
+ *  「path = root OR path LIKE root/'%'」这类覆盖判断永久失配（该根文件被误判无主）。 */
+export function normalizeRootPath(p: string): string {
+  const s = String(p)
+  return s.length > 1 ? s.replace(/\/+$/, '') : s
+}
+
 /** 路径白名单前缀匹配：fp 等于条目或位于条目之下（或条目位于 fp 之下——用于目录剪枝放行） */
 export function pathWhitelisted(fp: string, list: string[]): boolean {
   return list.some(e => {
@@ -332,7 +340,7 @@ export function checkGateSample(fp: string, size: number, head: string, cfg: Gat
 export async function purgeExcludedFiles(cfg: GateConfig): Promise<number> {
   const db = await getDb()
   const rootRows = await (await db.prepare('SELECT path FROM scan_roots')).all() as any[]
-  const roots = rootRows.map((r: any) => r.path)
+  const roots = rootRows.map((r: any) => normalizeRootPath(r.path))
   const rows = await (await db.prepare("SELECT id, path FROM files WHERE status = 'active'")).all() as any[]
   const tombIds: number[] = []
   for (const r of rows) {
