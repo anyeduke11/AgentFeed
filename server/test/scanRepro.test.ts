@@ -50,7 +50,7 @@ async function unmountRoot(p: string) {
 
 async function fileRow(fp: string): Promise<any> {
   const db = await getDb()
-  return (await db.prepare('SELECT id, path, status, md5, gate_sampled FROM files WHERE path = ?')).get(fp)
+  return (await db.prepare('SELECT id, path, status, md5, gate_sampled, file_mtime FROM files WHERE path = ?')).get(fp)
 }
 
 async function gateRow(fp: string): Promise<any> {
@@ -195,6 +195,37 @@ test('P1-⑫ 扫描根整轮走不到（卷掉线/符号链接子树）时，增
   await unmountRoot(root)
   await scan({ roots: [], full: false, source: 'test' })
   assert.equal((await fileRow(fp)).status, 'deleted', '根已卸载时孤儿清理应生效')
+})
+
+test('P1-⑬ 内容未变但 mtime 改变的墓碑，增量扫描必须复活并刷新元数据', async () => {
+  // WHY: 生产库 5061 个「磁盘上存在却 status=deleted」的文件全部卡在这条路径上：
+  // marketplace 整目录重克隆后内容逐字节相同、mtime 已变，ingestFile 的 md5 快路径
+  // 只判 `md5 相同 && !full` 就 return，不看 status，墓碑永不翻回 active，且每轮增量
+  // 重新命中同一分支（file_mtime 永不刷新）。
+  // 正确期望：md5 快路径只豁免 active 行；deleted 行走完整流程，复活并刷新 mtime/size。
+  const root = await makeRoot({ 'skill.md': LONG })
+  await mountRoot(root)
+  const fp = path.join(root, 'skill.md')
+  await scan({ roots: [root], full: true, source: 'test' })
+  const before = await fileRow(fp)
+  assert.equal(before?.status, 'active') // 控制：入库成功
+
+  await unmountRoot(root)
+  await scan({ roots: [], full: false, source: 'test' })
+  assert.equal((await fileRow(fp)).status, 'deleted') // 控制：孤儿清理生效
+
+  const later = new Date(Date.now() + 3600_000) // 内容一字未改，只换 mtime（重克隆形态）
+  await fs.utimes(fp, later, later)
+  await mountRoot(root)
+  const res = await scan({ roots: [root], full: false, source: 'test' })
+  const after = await fileRow(fp)
+  assert.equal(after.status, 'active', 'mtime 变、md5 未变的墓碑被增量快路径永久豁免')
+  // 复活的同一轮要把 file_mtime 刷新，否则下一轮仍落在同一分支，周期扫描永远重复 md5 读文件
+  assert.ok(
+    Math.abs(new Date(after.file_mtime).getTime() - later.getTime()) < 1000,
+    `复活时未刷新 file_mtime（库内 ${after.file_mtime} vs 目标 ${later.toISOString()}）：下一轮还会走慢路径`
+  )
+  assert.equal(res.updated + res.added, 1, '复活应计入本轮台账')
 })
 
 test('特征化（⑨ 拼接转义安全网）：路径含单引号与 SQL 片段应完整入库且不破坏表结构', async () => {
