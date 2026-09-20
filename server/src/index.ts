@@ -106,7 +106,9 @@ app.listen(PORT, async () => {
 
   // 启用根自动增量扫描：watcher 只覆盖运行期变化，启动兜底 + 周期增量补齐停机期间的文件变更。
   // 范围 = 全部启用根，仅剔除本机不存在的 agent 目录（手工挂载的普通目录同样纳入）
-  const AGENT_RESCAN_MS = 30 * 60 * 1000
+  // 间隔读 config:scan.rescanMinutes（默认 120 分钟，每轮重读所以改完下一轮生效）：
+  // 个人电脑上 22 个根一轮实测 112s，可以慢但要稳——降低常驻磁盘/CPU 占用，把带宽留给蒸馏队列。
+  const DEFAULT_RESCAN_MINUTES = 120
   let agentScanBusy = false
   const agentRescan = async (reason: string) => {
     if (agentScanBusy) return
@@ -119,13 +121,31 @@ app.listen(PORT, async () => {
       if (roots.length === 0) return
       const result = await scan({ roots, full: false, source: reason })
       recordScan(result)
-      console.log(`agent rescan(${reason}): ${roots.length} root(s) · ${Date.now() - t0}ms · +${result.added} ~${result.updated} -${result.deleted} 门禁${result.gated}`)
+      const guarded = result.sweepSkipped?.length
+        ? ` · 护栏跳过清理 ${result.sweepSkipped.reduce((s: number, x: any) => s + x.count, 0)} 个（${result.sweepSkipped.length} 个根）`
+        : ''
+      console.log(`agent rescan(${reason}): ${roots.length} root(s) · ${Date.now() - t0}ms · +${result.added} ~${result.updated} -${result.deleted} 门禁${result.gated}${guarded}`)
     } finally {
       agentScanBusy = false
     }
   }
+  const rescanDelayMs = async () => {
+    const db = await getDb()
+    const row = await (await db.prepare("SELECT value FROM config WHERE key = 'scan.rescanMinutes'")).get() as any
+    const n = row ? Number(row.value) : NaN
+    return (Number.isFinite(n) && n >= 5 ? n : DEFAULT_RESCAN_MINUTES) * 60 * 1000
+  }
+  // 自我续期而非固定 setInterval：间隔改了下轮即生效，单轮失败也不打断排程
+  const scheduleRescan = () => {
+    rescanDelayMs()
+      .catch(() => DEFAULT_RESCAN_MINUTES * 60 * 1000)
+      .then((ms) => setTimeout(() => {
+        agentRescan('interval').catch(e => console.error('agent rescan failed', e))
+        scheduleRescan()
+      }, ms))
+  }
   setTimeout(() => { agentRescan('boot').catch(e => console.error('agent rescan failed', e)) }, 15 * 1000)
-  setInterval(() => { agentRescan('interval').catch(e => console.error('agent rescan failed', e)) }, AGENT_RESCAN_MS)
+  scheduleRescan()
 
   // WAL 治理：boot 截断存量 WAL（排在 15s 重扫之前），此后每 10 分钟 best-effort 截断；
   // 其他进程（如 MCP 子进程）持锁时本轮放弃（busy / null），下轮再试
