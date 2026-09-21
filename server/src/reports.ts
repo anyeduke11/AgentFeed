@@ -3,6 +3,7 @@ import fs from 'fs/promises'
 import { SqliteDatabase } from '@homeofthings/sqlite3'
 import { DATA_DIR, getDb } from './db.js'
 import { selectDailyPicks, localDateStr } from './routes/recommend.js'
+import { cleanTitle, cleanSummary } from './formatter.js'
 
 // 日报日期严格 YYYY-MM-DD：既是文件名白名单，也是定时任务跨天判断的「日」口径
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -110,7 +111,12 @@ export async function generateDailyReport(db: SqliteDatabase, date: string): Pro
     if (await fs.stat(htmlPath).catch(() => null)) return { generated: false, date, path: htmlPath }
   }
   const stats = await distillStats(db, date)
-  const picks = await selectDailyPicks(db, date)
+  // A3 出口层清洗：脏 title / 超长 reason 只在渲染层改写（md/html 双格式共用此映射），库内不回写
+  const picks = (await selectDailyPicks(db, date)).map(p => ({
+    ...p,
+    title: typeof p.title === 'string' ? cleanTitle(p.title) : p.title,
+    reason: typeof p.reason === 'string' ? cleanSummary(p.reason) : p.reason,
+  }))
   await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(mdPath, renderMarkdown(date, stats, picks), 'utf8')
   await fs.writeFile(htmlPath, renderHtml(date, stats, picks), 'utf8')
