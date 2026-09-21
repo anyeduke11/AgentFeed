@@ -222,11 +222,14 @@ async function submitDomain() {
   if (isEdit.value) {
     const d = editingDomain.value
     if (d) {
-      await domains.updateDomain(d.id, { name, color: dmColor.value })
+      const r = await domains.updateDomain(d.id, { name, color: dmColor.value })
+      if (r?.success === false) return ui.toast(r.message || '保存失败')
+      if (r?.warning) ui.toast(r.warning)
       ui.toast(`已更新领域「${name}」`)
     }
   } else {
-    await domains.createDomain({ name, color: dmColor.value, parent_id: dmParent.value === '' ? null : dmParent.value })
+    const r = await domains.createDomain({ name, color: dmColor.value, parent_id: dmParent.value === '' ? null : dmParent.value })
+    if (r?.success === false) return ui.toast(r.message || '创建失败：同名领域可能已存在')
     ui.toast(`已新增领域「${name}」`)
   }
   ui.closeModal()

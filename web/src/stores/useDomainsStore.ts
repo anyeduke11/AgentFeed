@@ -17,13 +17,17 @@ export const useDomainsStore = defineStore('domains', () => {
   }
 
   async function createDomain(data: any) {
-    await api.domains.create(data)
+    const r = await api.domains.create(data)
+    if (r?.success === false) return r
     await fetchDomains()
+    return r
   }
 
   async function updateDomain(id: number, data: any) {
-    await api.domains.update(id, data)
+    const r = await api.domains.update(id, data)
+    if (r?.success === false) return r
     await fetchDomains()
+    return r
   }
 
   async function removeDomain(id: number) {

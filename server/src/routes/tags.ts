@@ -1,11 +1,15 @@
 import { Router } from 'express'
-import { getDb } from '../db.js'
+import { getDb, normalizeKey } from '../db.js'
 import {
   mergeTagsInto, runNormalizeScan, startSemanticScan, startLevelScan,
   scanState, relatedTags, tagStats, exportTags, importTags
 } from '../llm/tagGovernance.js'
 
 export const tagsRouter = Router()
+
+/** 手动升级一级（领域）的挂载量级门槛：低于此值默认拒绝，确需升级传 force:true 人工担责；
+ * AI 二级选拔线另有 ≥50 的参与门槛（startLevelScan），两线独立 */
+const MIN_PRIMARY_MOUNTS = 10
 
 // 所有 handler 包 try/catch：SQLITE_BUSY 等瞬态错误返回 JSON 而非杀死进程（Express 4 不接 async rejection）
 const wrap = (fn: (req: any, res: any) => Promise<void>) => (req: any, res: any) => {
@@ -66,6 +70,8 @@ tagsRouter.patch('/:id', wrap(async (req, res) => {
   const row = await (await db.prepare('SELECT id, status FROM tags WHERE id = ?')).get(id) as any
   if (!row) return res.status(404).json({ success: false, message: '标签不存在' })
   const sets: string[] = []
+  let warnings: string[] = []
+  let analysis: Record<string, unknown> | null = null
   if (name !== undefined) {
     const trimmed = String(name).trim()
     if (!trimmed) return res.status(400).json({ success: false, message: 'name 不能为空' })
@@ -75,28 +81,59 @@ tagsRouter.patch('/:id', wrap(async (req, res) => {
   if (level !== undefined) {
     if (!['primary', 'secondary', 'normal'].includes(level)) return res.status(400).json({ success: false, message: 'level 仅支持 primary/secondary/normal' })
     if (level === 'primary') {
-      // 一级 = 就是领域：显式 domainId（校验存在，垃圾值 fail loud 与 parentTagId 对齐）优先；
-      // 否则按本次请求生效名（改名同请求时取新名）同名锚定，缺则自动创建（配色由领域列表接口兜底）
+      // 门禁：升级一级 = 创建/绑定领域，必须量级够硬——挂载次数达 MIN_PRIMARY_MOUNTS 才放行，
+      // 低量级确需升级传 force:true 人工担责（修复「0 挂载也能升一级」的零门槛漏洞）
+      const cntRow = await (await db.prepare('SELECT COUNT(*) AS n FROM file_tags WHERE tag_id = ?')).get([id]) as any
+      const mounts = Number(cntRow?.n || 0)
+      if (!req.body?.force && mounts < MIN_PRIMARY_MOUNTS) {
+        return res.status(400).json({ success: false, message: `升级一级需挂载 ≥ ${MIN_PRIMARY_MOUNTS} 次（当前 ${mounts}）：低量级标签不足以支撑领域；确认无误请传 force: true 强制升级` })
+      }
+      // 一级 = 就是领域，且名实必须一致（领域 ≡ 同名一级标签）：显式 domainId 优先（校验存在 + 校验同名），
+      // 否则按本次请求生效名（改名同请求时取新名）归一锚定——全角/大小写/空白变体视为同一领域，不再造重复领域
+      const cur = await (await db.prepare('SELECT name FROM tags WHERE id = ?')).get([id]) as any
+      const effectiveName = name !== undefined ? String(name).trim() : cur?.name
+      if (!effectiveName) return res.status(400).json({ success: false, message: '无法确定领域：标签缺少有效名称' })
+      const effKey = normalizeKey(effectiveName)
+      const allDomains = await (await db.prepare('SELECT id, name FROM domains')).all() as any[]
       let domainId: number | null = null
       if (req.body?.domainId != null) {
         const did = parseInt(req.body.domainId)
-        const dom = did ? await (await db.prepare('SELECT id FROM domains WHERE id = ?')).get([did]) as any : null
+        const dom = did ? allDomains.find(d => Number(d.id) === did) : null
         if (!dom) return res.status(400).json({ success: false, message: 'domainId 必须指向已存在的领域' })
+        if (normalizeKey(String(dom.name)) !== effKey) {
+          return res.status(400).json({ success: false, message: `一级标签名必须与领域名一致：「${effectiveName}」≠ 领域「${dom.name}」（领域 ≡ 同名一级标签）` })
+        }
         domainId = dom.id
       } else {
-        const cur = await (await db.prepare('SELECT name FROM tags WHERE id = ?')).get([id]) as any
-        const effectiveName = name !== undefined ? String(name).trim() : cur?.name
-        if (!effectiveName) return res.status(400).json({ success: false, message: '无法确定领域：标签缺少有效名称' })
-        const dom = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(effectiveName) as any
-        if (dom) domainId = dom.id
-        else {
+        const dom = allDomains.find(d => normalizeKey(String(d.name)) === effKey)
+        if (dom) {
+          domainId = dom.id
+          warnings.push(`领域「${dom.name}」已存在，本次为挂靠绑定而非新建${String(dom.name) !== effectiveName ? '（名称按归一比对匹配：全角/大小写/空白差异，标签名将自动对齐领域名）' : ''}`)
+        } else {
           await db.exec(`INSERT INTO domains (name) VALUES ('${effectiveName.replace(/'/g, "''")}')`)
-          const created = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(effectiveName) as any
-          domainId = created?.id ?? null
+          domainId = (await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(effectiveName) as any)?.id ?? null
         }
       }
       if (!domainId) return res.status(400).json({ success: false, message: '无法确定领域：显式 domainId 或按名称创建领域失败' })
+      // 挂靠既有领域时标签名对齐领域规范名（守护「同名」不变式，否则启动对账 ensureDomainTag 按精确名补建会撞 UNIQUE）
+      const boundDomain = allDomains.find(d => Number(d.id) === Number(domainId)) as any
+      if (boundDomain && effectiveName !== String(boundDomain.name)) sets.push(`name = '${String(boundDomain.name).replace(/'/g, "''")}'`)
       sets.push(`level = 'primary'`, `domain_id = ${Number(domainId)}`, 'parent_tag_id = NULL')
+      // 现有一级格局分析：本次升级排在第几梯队、与头部领域量级对比（修复「升级无对比分析」）
+      const primaries = await (await db.prepare(`
+        SELECT t.id, t.name, COUNT(ft.file_id) AS mounts FROM tags t
+        LEFT JOIN file_tags ft ON ft.tag_id = t.id
+        WHERE t.status = 'active' AND t.level = 'primary' AND t.id != ?
+        GROUP BY t.id ORDER BY mounts DESC`)).all([id]) as any[]
+      const rank = primaries.filter(r => Number(r.mounts) >= mounts).length + 1
+      const total = primaries.length + 1
+      if (total > 1 && rank > total / 2) warnings.push(`当前挂载 ${mounts} 次在现有 ${total} 个领域中排第 ${rank}，量级偏后，建议确认是否真为核心领域`)
+      analysis = {
+        mounts,
+        rank,
+        totalPrimaries: total,
+        topPrimaries: primaries.slice(0, 5).map(r => ({ name: r.name, mounts: Number(r.mounts) })),
+      }
     } else if (level === 'secondary') {
       // 二级 = 次要领域，树形挂靠在某个一级标签下（手动强制；AI 选拔提案接受后落「未挂靠」，由前端补挂）
       const pid = req.body?.parentTagId != null ? parseInt(req.body.parentTagId) : NaN
@@ -117,7 +154,11 @@ tagsRouter.patch('/:id', wrap(async (req, res) => {
   try {
     await db.exec(`UPDATE tags SET ${sets.join(', ')} WHERE id = ${id}`)
     await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('update', '${JSON.stringify(req.body).replace(/'/g, "''")}')`)
-    res.json({ success: true })
+    res.json({
+      success: true,
+      ...(warnings.length ? { warnings } : {}),
+      ...(analysis ? { analysis } : {}),
+    })
   } catch (e: any) {
     res.status(409).json({ success: false, message: '改名冲突：同名标签已存在' })
   }
@@ -194,16 +235,20 @@ tagsRouter.post('/proposals/:id/accept', wrap(async (req, res) => {
     await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
     return res.json({ success: true, merged: memberIds.length, moved })
   }
-  // level：按名字批量降为次要（软挂：不指父，落「未挂靠」组，由前端补挂；已被合并/停用的自动跳过）
+  // level：按名字批量降为次要（软挂：不指父，落「未挂靠」组，由前端补挂；已被合并/停用的自动跳过）。
+  // 领域锚点保护：与领域同名（归一比对）的标签是「领域 ≡ 一级标签」的锚，降级会让领域失锚且同名阻塞重建——跳过并计数
+  const domainKeys = new Set(((await (await db.prepare('SELECT name FROM domains')).all()) as any[]).map(r => normalizeKey(r.name)))
   let downgraded = 0
+  let skippedPrimary = 0
   for (const name of members) {
+    if (domainKeys.has(normalizeKey(name))) { skippedPrimary++; continue }
     const esc = String(name).replace(/'/g, "''")
-    await db.exec(`UPDATE tags SET level = 'secondary', parent_tag_id = NULL WHERE name = '${esc}' AND status = 'active'`)
+    await db.exec(`UPDATE tags SET level = 'secondary', parent_tag_id = NULL WHERE name = '${esc}' AND status = 'active' AND level != 'primary'`)
     downgraded++
   }
   await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
   await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('accept_level', '${p.members.replace(/'/g, "''")}')`)
-  res.json({ success: true, downgraded })
+  res.json({ success: true, downgraded, ...(skippedPrimary ? { skippedPrimary } : {}) })
 }))
 
 tagsRouter.post('/proposals/:id/reject', wrap(async (req, res) => {

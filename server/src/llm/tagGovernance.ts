@@ -1,13 +1,11 @@
-import { getDb } from '../db.js'
+import { getDb, normalizeKey } from '../db.js'
 import { callLlm } from './index.js'
 import { getDefaultProvider, getDefaultModel } from './llmClient.js'
 
 // ---- 标签治理引擎：规则归一（自动）+ AI 语义归组（待审）+ AI 次要标签判定（待审） ----
 
-/** 归一化 key：全角转半角 + 小写 + 去所有空白（「4C 能力模型」≡「4C能力模型」） */
-export function normalizeKey(name: string): string {
-  return String(name).normalize('NFKC').toLowerCase().replace(/\s+/g, '')
-}
+// 归一化 key 已上移 db.ts（领域/标签查重统一口径），此处 re-export 保持既有导入路径兼容
+export { normalizeKey }
 
 /** 打标入口统一防重：已合并的标签自动跟随指向（链式最多 5 跳防环），不存在则创建 */
 export async function ensureTag(db: any, rawName: string): Promise<number | null> {
@@ -202,6 +200,13 @@ async function levelScanJob(minCount: number, batchSize: number) {
   const db = await getDb()
   try {
     const tags = await loadActiveTags({ level: 'normal', minFc: minCount })
+    // 现有一级格局注入 prompt：AI 必须对照已有领域做重复/相近分析（此前不给清单，LLM 无从比对，「语义不与一级重复」形同虚设）
+    const primaries = await (await db.prepare(`
+      SELECT t.name, COUNT(ft.file_id) AS mounts FROM tags t
+      LEFT JOIN file_tags ft ON ft.tag_id = t.id
+      WHERE t.status = 'active' AND t.level = 'primary'
+      GROUP BY t.id ORDER BY mounts DESC`)).all() as any[]
+    const primaryList = primaries.map(r => `${r.name}(${Number(r.mounts)})`).join('、') || '（暂无）'
     const batches: Array<typeof tags> = []
     for (let i = 0; i < tags.length; i += batchSize) batches.push(tags.slice(i, i + batchSize))
     scanState.total = batches.length
@@ -213,8 +218,14 @@ async function levelScanJob(minCount: number, batchSize: number) {
       const nameSet = new Set(batch.map(t => t.name))
       const prompt = `你是内容管理系统的标签分级助手。下面是普通标签列表（n 为名字，c 为使用次数）。
 从中挑出能代表「次要关键领域」的标签：应是一个有检索归类价值的主题领域概念（如技术方向、方法论、业务域），且语义不与已有的一级领域重复；过于细节、只对单篇内容有意义的标签不要选。
-宁缺勿滥（不超过列表的一半）。
+判定要求：
+1. 候选与现有一级领域同名、近义或为其子概念（如「前端」之于「前端开发」）→ 不要选，那属于重复而非补位；
+2. 候选应填补现有领域空白，优先使用次数高、概念泛化能力强的标签（量级是「重要标签」的依据）；
+3. 宁缺勿滥（不超过列表的一半）。
 输出 json：{"secondary":["标签名"],"reason":"整体说明"}
+
+现有的一级关键领域（名字，括号内为挂载次数）：
+${primaryList}
 
 标签列表：
 ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
