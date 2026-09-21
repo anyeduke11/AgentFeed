@@ -70,6 +70,10 @@ export async function getDb(): Promise<SqliteDatabase> {
     await ensureColumns(db, 'files', [
       { name: 'gate_sampled', ddl: 'gate_sampled INTEGER DEFAULT 0' }
     ])
+    // 既有库列迁移（Phase 2 任务 2.2：entry_chunks content_hash——旧库补列，hash 相同不重嵌）
+    await ensureColumns(db, 'entry_chunks', [
+      { name: 'content_hash', ddl: 'content_hash TEXT' }
+    ])
     // exec_queue v2 迁移：间隔重复需要同文件多轮复习（多行），去掉 file_id UNIQUE（幂等：仅旧库触发）
     const qIdx = await (await db.prepare('PRAGMA index_list(exec_queue)')).all() as any[]
     if (qIdx.some(i => Number(i.unique) === 1 && i.origin === 'u')) {
@@ -83,21 +87,51 @@ export async function getDb(): Promise<SqliteDatabase> {
           done_at DATETIME
         );
         INSERT INTO exec_queue_v2 (id, file_id, due_at, interval_stage, status, done_at)
-          SELECT id, file_id, due_at, interval_stage, status, done_at FROM exec_queue;
+        SELECT id, file_id, due_at, interval_stage, status, done_at FROM exec_queue;
         DROP TABLE exec_queue;
         ALTER TABLE exec_queue_v2 RENAME TO exec_queue;
         CREATE INDEX IF NOT EXISTS idx_exec_queue_status ON exec_queue(status, due_at);
       `)
     }
+    // J1 用户画像（v0.1.5 第 7 批）：单一事实源，人读维护页与机读双出口（get_user_context 工具 + AGENTS.md 托管区块）
+    // 共用——content 为断言列表 JSON（schema 见 profile/model.ts），版本链靠 active 标记（新版 1 旧版 0），可 diff 可回滚
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS user_profile (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL CHECK(scope IN ('global', 'domain')),
+        domain_id INTEGER REFERENCES domains(id),
+        content TEXT NOT NULL,
+        evidence JSON,
+        confidence REAL,
+        generated_at DATETIME,
+        active INTEGER DEFAULT 1,
+        UNIQUE(scope, domain_id, generated_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_profile_active ON user_profile(active, scope, domain_id);
+    `)
+    // I2 用户理解信号预留：评分（1-5 星）与一句话反馈落 read_history（J1 聚合统计包的 avgRating 来源）
+    await ensureColumns(db, 'read_history', [
+      { name: 'rating', ddl: 'rating INTEGER CHECK(rating BETWEEN 1 AND 5)' },
+      { name: 'feedback', ddl: 'feedback TEXT' }
+    ])
     await seedDefaults(db)
     await migrateTagLevels(db)
+    await reconcileDomainTagSync(db)
   }
   return db
 }
 
+/** 归一化 key：全角转半角 + 小写 + 去所有空白（「4C 能力模型」≡「4C能力模型」）——领域/标签查重与对齐统一口径 */
+export function normalizeKey(name: string): string {
+  return String(name).normalize('NFKC').toLowerCase().replace(/\s+/g, '')
+}
+
 /** 强一致不变式：领域 ≡ 一级主要标签——确保领域拥有同名 active 一级标签（缺则建，同名普通/停用标签则升格绑定） */
 export async function ensureDomainTag(db: SqliteDatabase, domainId: number, name: string) {
-  const exist = await (await db.prepare('SELECT id, level, status FROM tags WHERE name = ?')).get([name]) as any
+  // 语句用毕即 finalize：未 finalize 的读取语句会让同连接后续 DDL（如 DROP/CREATE INDEX）报 SQLITE_LOCKED
+  const stmt = await db.prepare('SELECT id, level, status FROM tags WHERE name = ?')
+  const exist = await stmt.get([name]) as any
+  stmt.finalize()
   if (!exist) {
     await db.exec(`INSERT INTO tags (name, level, status, domain_id) VALUES ('${String(name).replace(/'/g, "''")}', 'primary', 'active', ${Number(domainId)})`)
   } else if (exist.level !== 'primary' || exist.status !== 'active') {
@@ -105,12 +139,14 @@ export async function ensureDomainTag(db: SqliteDatabase, domainId: number, name
   }
 }
 
-/** 标签体系一次性迁移（v1）：level 三态化——一级=领域挂靠标签（同名自动锚定），其余碎片 primary 转 normal；config 版本键防重跑 */
+/** 标签体系一次性迁移（v1~v4）：level 三态化——一级=领域挂靠标签（同名自动锚定），其余碎片 primary 转 normal；config 版本键防重跑 */
 export async function migrateTagLevels(db: SqliteDatabase) {
   const key = 'tagSystem.levelVersion'
-  const row = await (await db.prepare('SELECT value FROM config WHERE key = ?')).get([key]) as any
+  const cfgStmt = await db.prepare('SELECT value FROM config WHERE key = ?')
+  const row = await cfgStmt.get([key]) as any
+  cfgStmt.finalize()
   const ver = row ? (parseInt(row.value) || 0) : 0
-  if (ver >= 3) return
+  if (ver >= 4) return
   await db.transactionalize(async () => {
     // v1：与领域同名的 active 一级标签补挂靠（锚点）
     await db.exec(`UPDATE tags SET domain_id = (SELECT d.id FROM domains d WHERE d.name = tags.name)
@@ -123,11 +159,62 @@ export async function migrateTagLevels(db: SqliteDatabase) {
     await db.exec(`UPDATE tags SET level = 'normal' WHERE status != 'active' AND level = 'primary' AND domain_id IS NULL`)
     // v3（2026-09-20）：领域 ≡ 一级标签强一致——为缺同名 active 一级标签的领域补建/升格
     // （POST/PATCH 领域历史上不同步标签：真实库「前端开发」领域改名「应用开发」后一级标签留在旧名 retired）
-    const drows = await (await db.prepare('SELECT id, name FROM domains')).all() as any[]
+    const domStmt = await db.prepare('SELECT id, name FROM domains')
+    const drows = await domStmt.all() as any[]
+    domStmt.finalize()
     for (const d of drows) await ensureDomainTag(db, Number(d.id), String(d.name))
+    // v4（2026-09-21）：重复领域去重——UNIQUE(name, parent_id) 对 NULL 父级失效（SQLite NULL 互不相等），
+    // 真实库「缺省域」×2、「预算域」×3 即此缺口。按名分组：保留挂文件最多者，files/tags 引用先重指向再删除其余，
+    // 避免悬挂 domain_id；然后建部分唯一索引堵住 NULL 父级重复的再生入口（应用层查重之外的 DB 底线）
+    await db.exec(`
+      WITH grp AS (
+        SELECT g.name AS name,
+          (SELECT d.id FROM domains d WHERE d.name = g.name
+            ORDER BY (SELECT COUNT(*) FROM files f WHERE f.domain_id = d.id) DESC, d.id ASC LIMIT 1) AS keeper
+        FROM (SELECT DISTINCT name FROM domains) g
+      )
+      UPDATE files SET domain_id = (SELECT keeper FROM grp WHERE grp.name = (SELECT name FROM domains WHERE id = files.domain_id))
+      WHERE domain_id IN (SELECT d.id FROM domains d JOIN grp ON grp.name = d.name WHERE d.id <> grp.keeper)`)
+    await db.exec(`
+      WITH grp AS (
+        SELECT g.name AS name,
+          (SELECT d.id FROM domains d WHERE d.name = g.name
+            ORDER BY (SELECT COUNT(*) FROM files f WHERE f.domain_id = d.id) DESC, d.id ASC LIMIT 1) AS keeper
+        FROM (SELECT DISTINCT name FROM domains) g
+      )
+      UPDATE tags SET domain_id = (SELECT keeper FROM grp WHERE grp.name = (SELECT name FROM domains WHERE id = tags.domain_id))
+      WHERE domain_id IN (SELECT d.id FROM domains d JOIN grp ON grp.name = d.name WHERE d.id <> grp.keeper)`)
+    await db.exec(`
+      WITH grp AS (
+        SELECT g.name AS name,
+          (SELECT d.id FROM domains d WHERE d.name = g.name
+            ORDER BY (SELECT COUNT(*) FROM files f WHERE f.domain_id = d.id) DESC, d.id ASC LIMIT 1) AS keeper
+        FROM (SELECT DISTINCT name FROM domains) g
+      )
+      DELETE FROM domains WHERE id IN (SELECT d.id FROM domains d JOIN grp ON grp.name = d.name WHERE d.id <> grp.keeper)`)
+    await db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_domains_name_root ON domains(name) WHERE parent_id IS NULL`)
     await db.exec(`INSERT INTO config (key, value, type, description)
-      VALUES ('${key}', '3', 'number', '标签三态+领域挂靠迁移已执行（防重跑）')
-      ON CONFLICT(key) DO UPDATE SET value = '3', updated_at = CURRENT_TIMESTAMP`)
+      VALUES ('${key}', '4', 'number', '标签三态+领域挂靠+领域去重迁移已执行（防重跑）')
+      ON CONFLICT(key) DO UPDATE SET value = '4', updated_at = CURRENT_TIMESTAMP`)
+  })
+}
+
+/** 领域↔标签对账（每次启动执行，非一次性迁移）：日常漂移自愈。
+ * 迁移版本键防重跑，但「标签改名不同步领域名」「领域改名同步静默失败」等漂移在运行期持续产生，
+ * 只靠一次性迁移清不干净——对账必须常态化：幽灵一级降级、死头衔清理、领域缺标签补齐。 */
+export async function reconcileDomainTagSync(db: SqliteDatabase) {
+  await db.transactionalize(async () => {
+    // active 一级但未挂靠（或挂靠指向已删领域）→ 降普通（一级必须绑定领域的约束）
+    await db.exec(`UPDATE tags SET level = 'normal'
+      WHERE status = 'active' AND level = 'primary'
+        AND (domain_id IS NULL OR domain_id NOT IN (SELECT id FROM domains))`)
+    // 非 active 残留 primary 头衔清理（v2 逻辑日常化）
+    await db.exec(`UPDATE tags SET level = 'normal' WHERE status != 'active' AND level = 'primary'`)
+    // 每个领域必须拥有同名 active 一级标签（v3 逻辑日常化）
+    const domStmt = await db.prepare('SELECT id, name FROM domains')
+    const drows = await domStmt.all() as any[]
+    domStmt.finalize()
+    for (const d of drows) await ensureDomainTag(db, Number(d.id), String(d.name))
   })
 }
 
@@ -349,7 +436,8 @@ function initTables(db: SqliteDatabase) {
     );
 
     -- Phase 2 检索基建（任务 2.2）：entry.md 按 heading 分块的向量路；parent = wiki_entries_meta.id，
-    -- 向量存法对齐 file_embeddings（JSON 文本），UNIQUE(entry_id, chunk_index) 支撑回填幂等
+    -- 向量存法对齐 file_embeddings（JSON 文本），UNIQUE(entry_id, chunk_index) 支撑回填幂等；
+    -- content_hash = sha256(嵌入文本)，hash 相同跳过重嵌（chunkEmbed.ts chunkHash）
     CREATE TABLE IF NOT EXISTS entry_chunks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       entry_id INTEGER NOT NULL,
@@ -359,6 +447,7 @@ function initTables(db: SqliteDatabase) {
       model TEXT,
       dim INTEGER,
       embedding TEXT,
+      content_hash TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(entry_id, chunk_index)
     );
@@ -438,7 +527,9 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'ai.ollama.enabledModels', value: '[]', type: 'json', description: 'Ollama 启用的模型列表' },
     { key: 'ai.ollama.modelTypes', value: '{}', type: 'json', description: 'Ollama 模型用途映射（chat/embedding）' },
     { key: 'ai.embedding', value: JSON.stringify({ enabled: false, provider: 'ollama', model: '' }), type: 'json', description: '蒸馏向量化配置' },
-    { key: 'search.vectorEnabled', value: 'true', type: 'boolean', description: '检索向量路总开关（分块嵌入回填，provider 可用时才生效）' }
+    { key: 'search.vectorEnabled', value: 'true', type: 'boolean', description: '检索向量路总开关（分块嵌入回填，provider 可用时才生效）' },
+    { key: 'ai.pricing', value: '{}', type: 'json', description: 'LLM 单价表（元/百万 token），key=provider/model，如 {"ollama/qwen3":{"input":0,"output":0}}' },
+    { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' }
   ]
 
   await db.transactionalize(async () => {
