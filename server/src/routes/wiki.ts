@@ -1,8 +1,13 @@
 import { Router } from 'express'
 import fs from 'fs/promises'
+import { existsSync } from 'fs'
 import path from 'path'
 import { getDb } from '../db.js'
 import { withinScanRoots } from './files.js'
+import { exportWiki, verifyWikiExport, WIKI_EXPORTS_DIR } from '../exportWiki.js'
+import { syncWikiFts } from '../search/ftsIndex.js'
+import { indexWikiChunks } from '../search/chunkEmbed.js'
+import { getEmbeddingConfig } from '../llm/embeddings.js'
 
 export const wikiRouter = Router()
 
@@ -165,6 +170,9 @@ wikiRouter.post('/import', async (req, res) => {
         `INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, source_type, title, summary, tags, confidence)
          VALUES (?, ?, 0, ?, 'imported', ?, ?, ?, ?)`
       )).run([e.matchedFileId ?? null, e.file, distilledAt, e.title || path.basename(e.file, '.md'), e.summary, JSON.stringify(e.tags), e.confidence || null])
+      // Wave 1 挂点：导入写入后同步 FTS 关键词索引（刚插的行按 entry_path 取回 id；分块向量由设置页手动补嵌覆盖）
+      const metaRow = await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE entry_path = ?')).get([e.file]) as any
+      if (metaRow) await syncWikiFts(db, Number(metaRow.id))
       imported++
       if (e.match === 'matched' && e.matchedFileId) {
         // 源文件已被外部词条覆盖，标记 imported 从蒸馏队列剔除（AI 评估链路待 PDF/docx 入库后启用）
@@ -173,6 +181,118 @@ wikiRouter.post('/import', async (req, res) => {
       }
     }
     res.json({ success: true, imported, linked, skipped: entries.filter(e => e.match === 'already').length, stats: extStats(entries) })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+/* ---------------- 分块向量手动补嵌（parent-child 检索路） ----------------
+ * 启动期全量补嵌已移除（本地 GPU compute-bound：54 万块串行 ~53h，不适合常驻满载）。
+ * 改为前端手动分批触发：每批快照 pending 词条（默认 50，上限 500），后台逐条走
+ * indexWikiChunks（chunk content_hash 幂等，可断点续跑）；配置类降级（开关关闭/未配置/
+ * provider 缺失）整批中止且不计词条失败——修复配置后重跑同批即可。
+ * 新蒸馏词条仍由 llmWorker 蒸馏后逐条即时索引，增量路径不欠账。
+ */
+export const chunkBackfillState = {
+  running: false,
+  stopRequested: false,
+  lastRun: null as null | { at: string; batch: number; indexed: number; failed: number; stopped: boolean; reason: string }
+}
+
+wikiRouter.get('/chunks/backfill/status', async (req, res) => {
+  try {
+    const db = await getDb()
+    const pendRow = await (await db.prepare('SELECT COUNT(*) AS cnt FROM wiki_entries_meta m WHERE NOT EXISTS (SELECT 1 FROM entry_chunks c WHERE c.entry_id = m.id)')).get() as any
+    const chunkRow = await (await db.prepare('SELECT COUNT(*) AS cnt FROM entry_chunks')).get() as any
+    res.json({ success: true, running: chunkBackfillState.running, pending: pendRow.cnt, chunks: chunkRow.cnt, lastRun: chunkBackfillState.lastRun })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+wikiRouter.post('/chunks/backfill/start', async (req, res) => {
+  try {
+    if (chunkBackfillState.running) return res.json({ success: false, message: '补嵌批次进行中，请等待完成或先停止' })
+    const db = await getDb()
+    const cfg = await getEmbeddingConfig()
+    if (!cfg.enabled || !cfg.model) return res.json({ success: false, message: '请先开启蒸馏向量化并选择向量模型' })
+    const limit = Math.min(Math.max(Number(req.body?.limit) || 50, 1), 500)
+    // 死链过滤：entry.md 已不存在的词条（如外部项目导入后源目录被删）在快照层跳过——
+    // 否则死链不消费 pending、常驻候选窗口头部，每批名额被无文件词条空耗（实测死链区深达数千条，
+    // 小窗口翻页无法越过）。全池扫描 + fs 过滤：手动触发场景毫秒级，且死链总数可精确上报
+    const candidates = await (await db.prepare(
+      'SELECT m.id, m.entry_path FROM wiki_entries_meta m WHERE NOT EXISTS (SELECT 1 FROM entry_chunks c WHERE c.entry_id = m.id) ORDER BY m.id'
+    )).all() as any[]
+    const alivePool = candidates.filter(r => existsSync(String(r.entry_path)))
+    const deadSkipped = candidates.length - alivePool.length
+    if (!alivePool.length) {
+      const message = candidates.length
+        ? `全部 ${candidates.length} 个待嵌词条的源文件均已缺失（死链），无活词条可补`
+        : '无待嵌词条'
+      return res.json({ success: true, started: false, message })
+    }
+    const batch = alivePool.slice(0, limit)
+    chunkBackfillState.running = true
+    chunkBackfillState.stopRequested = false
+    void (async () => {
+      let indexed = 0
+      let failed = 0
+      let reason = 'ok'
+      for (const row of batch) {
+        if (chunkBackfillState.stopRequested) break
+        try {
+          const r = await indexWikiChunks(db, Number(row.id))
+          if (r.indexed > 0) indexed++
+          else if (r.reason !== 'ok') { reason = r.reason; break }
+          else failed++
+        } catch { failed++ }
+      }
+      chunkBackfillState.lastRun = { at: new Date().toISOString(), batch: batch.length, indexed, failed, stopped: chunkBackfillState.stopRequested || reason !== 'ok', reason }
+      chunkBackfillState.running = false
+    })().catch((e) => { console.error('chunk backfill batch crashed', e); chunkBackfillState.running = false })
+    res.json({ success: true, started: true, batch: batch.length, deadSkipped })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+wikiRouter.post('/chunks/backfill/stop', async (req, res) => {
+  chunkBackfillState.stopRequested = true
+  res.json({ success: true, running: chunkBackfillState.running })
+})
+
+/* ---------------- B1 可复现导出 + 内容指纹（v0.1.5） ----------------
+ * server 无 zip 依赖（红线：不加 npm 依赖）→ PRD 授权降级方案：DATA_DIR/exports/wiki-<ts>/ 目录落盘
+ * （manifest.json + entries/<id>.md 副本），同 reports.ts 日报的「平台自产推式出口」豁免模式——
+ * DATA_DIR 默认不在启用扫描根内（扫描根是用户内容目录），导出是推式出口而非采集对象。
+ */
+
+/** GET /api/wiki/export —— 冻结当前 wiki 语料为可校验导出（同语料重复导出幂等复用最近目录） */
+wikiRouter.get('/export', async (_req, res) => {
+  try {
+    const r = await exportWiki()
+    res.json({ success: true, dir: r.dir, reused: r.reused, manifest: r.manifest })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+// dir 白名单：仅接受 exports/wiki-<ts> 单段相对路径——..、\、绝对路径都过不了这个形（同 reports.ts DATE_RE 闸）
+const EXPORT_DIR_RE = /^exports\/wiki-[^/\\]+$/
+
+/** POST /api/wiki/export/verify —— body { dir }：重算该导出目录全部 entries SHA-256 对照 manifest */
+wikiRouter.post('/export/verify', async (req, res) => {
+  try {
+    const rel = String(req.body?.dir || '').trim()
+    if (!EXPORT_DIR_RE.test(rel)) return res.status(400).json({ success: false, message: 'dir 仅接受 exports/wiki-<timestamp> 相对路径' })
+    // 防穿越双保险：归一化后必须仍落在 DATA_DIR/exports 内（裸 startsWith 会误放行兄弟目录，同 reports.ts）
+    const exportsRoot = path.resolve(WIKI_EXPORTS_DIR)
+    const target = path.resolve(exportsRoot, rel.slice('exports/'.length))
+    if (!target.startsWith(exportsRoot + path.sep)) return res.status(400).json({ success: false, message: 'dir 解析后越出导出目录' })
+    const manifestRaw = await fs.readFile(path.join(target, 'manifest.json'), 'utf8').catch(() => null)
+    if (manifestRaw === null) return res.status(404).json({ success: false, message: '导出目录不存在或缺少 manifest.json' })
+    const r = await verifyWikiExport(target)
+    res.json({ success: true, dir: rel, ...r })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e?.message || e) })
   }
@@ -251,6 +371,8 @@ export async function backfillWikiTitles(): Promise<number> {
     const m = raw.match(/^#\s+(.+?)\s*$/m)
     if (!m) continue
     await (await db.prepare('UPDATE wiki_entries_meta SET title = ? WHERE id = ?')).run([m[1].trim(), r.id])
+    // Wave 1 挂点：标题回填后同步 FTS 索引（title 在索引字段内，变化需重建该词条索引行）
+    await syncWikiFts(db, Number(r.id))
     n++
   }
   return n
