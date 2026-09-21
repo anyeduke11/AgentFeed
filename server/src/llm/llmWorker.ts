@@ -7,6 +7,9 @@ import { getModelsInstance, callLlm, supportsVision, enqueueEmbed, type LlmImage
 import { failoverChain, reportNodeResult } from './distillNodes.js'
 import { embedFileById, getEmbeddingConfig, type EmbeddingConfig } from './embeddings.js'
 import { ensureTag } from './tagGovernance.js'
+import { processProfileJob } from '../profile/distill.js'
+import { syncWikiFts } from '../search/ftsIndex.js'
+import { indexWikiChunks } from '../search/chunkEmbed.js'
 import type { LlmJob } from './llmQueue.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
@@ -201,6 +204,7 @@ export async function processJob(job: LlmJob): Promise<void> {
   if (type === 'curate') return processCurate(job)
   if (type === 'backfill') return processBackfill(job)
   if (type === 'embed') return processEmbed(job)
+  if (type === 'profile') return processProfileJob(job)
   return processDistill(job)
 }
 
@@ -286,6 +290,18 @@ async function processDistill(job: LlmJob): Promise<void> {
       await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, title) VALUES (${job.fileId}, '${String(path.join(entryDir, 'entry.md')).replace(/'/g, "''")}', ${wiki.entities.length}, CURRENT_TIMESTAMP, '${entryTitle}')`)
     } else {
       await db.exec(`UPDATE wiki_entries_meta SET title = '${entryTitle}', entities_count = ${wiki.entities.length}, distilled_at = CURRENT_TIMESTAMP WHERE file_id = ${job.fileId}`)
+    }
+
+    // Wave 1 挂点：蒸馏写入/更新词条后同步检索索引（FTS 关键词 + 分块向量）。
+    // best-effort：索引失败只记日志不阻断蒸馏主流程（INSERT 场景按 file_id 取回刚写的 meta id）
+    try {
+      const metaIdRow = metaRow ?? ((await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE file_id = ?')).get(job.fileId)) as any)
+      if (metaIdRow) {
+        await syncWikiFts(db, Number(metaIdRow.id))
+        await indexWikiChunks(db, Number(metaIdRow.id))
+      }
+    } catch (e) {
+      console.error('wiki search index sync failed', e)
     }
 
     // 自动标注：领域（仅匹配已有领域）+ 标签（find-or-create），source='llm'
