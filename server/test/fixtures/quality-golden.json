@@ -1,0 +1,168 @@
+{
+  "_meta": {
+    "version": 1,
+    "purpose": "v0.1.5 G3 AI 产物质量评测 golden set：规则化评测（不调用 LLM、不做 LLM-as-judge），为改 prompt / 换模型提供可复现的质量回归证据链",
+    "gate": {
+      "method": "对每条样本执行 checkGate(fp='sample.md', size=utf8字节长度, raw=source, cfg=GATE_DEFAULTS)，pass→'pass' 否则 'reject'。fp 固定为 sample.md 以绕开路径白名单/黑名单/文件名白名单/关键词白名单通道，聚焦内容门禁（minSize/minChars/codeRatio）的默认配置行为",
+      "calibration": "expected 全部由实跑当前 gate.ts 规则后人工校对定稿（先跑再标），与现状完全一致——包括已知缺口（长 base64 样本按现状应为 pass）。修改任何 expected 前必须先改规则或明确接受行为漂移",
+      "negativeValidation": "把任意一条 expected 反转，或让注入的 gateCheckFn 全部反着答 → 一致率跌破阈值，脚本 exit 1（单测见 test/qualityEval.test.ts 的反答用例；脚本级篡改重放见交付报告 7.4）"
+    },
+    "distill": {
+      "method": "确定性代理（不真实调用 LLM）：title 行 = source 首个非空行，正文 = 其余行；关键词保留 ⇔ 出现在 cleanTitle(title 行) 或 cleanSummary(正文) 中（formatter.ts 真实出口刻度：title 160+… 截断、summary 80+… 截断）",
+      "designRationale": "评测对象是「清洗管线不丢关键信息」这一真实质量维度：蒸馏应保留的核心实体/数字/标题词，必须在可检索的出口字段中可定位，否则等于信息在出口层丢失",
+      "negativeValidation": "构造超长 title 并把关键词放在 160 截断点之后 → cleanTitle 丢词 → 覆盖率 <1（见 test/qualityEval.test.ts 负向用例）。覆盖率只报告不参与 exit 判定（初始基线未必满分），gate 一致率才是退出码依据"
+    }
+  },
+  "samples": [
+    {
+      "type": "gate",
+      "source": "检索链路优化笔记\n\n本周完成了知识库检索链路的三项优化。第一，把 LIKE 扫全表改为关键词命中后再精排，减少了约 40% 的无效扫描。第二，对高频查询做了结果缓存，命中率达到 65%。第三，修正了中文分词在边界场景下的偏移量计算错误，该错误曾导致摘要片段截断在半个汉字上，影响阅读体验。\n\n优化后的端到端延迟从 830 毫秒降到 410 毫秒，用户可感知的卡顿基本消失。后续计划：引入 BM25 打分替换当前的字符命中率排序，并补充一层同义词扩展，解决检索、搜索、查找这类近义词召回不全的问题。此外还修了两个边角问题：空查询词导致的正则退化，以及大小写敏感配置项在导入时被错误归一化。回归用例从 12 个扩到 34 个，全部通过，性能与正确性双达标。",
+      "expected": "pass",
+      "note": "正常中文技术笔记：正文字符充足、无围栏，内容门禁应放行"
+    },
+    {
+      "type": "gate",
+      "source": "站会日报\n\n今日完成门禁配置页面的联调，修掉了三个问题：黑名单正则保存后未生效、排除目录含斜杠时的静默失败、以及路径白名单相对路径时提示缺失。下午与前端对齐了返回体清洗的口径，title 截断到 160 字符、summary 截断到 80 字符，脏 JSON 先解析再取可读字段。\n\n明日计划：补齐配置校验的单测覆盖，重点是非法正则与通配符误用两类静默失败场景；晚上跑一次全量回归，确认扫描与门禁行为没有漂移，再把结果同步到周报。另外把扫描器的并发度从 4 调到 6，全量扫描时间从 11 分钟压到 7 分钟，内存峰值没有明显上涨，晚高峰时段也不再排队。风险项：两个依赖库有安全通告，升级窗口排在周四，先在临时分支验证兼容性再合入。晚间补充：把今日改动整理成变更说明贴到知识库，标注了影响面与回滚方式。",
+      "expected": "pass",
+      "note": "正常日报语料：正文长度与形态都应过门禁"
+    },
+    {
+      "type": "gate",
+      "source": "# Reader Pipeline\n\nThe in-site reader renders markdown through a four-stage pipeline. First the raw file is parsed with frontmatter stripped and headings normalized. Then a cheerio whitelist sanitizer removes every script-capable construct: inline event handlers, dangerous protocols such as javascript: and data:, plus raw script and iframe tags.\n\nExample of a sanitized fragment after the pipeline:\n\n```html\n<p>safe text <em>ok</em></p>\n```\n\nThird the table-of-contents anchors are generated from heading levels and deduplicated. Finally image sources are rewritten to the local proxy endpoint so that remote assets never bypass the scan-root boundary. The sandboxed iframe never enables allow-scripts, which keeps the double guarantee intact even if the sanitizer itself regresses.",
+      "expected": "pass",
+      "note": "README 形态：含小段代码围栏但占比远低于 60%，正文充足应放行"
+    },
+    {
+      "type": "gate",
+      "source": "---\ntitle: 门禁设计评审纪要\ndate: 2026-09-18\ntags: [gate, design]\n---\n\n门禁设计评审结论：三条规则链（路径、大小、内容）优先级保持不变，但内容门禁的有效字符统计必须把 frontmatter 与代码围栏剥离后再计算，否则带大量配置头的文档会被误判为短内容。\n\n评审同时确认：抽样门禁只读头部 64KB，codeRatio 在抽样口径下不可靠，应跳过该项而保留正文字符下限。落库字段补充 rule_id 与 metric 两个可观测口径，让每一次拦截的原因可回放、可审计。下次评审时间待定，预计在 D6 统计口径拆分之前完成一轮复核。附注：门禁配置页新增有效性校验面板，能提前暴露非法正则与永不命中的条目，避免规则静默失效；评审记录已同步到文档目录供后续追溯。另议定：门禁相关改动一律先过 golden set 评测再合入，评测不绿不得发布。",
+      "expected": "pass",
+      "note": "带 frontmatter 的纪要：frontmatter 应被剥离，按正文长度放行"
+    },
+    {
+      "type": "gate",
+      "source": "故障复盘：周目标环数据错位\n\n事故经过：周目标环的完成度计算引用了上周的阅读记录窗口，导致前端展示的进度比真实值高出约 12%。根因是时间窗口的起点计算在跨周日凌晨触发时使用了本地时区的周一，而后端存储使用 UTC 周一，两个口径在跨时区场景下不一致。\n\n修复动作：统一以 UTC 周一为窗口起点，前端只消费后端下发的窗口对象，不再自行计算；同时给窗口计算补了 8 个跨时区边界用例。复盘结论：时间口径必须单一来源，任何端侧复算都是未来的坑，清单已同步给相关贡献者。预防措施：给所有涉及时间窗口的计算加了属性测试，随机生成跨时区与跨夏令时的边界点；监控面板补充完成度环比告警，偏差超过 3% 即触发值班通知，避免同类错位再次静默存在一周。",
+      "expected": "pass",
+      "note": "正常复盘语料：正文充足应放行"
+    },
+    {
+      "type": "gate",
+      "source": "标签体系三态化设计\n\n标签分为 primary、secondary、normal 三态。primary 必须挂靠领域树，同名领域锚点自动挂靠；secondary 参与标记但不强制挂靠；新建与导入的标签一律落 normal，由存量迁移脚本按领域锚点回填到正确层级。\n\n配置示例如下，迁移版本号通过 config 键驱动，幂等可重放，失败可从断点恢复：\n\n```json\n{ \"tagSystem\": { \"levelVersion\": 2 } }\n```\n\n迁移完成后，从 normal 高频标签中选拔二级领域提案，方向是向上选拔而不是向下降级，避免把活跃标签埋掉。选拔阈值暂定 50，后续按领域规模动态调整。领域树展示层级限制为三层，超出部分折叠；标签搜索支持按 level 过滤，运营侧可以只看 primary 的挂靠完整性。迁移演练已在影子库跑过两轮，全量耗时约 4 分钟，可以接受。",
+      "expected": "pass",
+      "note": "设计文档：含 JSON 围栏但占比低，正文充足应放行"
+    },
+    {
+      "type": "gate",
+      "source": "QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==QWdlbnRGZWVkLWdvbGRlbi1zZXQtY2FsaWJyYXRpb24tc2FtcGxlLXRoaXMtaXMtYS1sb25nLWJhc2U2NC1ibG9iLXRoYXQtcGFzc2VzLWJvdGgtbGVuZ3RoLXJ1bGVzLQ==",
+      "expected": "pass",
+      "note": "已知缺口钉现状：内容门禁只有长度/占比规则、无编码语义识别，超长 base64 有效字符≈全长，按现状应放行；将来若加乱码/base64 语义规则，本样本预期翻转属行为漂移，需连规则与 golden 一起评审"
+    },
+    {
+      "type": "gate",
+      "source": "锟斤拷锟斤拷锟斤拷烫烫烫屯屯屯",
+      "expected": "reject",
+      "note": "乱码短片段：远低于大小与正文字符下限，应拒"
+    },
+    {
+      "type": "gate",
+      "source": "SGVsbG8gQWdlbnRGZWVkIHF1YWxpdHkgZ29sZGVuIHNldCBzYW1wbGUgdXNlZCBmb3IgZ2F0ZSBldmFsdWF0aW9uIHJ1bi4gQmFzZTY0IG9ubHk=",
+      "expected": "reject",
+      "note": "短 base64 块：低于大小下限被拒（注意：拦截靠的是长度规则而非 base64 语义）"
+    },
+    {
+      "type": "gate",
+      "source": "{\"files\":[{\"id\":1,\"title\":\"a\",\"tags\":[\"x\",\"y\"]},{\"id\":2,\"title\":\"b\",\"tags\":[\"z\"]},{\"id\":3,\"title\":\"c\",\"tags\":[\"m\",\"n\"]}],\"meta\":{\"total\":3,\"cursor\":null,\"hasMore\":false},\"status\":\"ok\"}",
+      "expected": "reject",
+      "note": "超密 minified JSON：单行无空白、有效字符≈全长，低于大小下限被拒（minChars 规则对无空白密文无区分力，见长 base64 缺口样本）"
+    },
+    {
+      "type": "gate",
+      "source": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7fdG7d0YGdBx0h3t2ZJ8sQeJ9kLm3xVqO4pR1cN2bT5yU8wE\nf6A0sD9Hk2J7lQ3zXv1P4mN6oK8iU5yT2rE9wS1aD3fG5hJ7kL9mQ0zX\n-----END RSA PRIVATE KEY-----",
+      "expected": "reject",
+      "note": "加密私钥样式片段：当前门禁无私钥语义识别，靠长度下限拦截（若截取真实完整 PEM 约 1.7KB 则会放行，属同款已知缺口）"
+    },
+    {
+      "type": "gate",
+      "source": "季  度  述  职  大  纲\n\n一  、  知  识  库  建  设\n标  签  三  态  迁  移\n领  域  树  归  并\n门  禁  规  则  调  优\n\n二  、  检  索  与  推  荐\n混  合  检  索  上  线\n周  目  标  环  联  动\n每  日  精  选  轮  转\n\n三  、  阅  读  器  与  出  口\n站  内  阅  读  器\n沙  箱  双  保  险\n图  片  代  理  改  写\n\n四  、  观  测  与  质  量\n漏  斗  面  板\n金  样  集  评  测\n检  索  基  线  重  放\n\n五  、  协  作  与  治  理\n贡  献  者  指  南\n配  置  校  验  提  示\n存  档  清  理  策  略\n人  力  与  排  期",
+      "expected": "reject",
+      "note": "稀疏大纲：字节数过大小下限但去空白后有效字符不足 300，应由 minChars 拦截（证明「文件不小 ≠ 正文足够」）"
+    },
+    {
+      "type": "gate",
+      "source": "脚本搬迁记录：把旧的 Node 脚本迁移到 TypeScript 与 ESM。迁移过程中整理了下面这份可直接重放的依赖清单脚本，先备份再安装，出错时整体回滚到迁移前的锁定版本，保障工作区不被半途而废的安装过程污染，同时保留一份原始清单便于核对差异与审计。迁移完成后需要跑一遍类型检查与全部测试套件确认行为没有漂移，再清理掉备份目录避免长期占用磁盘空间，最后在周报里登记迁移结论与踩坑清单。迁移涉及十二个脚本与三个共享工具函数，全部改完并通过类型检查后，构建产物体积下降约两成，冷启动时间也有可感知的改善，团队后续新增脚本一律按新规范落地，不再回头维护旧的 CommonJS 版本，历史脚本在迁移完成前保持只读冻结状态。\n\n```js\n// deps-replay.js\nconst deps = ['express', 'cheerio', 'gray-matter', 'markdown-it', 'zod']\nconst { execSync } = require('child_process')\nfunction replay(list) {\n  execSync(`npm install --save-exact ${list.join(' ')}`, { stdio: 'inherit' })\n}\nfunction backup() {\n  execSync('cp package.json package.json.bak && cp package-lock.json package-lock.json.bak', { stdio: 'inherit' })\n}\nfunction rollback() {\n  execSync('mv package.json.bak package.json && mv package-lock.json.bak package-lock.json && npm install', { stdio: 'inherit' })\n}\nif (process.argv[2] === 'rollback') rollback()\nelse if (process.argv[2] === 'backup') backup()\nelse replay(deps)\n```\n",
+      "expected": "reject",
+      "note": "代码倾倒：围栏行占比超过 60%（围栏外正文 ≥300 字符），应由 codeRatio 拦截"
+    },
+    {
+      "type": "distill",
+      "source": "# MCP 接入实践笔记\n本文记录本地知识库挂载到 MCP 服务器的全过程，包括传输方式选型与工具注册清单。",
+      "mustInclude": ["MCP"],
+      "note": "标题词：出口 title 应保留核心名词"
+    },
+    {
+      "type": "distill",
+      "source": "搜索优化小结：命中率提升 37%，P95 延迟减半\n换用混合检索后核心指标全面改善，详情见正文。",
+      "mustInclude": ["37%"],
+      "note": "关键数字：蒸馏出口不应丢指标数值"
+    },
+    {
+      "type": "distill",
+      "source": "周报\n本周完成三件事：FTS 索引回填、门禁参数调优、扫描根权限盘点，其中索引回填耗时最长。",
+      "mustInclude": ["FTS"],
+      "note": "实体缩写落在正文开头 80 字符内，应可被出口 summary 定位"
+    },
+    {
+      "type": "distill",
+      "source": "故障记录：游标空指针\n排查发现 mcp_call_logs 第 409 行 args 字段为 null 时未做判空，修复后回归通过。",
+      "mustInclude": ["409"],
+      "note": "行号数字在正文开头，出口 summary 应保留"
+    },
+    {
+      "type": "distill",
+      "source": "SQLite WAL 模式踩坑\n开启 WAL 后并发读写不再互相阻塞，但需要注意 checkpoint 策略与文件句柄泄漏问题。",
+      "mustInclude": ["SQLite", "WAL"],
+      "note": "英文技术名词组合：title 与正文均应保留"
+    },
+    {
+      "type": "distill",
+      "source": "Prompt 迭代日志 v3\n把 temperature 参数调到 0.2 后实体抽取稳定性明显提升，幻觉率下降，成本持平。",
+      "mustInclude": ["temperature", "0.2"],
+      "note": "参数名与取值：蒸馏出口不应丢失关键配置信息"
+    },
+    {
+      "type": "distill",
+      "source": "Claude Code 与 Trae 双工作流对比\n两者在任务拆解与上下文管理上的取舍差异显著，适合搭配使用而非二选一。",
+      "mustInclude": ["Claude Code", "Trae"],
+      "note": "多实体标题：出口 title（160 内）应完整保留两个实体名"
+    },
+    {
+      "type": "distill",
+      "source": "性能基线\nP95 延迟 410ms，吞吐 1200 QPS，错误率 0.02%，比上一版整体提升约两成。",
+      "mustInclude": ["410ms", "1200"],
+      "note": "性能数字密集：正文开头 80 字符窗口内应可定位"
+    },
+    {
+      "type": "distill",
+      "source": "{\"title\":\"周报生成任务收尾\",\"ok\":true}\n任务完成后关闭了定时触发器，产物归档到知识库。",
+      "mustInclude": ["周报"],
+      "note": "JSON 脏串形态 title：cleanTitle 应解析出可读字段，关键词不得被 JSON 语法淹没"
+    },
+    {
+      "type": "distill",
+      "source": "v0.1.5 质量评测方案：golden set 覆盖 gate 一致率与 distill 关键词保留双口径，附负向验证与篡改重放的完整过程记录与口径说明，评测不依赖任何外部服务可离线重放，关键词锚点BetaAtEnd\n细节见正文。",
+      "mustInclude": ["BetaAtEnd"],
+      "note": "边界样本：title 总长在 160 截断刻度内、关键词位于尾部，cleanTitle 应保留（防清洗过度）"
+    },
+    {
+      "type": "distill",
+      "source": "标签\n标签体系\t三态迁移\n已完成：全量回填脚本幂等可重放，primary 全部挂靠领域树锚点。",
+      "mustInclude": ["标签体系"],
+      "note": "正文空白混乱形态（制表符/换行）：cleanSummary 折叠空白但不删字符，词组应仍可定位"
+    },
+    {
+      "type": "distill",
+      "source": "Embedding 降维实验：1536 → 256\n在召回率损失 3% 的前提下把向量存储成本压掉一半，性价比可观。",
+      "mustInclude": ["1536", "256"],
+      "note": "标题中的维度数字对：蒸馏出口应保留可比较的原始数值"
+    }
+  ]
+}
