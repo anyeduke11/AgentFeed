@@ -48,9 +48,13 @@
 | 外发内容 | 标签名 + 使用次数（JSON 数组，默认批 400 个）；level 扫描另附一级领域名与挂载次数。**不含任何文件正文** |
 | 触发时机 | 设置页标签治理手动启动（`startSemanticScan` / `startLevelScan`），后台分批执行 |
 
-### 1.5 对话问答 I1——随本版落地后生效（截至今日未实现）
+### 1.5 对话问答 I1——外发提问与检索摘要上下文（2026-09-21 交付后回填）
 
-`server/src/routes/chat.ts` **不存在**（核实于 2026-09-21，Glob 确认）。v0.1.5 第 6 批 I1 落地后生效，届时外发 = **用户提问 + 检索摘要上下文**。**I1 落地时须回填本节。**
+| 项 | 内容 |
+| --- | --- |
+| 代码 | `server/src/routes/chat.ts`：POST `/api/chat`（SSE 流式问答）+ POST `/api/chat/recap`（会话复盘）；辅：`knowledge.ts` `searchKnowledgeCore`（hybrid 检索）、`context.ts` `aggregateDomainContext`（领域画像）、`formatter.ts` `cleanTitle` / `cleanSummary` 出口清洗 |
+| 外发内容 | 通用问答 = **用户提问原文** + hybrid 检索 top-5 词条的 **title / summary 摘要上下文**（清洗后拼入 user prompt，含词条 id 供引用，**不含文件正文**）+ 领域陪练官 system prompt（`buildChatSystemPrompt`：领域画像摘要 + 挂靠标签）。skill 模式（explain / connect / quiz / overview）另附指定词条摘要、近 10 条阅读记录的标题 / 领域名、领域 top 词条清单（均元数据级）。`/api/chat/recap` = **该会话全部消息记录**（用户与助手消息全文拼接为 transcript） |
+| 触发时机 | 使用对话功能时（Chat 页发起问答 / 对会话点复盘） |
 
 ### 1.6 用户画像蒸馏 J1——只外发统计，不含原始内容
 
@@ -95,7 +99,7 @@
 | ② 门禁语义判定 | ✘ **实无 LLM 调用**——纯规则门禁不外发，口径修正 |
 | ③ embedding `embeddings.ts` / `chunkEmbed.ts` | ✔ 属实，实际拆为文件向量 / 词条分块 / 检索词三条子路 |
 | ④ tag 治理 `tagGovernance.ts` | ✔ 属实（仅标签名 + 计数） |
-| ⑤ 对话问答 I1 `routes/chat.ts` | 未实现（文件不存在），列待生效并要求落地时回填 |
+| ⑤ 对话问答 I1 `routes/chat.ts` | ✔ 已落地（核实日尚未存在，I1 交付后回填，外发形态见 1.5 节） |
 | ⑥ 画像蒸馏 J1 `profile/distill.ts` | ✔ 属实（仅统计 + 标签权重 + 上版画像，无原始内容） |
 
 清单外补充披露（事实优先）：`processAssess` / `processBackfill` / `processCurate` 三类 LLM 队列 job 与语义检索词嵌入，均为真实外发点，已并入第 1.2 / 1.3 节。
