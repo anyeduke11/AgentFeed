@@ -1,7 +1,7 @@
 <template>
   <div class="content">
     <div class="view-head">
-      <span class="plate">07</span>
+      <span class="plate">08</span>
       <h1 class="vtitle">调度室</h1>
       <span class="vsub">扫描根 · AI 队列 · 回收区 · 安全</span>
       <div class="vright">
@@ -18,6 +18,7 @@
         <button class="tab" :class="{ on: settingsTab === 'records' }" @click="settingsTab = 'records'">过滤记录</button>
         <button class="tab" :class="{ on: settingsTab === 'deleted' }" @click="settingsTab = 'deleted'">已删除文件</button>
         <button class="tab" :class="{ on: settingsTab === 'security' }" @click="settingsTab = 'security'">局域网与安全</button>
+        <button class="tab" :class="{ on: settingsTab === 'profile' }" @click="settingsTab = 'profile'">用户画像</button>
         <button class="tab" :class="{ on: settingsTab === 'logs' }" @click="settingsTab = 'logs'">日志管理</button>
       </div>
 
@@ -41,8 +42,9 @@ const SettingsGateRecords = defineAsyncComponent(() => import('../components/set
 const SettingsTrash = defineAsyncComponent(() => import('../components/settings/SettingsTrash.vue'))
 const SettingsLan = defineAsyncComponent(() => import('../components/settings/SettingsLan.vue'))
 const SettingsLogs = defineAsyncComponent(() => import('../components/settings/SettingsLogs.vue'))
+const SettingsProfile = defineAsyncComponent(() => import('../components/settings/SettingsProfile.vue'))
 
-const settingsTab = ref<'roots' | 'ai' | 'gate' | 'records' | 'deleted' | 'security' | 'logs'>('roots')
+const settingsTab = ref<'roots' | 'ai' | 'gate' | 'records' | 'deleted' | 'security' | 'profile' | 'logs'>('roots')
 
 // tab id → 异步子组件映射
 const tabMap = {
@@ -52,6 +54,7 @@ const tabMap = {
   records: SettingsGateRecords,
   deleted: SettingsTrash,
   security: SettingsLan,
+  profile: SettingsProfile,
   logs: SettingsLogs,
 }
 

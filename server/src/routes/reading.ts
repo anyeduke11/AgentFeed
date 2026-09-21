@@ -228,3 +228,53 @@ readingRouter.get('/stats', async (req, res) => {
     res.status(500).json({ success: false, message: String(e) })
   }
 })
+
+/** I2 相关阅读：该文件所在域内、近 30 天打开过的其他文件 top5（按打开次数）；无数据返回空数组 */
+readingRouter.get('/related/:fileId', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.params.fileId)
+    if (isNaN(fileId)) return res.json({ success: false, message: 'fileId 必填' })
+    const self = await (await db.prepare('SELECT domain_id FROM files WHERE id = ?')).get([fileId]) as any
+    if (!self || self.domain_id == null) return res.json({ success: true, items: [] })
+    const rows = await (await db.prepare(`
+      SELECT f.id, COALESCE(NULLIF(f.title, ''), f.name) AS title, f.path, COUNT(*) AS opens
+      FROM read_history rh JOIN files f ON f.id = rh.file_id
+      WHERE f.domain_id = ? AND f.id != ? AND f.status = 'active'
+        AND rh.opened_at >= datetime('now', '-30 days')
+      GROUP BY f.id
+      ORDER BY opens DESC, f.id ASC
+      LIMIT 5`)).all([self.domain_id, fileId]) as any[]
+    res.json({
+      success: true,
+      items: rows.map(r => ({ id: Number(r.id), title: String(r.title ?? ''), path: String(r.path ?? ''), opens: Number(r.opens) })),
+    })
+  } catch (e: any) {
+    console.error('reading related failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/**
+ * I2 阅读反馈：轻量评分（1-5 星）+ 一句话反馈落 read_history（file_id 可空、source='reader'）。
+ * 与 POST /rate（阅读闭环打分：stars + execIntent，驱动间隔复习/执行队列）是两套口径，互不影响；
+ * 历史记录语义——同一文件允许重复提交（每次都是一条独立信号）。
+ */
+readingRouter.post('/feedback', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = req.body?.fileId != null && Number.isFinite(parseInt(req.body.fileId)) ? parseInt(req.body.fileId) : null
+    const path = String(req.body?.path ?? '').trim()
+    const rating = parseInt(req.body?.rating)
+    const feedback = req.body?.feedback != null && String(req.body.feedback).trim() !== '' ? String(req.body.feedback).trim() : null
+    if (!path) return res.status(400).json({ success: false, message: 'path 必填' })
+    if (isNaN(rating) || rating < 1 || rating > 5) return res.status(400).json({ success: false, message: 'rating 需为 1~5' })
+    await (await db.prepare(
+      'INSERT INTO read_history (file_id, path, source, rating, feedback) VALUES (?, ?, ?, ?, ?)'
+    )).run([fileId, path, 'reader', rating, feedback])
+    res.json({ success: true })
+  } catch (e: any) {
+    console.error('reading feedback failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})

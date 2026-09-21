@@ -11,18 +11,23 @@ import { scanRouter, scanState, recordScan } from './routes/scan.js'
 import { configRouter } from './routes/config.js'
 import { statsRouter } from './routes/stats.js'
 import { llmRouter } from './routes/llm.js'
-import { startLlmFeeder } from './llm/index.js'
+import { startLlmFeeder, llmQueue } from './llm/index.js'
+import { enforceDailyBudget } from './llm/budgetGate.js'
 import { wikiRouter, backfillWikiTitles } from './routes/wiki.js'
 import { gateRouter } from './routes/gate.js'
 import { recommendRouter } from './routes/recommend.js'
 import { readingRouter } from './routes/reading.js'
 import { reportsRouter } from './routes/reports.js'
+import { profileRouter } from './routes/profile.js'
+import { chatRouter } from './routes/chat.js'
+import { rsiRouter } from './routes/rsi.js'
 import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
 import { scan, backfillRuleScores, backfillAliases, backfillAgentAttribution } from './scanner.js'
 import { resolveAgentDirs, selectPeriodicRoots } from './agents.js'
 import { bindAgentRoots } from './routes/scan.js'
+import { ensureFtsPopulated } from './search/ftsIndex.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -49,6 +54,9 @@ app.use('/api/gate', gateRouter)
 app.use('/api/recommend', recommendRouter)
 app.use('/api/reading', readingRouter)
 app.use('/api/reports', reportsRouter)
+app.use('/api/profile', profileRouter)
+app.use('/api/chat', chatRouter)
+app.use('/api/rsi', rsiRouter)
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
 
@@ -100,9 +108,21 @@ app.listen(PORT, async () => {
   backfillWikiTitles()
     .then((n) => { if (n > 0) console.log(`wiki title backfilled: ${n} entries`) })
     .catch((e) => console.error('wiki title backfill failed', e))
+  // Phase 2 检索基建：启动期幂等回填——仅 FTS（空而主表非空时自动 rebuild 一次）。
+  // 分块向量不再启动期全量补嵌（本地 GPU compute-bound：54 万块串行 ~53h，不适合常驻满载）：
+  // 改为设置页手动分批补嵌（POST /api/wiki/chunks/backfill/start，content_hash 幂等可断点续跑）；
+  // 新蒸馏词条仍由 llmWorker 蒸馏后逐条即时索引，增量路径不欠账
+  ensureFtsPopulated(await getDb())
+    .then((r) => { if (r.rebuilt) console.log(`wiki fts rebuilt: ${r.entries} entries`) })
+    .catch((e) => console.error('wiki fts backfill failed', e))
 
   // 每日推式出口：boot 补当天日报（已存在幂等跳过），此后每 5 分钟跨天检查自动生成
   startDailyReportJob()
+
+  // G1 日预算闸：boot 即检 + 每 5 分钟巡检（蒸馏入队时另有 30s 节流即时巡检）；跨天自动复位昨日因预算暂停的队列
+  const budgetCheck = () => { enforceDailyBudget(llmQueue).catch((e) => console.error('daily budget check failed', e)) }
+  setTimeout(budgetCheck, 10 * 1000)
+  setInterval(budgetCheck, 5 * 60 * 1000)
 
   // 启用根自动增量扫描：watcher 只覆盖运行期变化，启动兜底 + 周期增量补齐停机期间的文件变更。
   // 范围 = 全部启用根，仅剔除本机不存在的 agent 目录（手工挂载的普通目录同样纳入）

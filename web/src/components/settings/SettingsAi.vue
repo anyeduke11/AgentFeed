@@ -51,6 +51,17 @@
           <span class="sr-v"><span class="cap">入库后自动补齐标签与领域（{{ autotag ? '已开启' : '已关闭' }}）</span></span>
           <span class="sr-a"><button class="switch" role="switch" :aria-checked="autotag ? 'true' : 'false'" aria-label="自动标注开关" @click="toggleAutotag"></button></span>
         </div>
+        <!-- I3 RSI 成长闭环：理解度检查（opt-in 默认关）+ 学习建议推送开关 + 上次建议日期 -->
+        <div class="setrow">
+          <span class="sr-k">理解度检查</span>
+          <span class="sr-v"><span class="cap">阅读器「考考我」按词条要点出 3 道自测题，答对拉长复习间隔（{{ rsiStatus.quizEnabled ? '已开启' : '已关闭' }}）· 默认关闭，需手动开启</span></span>
+          <span class="sr-a"><button class="switch" role="switch" :aria-checked="rsiStatus.quizEnabled ? 'true' : 'false'" aria-label="理解度检查开关" @click="toggleRsi('quiz')"></button></span>
+        </div>
+        <div class="setrow">
+          <span class="sr-k">学习建议推送</span>
+          <span class="sr-v"><span class="cap">总览页「今日学习建议」，到期复习 &gt; 高频在读 &gt; 目标缺口（{{ rsiStatus.suggestionsEnabled ? '已开启' : '已关闭' }}）<template v-if="rsiStatus.lastSuggestionDay"> · 上次推送 {{ rsiStatus.lastSuggestionDay }}</template> · 无论开关状态，每日至多推送一次</span></span>
+          <span class="sr-a"><button class="switch" role="switch" :aria-checked="rsiStatus.suggestionsEnabled ? 'true' : 'false'" aria-label="学习建议推送开关" @click="toggleRsi('suggestions')"></button></span>
+        </div>
         <div class="setrow">
           <span class="sr-k">队列并发</span>
           <span class="sr-v"><span class="cap">每服务商同时精炼的文件数（1 至 {{ concMax }}，默认按接口限流推荐 {{ concRec }}；各服务商可单独调整）</span></span>
@@ -118,6 +129,14 @@
             <span class="sr-k">向量库</span>
             <span class="sr-v"><span class="cap">已向量化 {{ embedStatus.embedded }} 篇{{ embedStatus.remaining ? ` · 待补 ${embedStatus.remaining} 篇` : ' · 无待补' }}<template v-if="(embedStatus.queueActive || 0) + (embedStatus.queuePending || 0) > 0"> · 向量队列处理中 {{ (embedStatus.queueActive || 0) + (embedStatus.queuePending || 0) }} 篇</template></span></span>
             <span class="sr-a"><button class="btn xs" :disabled="!embedReady" :title="embedReady ? '' : '先开启蒸馏向量化并选择向量模型'" @click="triggerEmbedBackfill"><Icon name="rotate" :size="12" /> 补向量（≤200 篇）</button></span>
+          </div>
+          <div class="setrow">
+            <span class="sr-k">分块向量</span>
+            <span class="sr-v"><span class="cap">词条分块向量（parent-child 检索）：已嵌 {{ chunkStatus.chunks }} 块 · 待嵌 {{ chunkStatus.pending }} 词条<template v-if="chunkStatus.running"> · 后台补嵌中…</template><template v-else-if="chunkStatus.lastRun"> · 上批 {{ chunkStatus.lastRun.reason === 'ok' ? `成功 ${chunkStatus.lastRun.indexed} 词条` : `中止（${chunkStatus.lastRun.reason}）` }}<template v-if="chunkStatus.lastRun.failed"> · 失败 {{ chunkStatus.lastRun.failed }}</template>{{ chunkStatus.lastRun.stopped && chunkStatus.lastRun.reason === 'ok' ? '（已停止）' : '' }}</template></span></span>
+            <span class="sr-a">
+              <button v-if="!chunkStatus.running" class="btn xs" :disabled="!embedReady || !chunkStatus.pending" :title="embedReady ? '每批 50 词条，后台执行，可随时停止；本地向量嵌入较慢（~2.8 块/秒）' : '先开启蒸馏向量化并选择向量模型'" @click="startChunkBackfill"><Icon name="rotate" :size="12" /> 补嵌一批（50 词条）</button>
+              <button v-else class="btn xs" title="当前词条完成后停止" @click="stopChunkBackfill">停止</button>
+            </span>
           </div>
           <div class="setrow">
             <span class="sr-k">语义检索</span>
@@ -188,7 +207,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Icon from '../Icon.vue'
 import { useSettingsStore } from '../../stores/useSettingsStore'
 import { useLlmStore } from '../../stores/useLlmStore'
@@ -380,6 +399,36 @@ async function triggerEmbedBackfill() {
   if (res?.success === false) { ui.toast(res.message || '无法启动补向量'); return }
   ui.toast(`已入队 ${res.enqueued ?? 0} 篇待向量化`)
   loadEmbedStatus()
+}
+
+/* ---------- 分块向量手动补嵌（entry_chunks，批次后台执行 + 轮询进度） ---------- */
+const chunkStatus = ref<{ chunks: number; pending: number; running: boolean; lastRun: null | { at: string; batch: number; indexed: number; failed: number; stopped: boolean; reason: string } }>({ chunks: 0, pending: 0, running: false, lastRun: null })
+let chunkPollTimer: ReturnType<typeof setInterval> | null = null
+
+function syncChunkPoll() {
+  if (chunkStatus.value.running && !chunkPollTimer) chunkPollTimer = setInterval(loadChunkStatus, 5000)
+  if (!chunkStatus.value.running && chunkPollTimer) { clearInterval(chunkPollTimer); chunkPollTimer = null }
+}
+
+async function loadChunkStatus() {
+  try {
+    const data = await api.wiki.chunkBackfillStatus()
+    if (data?.success !== false) chunkStatus.value = data
+  } catch { /* 状态读取失败保旧值 */ }
+  syncChunkPoll()
+}
+
+async function startChunkBackfill() {
+  const res = await api.wiki.chunkBackfillStart(50)
+  if (res?.success === false) { ui.toast(res.message || '无法启动补嵌'); return }
+  ui.toast(res.started === false ? (res.message || '无待嵌词条') : `补嵌批次已启动（${res.batch} 词条，后台执行${res.deadSkipped ? `，跳过死链 ${res.deadSkipped}` : ''}）`)
+  loadChunkStatus()
+}
+
+async function stopChunkBackfill() {
+  await api.wiki.chunkBackfillStop()
+  ui.toast('已请求停止，当前词条完成后生效')
+  setTimeout(loadChunkStatus, 1500)
 }
 
 async function doEmbedSearch() {
@@ -578,6 +627,26 @@ async function toggleAutotag() {
   ui.toast(autotag.value ? '自动标注已开启' : '自动标注已关闭')
 }
 
+/* ---------- I3 RSI 成长闭环（理解度检查 + 学习建议推送） ---------- */
+const rsiStatus = ref({ quizEnabled: false, suggestionsEnabled: true, lastSuggestionDay: null as string | null })
+
+async function loadRsiStatus() {
+  try {
+    const s = await api.rsi.status()
+    if (s?.success) rsiStatus.value = s
+  } catch { /* 拉取失败保持现状 */ }
+}
+
+async function toggleRsi(key: 'quiz' | 'suggestions') {
+  const next = !(rsiStatus.value as any)[key === 'quiz' ? 'quizEnabled' : 'suggestionsEnabled']
+  const r: any = await api.rsi.toggle(key, next)
+  if (!r?.success) { ui.toast(r?.message || '开关设置失败'); return }
+  await loadRsiStatus()
+  ui.toast(key === 'quiz'
+    ? (next ? '理解度检查已开启 · 阅读器可「考考我」' : '理解度检查已关闭')
+    : (next ? '学习建议推送已开启（每日至多一次）' : '学习建议推送已关闭'))
+}
+
 async function setConc(n: number) {
   if (n < 1 || n > concMax.value) return
   await llm.setConcurrency(n)
@@ -591,9 +660,9 @@ async function togglePause() {
   ui.toast(paused.value ? '队列已恢复 · 精炼继续' : '队列已暂停 · 进行中的精炼已挂起')
 }
 
-/** 拉取本 tab 数据：全局配置 + 队列 + 服务商 + 节点池，最后读自动标注开关（对应原 refresh() 的 AI 部分） */
+/** 拉取本 tab 数据：全局配置 + 队列 + 服务商 + 节点池 + 分块补嵌状态，最后读自动标注开关（对应原 refresh() 的 AI 部分） */
 async function load() {
-  await Promise.all([settings.fetchConfig(), llm.fetchQueue(), llm.fetchProviders(), loadNodes()])
+  await Promise.all([settings.fetchConfig(), llm.fetchQueue(), llm.fetchProviders(), loadNodes(), loadChunkStatus(), loadRsiStatus()])
   autotag.value = settings.config['ai.autoTag']?.value ?? true
 }
 
@@ -601,4 +670,6 @@ async function load() {
 onMounted(load)
 // 父层「刷新」按钮：重新拉取本 tab 数据
 watch(() => props.refreshSeq, load)
+// 离开页面停止补嵌进度轮询（组件被 KeepAlive 缓存时定时器仍会跑，必须显式清理）
+onUnmounted(() => { if (chunkPollTimer) { clearInterval(chunkPollTimer); chunkPollTimer = null } })
 </script>

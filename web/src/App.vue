@@ -79,7 +79,8 @@ const NAVS = [
   { path: '/pipeline', num: '04', label: '精炼线', sub: '管线' },
   { path: '/entry', num: '05', label: '成品仓', sub: '词条' },
   { path: '/supply', num: '06', label: '发车区', sub: '供给' },
-  { path: '/settings', num: '07', label: '调度室', sub: '设置' }
+  { path: '/chat', num: '07', label: '对话', sub: '人侧对话' },
+  { path: '/settings', num: '08', label: '调度室', sub: '设置' }
 ]
 
 const todayLabel = computed(() => {
