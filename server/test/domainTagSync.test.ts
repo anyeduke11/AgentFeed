@@ -108,7 +108,7 @@ test('迁移 v3：存量领域缺同名一级标签 → 补建；版本推进 3�
   assert.equal(t.status, 'active')
   assert.equal(t.domain_id, dom.id, '补建标签必须绑定到缺口领域')
   const ver = await (await db.prepare("SELECT value FROM config WHERE key = 'tagSystem.levelVersion'")).get() as any
-  assert.equal(ver.value, '3', '迁移版本必须推进到 3（防重跑门槛升级）')
+  assert.equal(ver.value, '4', '迁移版本必须推进到 4（防重跑门槛升级）')
   // 幂等：重跑不得产生重复标签
   await migrateTagLevels(db)
   const cnt = await (await db.prepare('SELECT COUNT(*) AS n FROM tags WHERE name = ?')).get('迁移补标测') as any

@@ -443,6 +443,12 @@ async function setLevelOp(level: 'primary' | 'secondary' | 'normal') {
   }
   const r = await api.tags.update(selected.value.id, { level })
   if (r.success === false) return ui.toast(r.message || '操作失败')
+  // 升级一级回显服务端分析：同名领域挂靠提示 + 现有一级格局中的量级排名（门禁透明化）
+  if (level === 'primary') {
+    const notes: string[] = Array.isArray(r.warnings) ? r.warnings : []
+    if (r.analysis) notes.push(`挂载 ${r.analysis.mounts} 次，在现有 ${r.analysis.totalPrimaries} 个领域中排第 ${r.analysis.rank}`)
+    if (notes.length) ui.toast(notes.join('；'))
+  }
   selected.value.level = level
   selected.value.parent_name = null
   const row = tags.value.find((x: any) => x.id === selected.value.id)

@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getDb, ensureDomainTag } from '../db.js'
+import { getDb, ensureDomainTag, normalizeKey } from '../db.js'
 
 export const domainsRouter = Router()
 
@@ -59,13 +59,23 @@ domainsRouter.post('/', async (req, res) => {
   const db = await getDb()
   const { name, parent_id, color, description } = req.body as Record<string, any>
   if (!name) return res.status(400).json({ success: false, message: 'name 必填' })
+  // 归一查重：UNIQUE(name, parent_id) 对 NULL 父级失效（SQLite NULL 互不相等，重复领域曾由此漏网），
+  // 应用层按归一 key 拦截（全角/大小写/空白变体同判），DB 层另有部分唯一索引 ux_domains_name_root 兜底
+  const parentId = parent_id === null || parent_id === undefined ? null : Number(parent_id)
+  const all = await (await db.prepare('SELECT id, name, parent_id FROM domains')).all() as any[]
+  const dup = all.find(r => normalizeKey(r.name) === normalizeKey(String(name)) && (r.parent_id ?? null) === parentId)
+  if (dup) return res.status(409).json({ success: false, message: `领域「${dup.name}」已存在`, existingId: dup.id })
   const escapedName = String(name).replace(/'/g, "''")
   // 未指定颜色时按当前领域数自动取彩虹序号色
   const cntRow = await (await db.prepare('SELECT COUNT(*) AS n FROM domains')).get() as any
   const escapedColor = String(color || rainbow(cntRow.n, Math.max(cntRow.n + 1, 12))).replace(/'/g, "''")
   const escapedDesc = description === null ? 'NULL' : `'${String(description).replace(/'/g, "''")}'`
   const parentVal = parent_id === null || parent_id === undefined ? 'NULL' : parent_id
-  await db.exec(`INSERT INTO domains (name, parent_id, color, description) VALUES ('${escapedName}', ${parentVal}, '${escapedColor}', ${escapedDesc})`)
+  try {
+    await db.exec(`INSERT INTO domains (name, parent_id, color, description) VALUES ('${escapedName}', ${parentVal}, '${escapedColor}', ${escapedDesc})`)
+  } catch {
+    return res.status(409).json({ success: false, message: '领域创建冲突：同名领域已存在（可能并发创建）' })
+  }
   const idRow = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
   // 强一致：领域 ≡ 一级主要标签——建领域即建同名一级标签
   await ensureDomainTag(db, Number(idRow.id), String(name))
@@ -75,6 +85,17 @@ domainsRouter.post('/', async (req, res) => {
 domainsRouter.patch('/:id', async (req, res) => {
   const db = await getDb()
   const { name, parent_id, color, description, sort } = req.body as Record<string, any>
+  const domId = parseInt(req.params.id)
+  if (name !== undefined) {
+    // 归一查重：改名不得与其他领域重名（否则部分唯一索引拒写裸抛 500），同请求改 parent 时按新父级判定
+    const effParent = parent_id !== undefined ? (parent_id === null ? null : Number(parent_id))
+      : ((await (await db.prepare('SELECT parent_id FROM domains WHERE id = ?')).get([domId]) as any)?.parent_id ?? null)
+    const all = await (await db.prepare('SELECT id, name, parent_id FROM domains')).all() as any[]
+    const dup = all.find(r => r.id !== domId
+      && normalizeKey(r.name) === normalizeKey(String(name))
+      && (r.parent_id ?? null) === (effParent ?? null))
+    if (dup) return res.status(409).json({ success: false, message: `改名冲突：领域「${dup.name}」已存在` })
+  }
   const sets: string[] = []
   if (name !== undefined) sets.push(`name = '${String(name).replace(/'/g, "''")}'`)
   if (parent_id !== undefined) sets.push(`parent_id = ${parent_id === null || parent_id === undefined ? 'NULL' : parent_id}`)
@@ -82,18 +103,20 @@ domainsRouter.patch('/:id', async (req, res) => {
   if (description !== undefined) sets.push(`description = ${description === null ? 'NULL' : `'${String(description).replace(/'/g, "''")}'`}`)
   if (sort !== undefined) sets.push(`sort = ${parseInt(String(sort)) || 0}`)
   if (sets.length === 0) return res.json({ success: true })
-  const domId = parseInt(req.params.id)
   await db.exec(`UPDATE domains SET ${sets.join(', ')} WHERE id = ${domId}`)
   // 强一致：领域 ≡ 一级主要标签——改名领域时同名一级标签跟随改名
+  let warning: string | undefined
   if (name !== undefined && domId) {
     const esc = String(name).replace(/'/g, "''")
     // 死行（retired/merged）占用新名时让位：历史名保留 id 后缀可溯（如改回旧名场景）
     await db.exec(`UPDATE tags SET name = name || '·' || id WHERE name = '${esc}' AND status != 'active'`)
     try {
       await db.exec(`UPDATE tags SET name = '${esc}' WHERE domain_id = ${domId} AND level = 'primary' AND status = 'active'`)
-    } catch { /* 新名与活跃标签撞 UNIQUE → 领域改名成功、标签同步跳过（响应 warning 提示） */ }
+    } catch { /* 新名与活跃标签撞 UNIQUE → 领域改名成功、标签同步跳过（响应 warning 提示，启动对账兜底） */
+      warning = '领域已改名，但同名一级标签同步失败（名称被其他活跃标签占用），服务重启对账时将自动修复'
+    }
   }
-  res.json({ success: true })
+  res.json({ success: true, ...(warning ? { warning } : {}) })
 })
 
 domainsRouter.delete('/:id', async (req, res) => {

@@ -48,7 +48,7 @@ test('设为一级：同名领域存在 → 锚定绑定，不新建', async () 
   const id = await makeTag(db, '云原生-锚定测')
   await db.exec(`UPDATE tags SET name = '云原生' WHERE id = ${id}`)
 
-  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary' })
+  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary', force: true })
   assert.equal(code, 200)
   assert.equal(body.success, true)
   const t = await (await db.prepare('SELECT level, domain_id FROM tags WHERE id = ?')).get(id) as any
@@ -64,7 +64,7 @@ test('设为一级：无同名领域 → 自动创建领域并绑定（一级即
   const id = await makeTag(db, '自动建域测')
   const before = (await (await db.prepare('SELECT COUNT(*) AS n FROM domains')).get() as any).n
 
-  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary' })
+  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary', force: true })
   assert.equal(code, 200)
   assert.equal(body.success, true)
 
@@ -77,19 +77,24 @@ test('设为一级：无同名领域 → 自动创建领域并绑定（一级即
   assert.equal(after_, before + 1)
 })
 
-test('显式 domainId 优先于同名匹配；非法 level 仍 400', async () => {
+test('显式 domainId：名实一致放行、名实分裂 400（领域 ≡ 同名一级标签）；非法 level 仍 400', async () => {
   const db = await getDb()
   await db.exec(`INSERT INTO domains (name, color) VALUES ('目标域', '#ABCDEF')`)
   const dom = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get('目标域') as any
   await db.exec(`INSERT INTO domains (name, color) VALUES ('同名域', '#000000')`)
   const sameDom = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get('同名域') as any
-  const id = await makeTag(db, '同名域')
+  const id = await makeTag(db, '目标域')
 
-  const ok = await callPatch(patchHandler(), id, { level: 'primary', domainId: dom.id })
+  const ok = await callPatch(patchHandler(), id, { level: 'primary', domainId: dom.id, force: true })
   assert.equal(ok.body.success, true)
   const t = await (await db.prepare('SELECT domain_id FROM tags WHERE id = ?')).get(id) as any
-  assert.equal(t.domain_id, dom.id, '显式 domainId 必须优先')
-  assert.notEqual(t.domain_id, sameDom.id)
+  assert.equal(t.domain_id, dom.id, '名实一致的显式绑定必须成功')
+
+  // 名实一致门禁（修复点）：旧行为允许把标签挂到任意名领域，制造「一级标签名 ≠ 领域名」分裂
+  const mis = await makeTag(db, '分裂挂靠测')
+  const badBind = await callPatch(patchHandler(), mis, { level: 'primary', domainId: sameDom.id, force: true })
+  assert.equal(badBind.code, 400, '标签名与域名不一致的显式挂靠必须 400')
+  assert.equal(badBind.body.success, false)
 
   const bad = await callPatch(patchHandler(), id, { level: 'vault' })
   assert.equal(bad.code, 400)
@@ -101,7 +106,7 @@ test('显式 domainId 优先于同名匹配；非法 level 仍 400', async () =>
 test('异常：显式 domainId 指向不存在的领域 → 400，不写悬挂引用', async () => {
   const db = await getDb()
   const id = await makeTag(db, '悬空域引用测')
-  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary', domainId: 999999 })
+  const { code, body } = await callPatch(patchHandler(), id, { level: 'primary', domainId: 999999, force: true })
   assert.equal(code, 400, '必须拦截不存在的 domainId')
   assert.equal(body.success, false)
   const t = await (await db.prepare('SELECT level, domain_id FROM tags WHERE id = ?')).get(id) as any
@@ -112,10 +117,10 @@ test('异常：显式 domainId 指向不存在的领域 → 400，不写悬挂�
 test('异常：显式 domainId 为垃圾值（abc / 0）→ 400，与 parentTagId 校验对齐', async () => {
   const db = await getDb()
   const id = await makeTag(db, '垃圾域id测')
-  const a = await callPatch(patchHandler(), id, { level: 'primary', domainId: 'abc' })
+  const a = await callPatch(patchHandler(), id, { level: 'primary', domainId: 'abc', force: true })
   assert.equal(a.code, 400, '垃圾 domainId 不得静默回退同名建域（client 错必须 fail loud，与 parentTagId 行为一致）')
   assert.equal(a.body.success, false)
-  const b = await callPatch(patchHandler(), id, { level: 'primary', domainId: 0 })
+  const b = await callPatch(patchHandler(), id, { level: 'primary', domainId: 0, force: true })
   assert.equal(b.code, 400, '0 不是合法 id')
   const t = await (await db.prepare('SELECT level FROM tags WHERE id = ?')).get(id) as any
   assert.equal(t.level, 'normal')
@@ -124,7 +129,7 @@ test('异常：显式 domainId 为垃圾值（abc / 0）→ 400，与 parentTagI
 test('异常：改名 + 设一级同请求 → 领域必须按【新名】对齐', async () => {
   const db = await getDb()
   const id = await makeTag(db, '改名对齐旧名测')
-  const { code, body } = await callPatch(patchHandler(), id, { name: '改名对齐新名测', level: 'primary' })
+  const { code, body } = await callPatch(patchHandler(), id, { name: '改名对齐新名测', level: 'primary', force: true })
   assert.equal(code, 200)
   assert.equal(body.success, true)
   const t = await (await db.prepare('SELECT name, domain_id FROM tags WHERE id = ?')).get(id) as any
@@ -141,7 +146,7 @@ test('异常：标签名含单引号/注入形态 → 转义建域成功，domai
   await db.exec(`INSERT INTO tags (name, level) VALUES ('${weird.replace(/'/g, "''")}', 'normal')`)
   const row = await (await db.prepare('SELECT id FROM tags WHERE name = ?')).get(weird) as any
   assert.ok(row, '注入形态标签名应原样入库')
-  const { code, body } = await callPatch(patchHandler(), row.id, { level: 'primary' })
+  const { code, body } = await callPatch(patchHandler(), row.id, { level: 'primary', force: true })
   assert.equal(code, 200)
   assert.equal(body.success, true)
   const dom = await (await db.prepare('SELECT id FROM domains WHERE name = ?')).get(weird) as any
@@ -167,7 +172,7 @@ test('迁移 v2/v3：merged/retired 残留的 primary 头衔必须清掉（v1 �
   const retired = await (await db.prepare("SELECT level FROM tags WHERE name = 'retired残留一级测'")).get() as any
   assert.equal(retired.level, 'normal', 'retired 残留 primary 必须降级 normal')
   const ver = await (await db.prepare("SELECT value FROM config WHERE key = 'tagSystem.levelVersion'")).get() as any
-  assert.equal(ver.value, '3', '迁移版本必须推进到 3（v2 清头衔 + v3 补领域同名标签，防重跑门槛升级）')
+  assert.equal(ver.value, '4', '迁移版本必须推进到 4（v2 清头衔 + v3 补领域同名标签 + v4 重复领域去重，防重跑门槛升级）')
   // 幂等：重跑不得再动任何数据
   await migrateTagLevels(db)
   const again = await (await db.prepare("SELECT COUNT(*) AS n FROM tags WHERE level = 'primary' AND domain_id IS NULL AND status != 'active'")).get() as any
