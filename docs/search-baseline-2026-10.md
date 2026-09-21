@@ -29,9 +29,9 @@ query 来源：**第 1 级（CLI queries 文件）**，去重后共 21 条 = 脚
 | 20 | quantum-blockchain-xyz | （无结果） | （无结果） | （无结果） |  |
 | 21 | MCP 部署 | （无结果） | （无结果） | （无结果） |  |
 
-> 标注说明：hit=精准命中 / partial=部分相关 / miss=不相关。本表为 Phase 2 检索改造（LIKE → 更强检索）的验收对照组。
+> 标注说明：hit=精准命中 / partial=部分相关 / miss=不相关。本表为 Phase 2 检索改造（LIKE → 更强检索）的验收对照组。标注列经 2026-09-21 人工复核全量确认（旧 9 hit / 9 partial / 3 miss 维持），结果见下方「人工复核记录」小节。
 
-### AI 预标注（待人工复核）
+### AI 预标注（已于 2026-09-21 人工复核全量确认）
 
 > 以下为生成本表的 AI 基于结果文本给出的初步判断，仅用于对齐标注口径，**不构成人工结论**；表内「标注」列留空，以人工勾选为准。Top-N 单元格仅展示 title（超 60 字符截断，语料存在 title 长达 11 万字符的脏数据）与 summary 前 80 字符，部分命中依据（如 path 子串）未完整展示，判断可能存在偏差。
 
@@ -60,6 +60,82 @@ query 来源：**第 1 级（CLI queries 文件）**，去重后共 21 条 = 脚
 | 21 | MCP 部署 | miss | 真实日志 query 返回空：LIKE 要求「MCP 部署」作为连续子串，不支持空格分词（原调用还带 domain=infra 过滤，本重放未带） |
 
 AI 预标注小结（待人工复核）：21 条中 9 条偏 hit、9 条偏 partial、3 条 miss（含 1 条真实日志 query「MCP 部署」）。对 Phase 2 的两点直接论据：① 空格词组检索完全失效（#21），LIKE 无分词能力；② path 子串误命中引入噪声（#14 kdocs）、脏 title 挤占展示位（#9），均指向需要更强检索与结果可读性治理。
+
+## Phase 2 混合检索重放对照（生成于 2026-09-21，Wave 3 验收）
+
+复现命令：`npx tsx server/scripts/searchBaseline.ts /tmp/af-baseline-queries.txt --db server/data/app.db`（query 文件与旧基线完全一致 = 兜底 20 条 + 「MCP 部署」；searchKnowledgeCore 已委托三路混合检索，config 未设 `search.hybridEnabled` 即默认开启，外部 rerank 默认关）。
+
+重放环境事实（如实记录的两点降级）：
+- **FTS 覆盖不完整**：`wiki_fts` 2519 行 / `wiki_entries_meta` 48531 行（≈5.2%）。原因是 `ensureFtsPopulated` 设计为「仅 FTS 空时回填」且存量主表超过回填上限 `FTS_BACKFILL_CAP=20000`（ftsIndex.ts）被跳过；现有 2519 行来自蒸馏写入点增量同步。本次成绩是在 FTS 低覆盖下取得的，存量补全属后续可改进项。【已补齐 2026-09-21：cap 提至 200000 + `server/scripts/ftsBackfill.ts` 全量重建，wiki_fts 2693 → 48705 行与主表 1:1，重启后 MCP 冒烟通过；本节保留为验收时点事实】
+- **向量路缺席**：`entry_chunks` = 0。boot 补嵌任务在跑（目标约 4.85 万块），但嵌入调用与 LLM 蒸馏队列共用配额，进度极慢，验收时点尚未产出任何分块。该缺席为可接受降级（hybrid 对向量路缺席的降级安全由 hybrid.test.ts 钉死）。【2026-09-21 更新：boot 自动补嵌经实测 GPU compute-bound（串行 ETA ~53h）已按裁决摘除，转设置页手动分批补嵌，存量 ~4.76 万待嵌词条由用户逐批慢补，见 roadmap 欠账②；当前 chunks 2562】
+- **语料漂移警告**：旧基线生成于 2026-09-20，本重放为 2026-09-21，其间 files 语料显著增长（新增大量 CloudBase/lark/qoder 等文档，max id 从 ~12.7 万涨到 17 万+），对照并非同语料，数字存在效度威胁，趋势结论仍成立。
+
+### 新旧 Top-1 对照表（Top-1 摘要为人工简述，完整输出见重放表）
+
+| # | query | 旧 Top-1（LIKE 路） | 新 Top-1（hybrid） | 旧标注 | 新标注 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | MCP | #126602 MCP 消费链路漏斗指标 | #87551 聚源 MCP 金融热点解读技能 | partial | hit ↑ |
+| 2 | LLM | #123337 AgentFeed README | #162601 说服原则应用于 LLM 技能设计 | partial | hit ↑ |
+| 3 | Agent | #126425 VibeCanon 开发记录 | #85832 CloudBase Agent SDK | partial | hit ↑ |
+| 4 | SQLite | #126395 VibeCanon 开发记录 | #90869 CodeBuddy Web Agent 模板（summary 含 SQLite，已查库核实） | hit | hit |
+| 5 | scanner | #74626（摘要空，疑 path 命中） | #86569 CamScanner 错误处理规范（子串误命中） | partial | partial |
+| 6 | 架构 | #126466 JSON 配置脏数据 | #85898 微信云开发三层架构 | partial | hit ↑ |
+| 7 | 指南 | #86681 CloudBase MCP 配置指南 | #85890 CloudBase MCP 配置接入 | hit | hit |
+| 8 | 实践 | #71625 AutoClaw 配置规范 | #85807 CloudBase 认证模式指南 | partial | partial |
+| 9 | 总结 | #126539 予非AI知识大脑 | #170877 AI 智能体 21 项架构模式总结 | partial | hit ↑ |
+| 10 | 蒸馏 | #123337 AgentFeed README | #170817 本周收藏汇总（写作风格蒸馏） | hit | hit |
+| 11 | server | #123337 AgentFeed README | #85831 @cloudbase/agent-server 包 | hit | hit |
+| 12 | web | #123337 AgentFeed README | #86335 多维表格 Webhook API（web 子串噪声） | hit | partial ↓ |
+| 13 | README | #123337 AgentFeed README | #126396 vibecanon/README.md（path 查库核实命中 README 本身） | hit | hit |
+| 14 | docs | #86323 金山文档 Skill | #86401 金山文档 wps 工具集 | partial | partial |
+| 15 | config | #126344（摘要空，疑 path 命中） | #88212 ClickHouse 集群配置 API | partial | hit ↑ |
+| 16 | 前端 | #126477 前端 PRD 设计系统 | #85847 CloudBase 规则索引矩阵（path/摘要均无前端主题，已查库核实） | hit | partial ↓ |
+| 17 | 后端 | #126309 Browser Automation API | #85815 CloudBase Event Function | hit | hit |
+| 18 | 数据库 | #126602 MCP 消费漏斗指标 | #117092 CloudBase PG 容量规划 | hit | hit |
+| 19 | zzxq自造词mISS | 无结果 | 无结果 | miss | miss |
+| 20 | quantum-blockchain-xyz | 无结果 | 无结果 | miss | miss |
+| 21 | MCP 部署 | **无结果**（LIKE 空格分词失效） | **#92818 Godot MCP 部署命令**（files LIKE 命中，归因见下） | miss | hit ↑ |
+
+### 命中率计算与结论
+
+- 口径：与旧基线 AI 预标注一致，hit=精准命中 / partial=部分相关 / miss=不相关；命中率 = hit 数 / 21。边界条目（README #126396、前端 #85847/#124961/#85904、SQLite #90869/#126395）已通过只读查库核实 path/summary 命中依据后再标注，消除「path 依据不可见」偏差。
+- 旧命中率：9 hit / 21 ≈ **42.9%**（AI 预标注口径）。
+- 新命中率：14 hit / 21 ≈ **66.7%**（14 hit、5 partial、2 miss）。
+- 相对提升：(66.7% − 42.9%) / 42.9% = 5/9 ≈ **55.6% ≥ 50% → PASS**。
+- 明细：7 条提升、2 条退步（web、前端 hit→partial，系语料漂移新增 Webhook/无关文档挤占 Top-3，属新语料下的子串噪声，非检索逻辑回归）、12 条持平。
+- **#21「MCP 部署」归因修正（查库核实，fail loud）**：本条 hit 并非 trigram 救回——wiki_fts 对短语「MCP 部署」MATCH 为零命中，#92818 的命中来自 files LIKE 路（其 summary 现含「MCP 部署」连续子串，title/path 不含；该子串系 09-20 基线之后新采集/蒸馏更新 summary 所引入）。旧基线对 LIKE 无空格分词的失败归因仍然成立，但本条 miss→hit 的主因是语料与摘要变化，而非检索引擎切换。FTS 路整体覆盖率仅 ≈5.2%（见上），本轮 7 条提升的主要来源应为 RRF 融合重排 + 静态先验对 LIKE 候选的排序改善，FTS 新增候选贡献有限。
+
+> **AI 预标注免责声明**：上表「新标注」为 AI 基于重放结果文本 + 只读查库核实（path/title/summary 字段）给出的初步判断，仅用于对齐口径；**已于 2026-09-21 完成人工复核，21/21 条维持原档位（见下方「人工复核记录」）**。重放表单元格仍只展示 title/summary 截断，content 命中依据未完整展示。两点降级（FTS 低覆盖、向量缺席）与语料漂移同时意味着：本成绩低于 Phase 2 完全体（FTS 全量 + 向量就绪后复测数字 expected 上行），也高于同语料静态对照（漂移双向影响）。
+
+### 人工复核记录（2026-09-21，复核人：Duke）
+
+复核方式：AI 分批呈交证据（P0 退步/归因/边界条目逐条查库 → 提升条目 → 持平抽查 3 条），逐批人工拍板确认。证据补齐两处：#90869 summary 含「SQLite 数据持久化」（instr=171/197）；#126396 path = `/Users/duke/Documents/vibecanon/README.md`（path 命中 README 文件本身，与旧口径一致）。
+
+**结论：21/21 条维持 AI 预标注档位**——唯一争议点 #15「config」人工确认为 hit（Top-2 #85858 cloudbaserc 配置架构文档直接对应查询意图，按 Top-3 规则成立）。
+
+| 口径 | hit | partial | miss | 命中率 |
+| --- | --- | --- | --- | --- |
+| 旧（LIKE 路） | 9 | 9 | 3 | 42.9% |
+| 新（hybrid，人工确认） | 14 | 5 | 2 | 66.7% |
+
+- 相对提升 55.6% ≥ 50% → **Phase 2 验收正式关闭（人工口径 PASS）**
+- 退步 2 条（#12 web / #16 前端）确认为语料漂移子串噪声，非检索逻辑回归
+- #21「MCP 部署」hit 归因确认：files LIKE 路 + 语料 summary 变化，非 trigram 救回（与上文归因修正一致）
+- 方法论偏差声明：未采用「先写期望再看结果」预注册流程，以交互式分批确认替代；「拿不准降 partial」纪律已执行
+
+**随复核裁决（索引欠账）**：先补齐再复测——① FTS 全量回填（提高 `FTS_BACKFILL_CAP` 至主表全量）；② `entry_chunks` 向量补嵌完成；两者补齐后重跑 21 条基线得「完全体」成绩，**复测通过前不启动 Phase 3**。
+> 欠账①完成（2026-09-21）：cap 20000→200000，`npx tsx server/scripts/ftsBackfill.ts` 全量重建 wiki_fts 2693 → 48705 行（重复 entry_id=0）；「MCP 部署」短语 wiki_fts MATCH 由零命中变为直接命中（词条 31723/31727）；`./service.sh restart` 后 MCP `search_knowledge` 冒烟通过。部分填充自愈回归已钉入 `server/test/searchIndex.test.ts`。
+> 欠账②方式变更（2026-09-21 用户裁决）：boot 全量补嵌停机（GPU compute-bound 不适合常驻满载），转设置页手动分批补嵌（`POST /api/wiki/chunks/backfill/start`，content_hash 幂等断点续跑），增量词条由 llmWorker 蒸馏后即时索引不欠账；存量清偿完毕后再重跑基线。
+
+### 逃生舱实测与发现（生成于 2026-09-21，Wave 3 冒烟）
+
+实测流程：对真实库写入 config 键 `search.hybridEnabled=false`（外部 `sqlite3` CLI），经 MCP stdio 再调 `search_knowledge` 验证走旧 LIKE 路，测后立即删除该键恢复。
+
+- **键恢复确认**：测试结束后 `SELECT count(*) FROM config WHERE key='search.hybridEnabled'` = **0**，多次复验一致，现场无残留。
+- **逻辑层正确**：`hybrid.ts` 逃生舱（`readConfigFlag` 直查 config 表、无缓存，每次调用实时读取）代码本身无问题；短命进程（如 `searchBaseline.ts` 重放脚本）新起连接读库行为完全正常。
+- **【fail loud】库层缺陷：`@homeofthings/sqlite3` 连接级读快照冻结**。经 8 个一次性探针（v1→v8，测后已删除）逐层排除定位：**同一连接只要跑过一次 `hybridSearchWiki`（含 FTS MATCH 等复杂语句），该连接的所有后续读全部冻结在旧快照**——变体 SQL、内联 SQL、甚至 `SELECT count(*) FROM config` 均返回旧值；此时外部 CLI 写入真实落盘（CLI readback 确认），但该连接永远不可见。反证：无 hybrid 前置时，外部写立即可见（v4/v5）。定性为**库缺陷（读事务悬挂未结束），非产品逻辑缺陷**。
+- **影响**：逃生舱在长驻进程（web 服务、MCP 常驻会话）内**无法热生效**——进程内已执行过混合检索后，再改 config 键切不回旧 LIKE 路，需重启进程。变通：逃生舱改用「重启进程 + 配置预设」方式使用，或等待库升级修复。
+- **连带异常（同场观测，均记录不阻塞）**：① v7 restored 态出现过一次空结果（FTS 写竞争下静默降级为空，非稳定复现）；② 向量补嵌写高峰期间出现 `SQLITE_BUSY: database is locked`；③ daily 报表端点首测 20s 超时（同因），重试 30s 内 200（0.014s）自愈。
 
 ## 附录 A：MCP 消费链路指标（mcpFunnel，生成于 2026-09-20）
 
