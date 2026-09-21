@@ -5,6 +5,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { getProviders, getDefaultModel, getModels, getDefaultProvider, type LlmProvider } from './llmClient.js'
 import { LlmQueue } from './llmQueue.js'
 import { processJob } from './llmWorker.js'
+import { enforceDailyBudget } from './budgetGate.js'
 
 export interface WikiDraft {
   title: string
@@ -115,9 +116,15 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
   }
 }
 
+// G1 日预算闸：入队即 fire-and-forget 巡检（30s 节流——feeder 批量入队会连续触发，当日聚合无需逐次重算），不阻塞入队
+let lastBudgetCheckAt = 0
 const llmQueue = new LlmQueue(recommendedConcurrency(), {
   onProgress: (_job, state) => {
     console.log(`llm job ${_job.id} ${state}`)
+    if (state === 'queued' && Date.now() - lastBudgetCheckAt >= 30 * 1000) {
+      lastBudgetCheckAt = Date.now()
+      void enforceDailyBudget(llmQueue).catch(() => { /* 预算巡检失败不影响入队 */ })
+    }
   },
 }, queueCapacity())
 

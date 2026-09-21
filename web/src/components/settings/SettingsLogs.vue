@@ -20,6 +20,51 @@
         </div>
         <!-- LLM 调用日志（细化排错：文件名 / tokens 细分 / 点击展开完整错误与耗时明细） -->
         <template v-if="logView === 'llm'">
+          <!-- G1 用量与成本：按天 / 按模型（成本依赖 config ai.pricing 单价表，未配单价显示 —，合计仅含已配价模型） -->
+          <div v-if="llmStats" style="padding:12px 14px 0;display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div>
+              <div class="cap" style="margin-bottom:6px">按天用量（近 30 天）</div>
+              <table class="rtable">
+                <thead><tr>
+                  <th>日期</th><th>调用</th><th>tokens</th>
+                  <th :title="llmStats.unknownPricing ? '部分模型未配单价，合计仅含已配价模型' : undefined">成本</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="d in llmStats.byDay || []" :key="d.day">
+                    <td class="mono">{{ d.day }}</td>
+                    <td>{{ d.calls }}</td>
+                    <td class="mono">{{ d.tokens ?? '—' }}</td>
+                    <td class="mono">{{ fmtCost(d.cost) }}</td>
+                  </tr>
+                  <tr v-if="!(llmStats.byDay || []).length"><td colspan="4" class="cap">暂无调用</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div>
+              <div class="cap" style="margin-bottom:6px">按模型用量</div>
+              <table class="rtable">
+                <thead><tr>
+                  <th>模型</th><th>调用</th><th>tokens</th>
+                  <th :title="llmStats.unknownPricing ? '部分模型未配单价，合计仅含已配价模型' : undefined">成本</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="m in llmStats.byModel || []" :key="m.provider + '/' + m.model">
+                    <td>{{ providerLabel(m.provider) }} · {{ m.model }}</td>
+                    <td>{{ m.calls }}</td>
+                    <td class="mono">{{ m.tokens ?? '—' }}</td>
+                    <td class="mono">{{ fmtCost(m.cost) }}</td>
+                  </tr>
+                  <tr v-if="!(llmStats.byModel || []).length"><td colspan="4" class="cap">暂无调用</td></tr>
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colspan="3" class="cap">{{ llmStats.unknownPricing ? '合计成本（部分模型未配单价，仅含已配价模型）' : '合计成本' }}</td>
+                    <td class="mono">{{ fmtCost(llmStats.totalCost) }}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
           <template v-if="llmLogs.length">
             <template v-for="l in llmLogs" :key="l.id">
               <div class="delrow" style="cursor:pointer" @click="expandedLog = expandedLog === l.id ? 0 : l.id">
@@ -157,6 +202,13 @@ const llmLogPage = ref(1)
 const mcpLogs = ref<any[]>([])
 const mcpLogsTotal = ref(0)
 const svcLogs = ref<string[]>([])
+/** G1 LLM 用量/成本统计（api.stats.llm：byDay/byModel 含 cost，顶层 totalCost/unknownPricing） */
+const llmStats = ref<any>(null)
+
+/** 成本格式化：未配单价 null → '—'；金额去尾零（0.2469 / 10） */
+function fmtCost(c: number | null | undefined) {
+  return c == null ? '—' : '¥' + String(+Number(c).toFixed(4))
+}
 /** 服务日志总数（读取窗口内行数，与列表接口 total 同源）——徽标不能直接用 svcLogs.length（≤500 截断） */
 const svcTotal = ref(0)
 
@@ -227,6 +279,7 @@ function refreshLogBadges() {
   settings.fetchScanJobs()
   api.llm.mcpLogs().then(out => { mcpLogsTotal.value = out.total || 0 }).catch(() => {})
   api.llm.serviceLogs().then(out => { svcTotal.value = out.total || 0 }).catch(() => {})
+  api.stats.llm().then(s => { llmStats.value = s }).catch(() => {})
 }
 
 function switchLogView(v: 'llm' | 'mcp' | 'scan' | 'service') {

@@ -2,6 +2,8 @@ import { Router } from 'express'
 import { getDb } from '../db.js'
 import { llmQueue } from '../llm/index.js'
 import { resolveAgentDirs } from '../agents.js'
+import { clusterSessions, computeFunnel, attributeSearches } from '../funnelCore.js'
+import { loadPricingTable, computeCost, computeDayCost, todayCost } from '../llm/pricing.js'
 
 export const statsRouter = Router()
 
@@ -37,6 +39,26 @@ statsRouter.get('/overview', async (req, res) => {
 
 statsRouter.get('/llm', async (req, res) => {
   const db = await getDb()
+  // 单价表存 config（JSON），SQL 无法内嵌换算——金额统一在 JS 层按 provider/model 查表计算
+  const pricing = await loadPricingTable()
+  // 明细聚合（天 × 服务商 × 模型）：byDay 各日成本与全量 totalCost/unknownPricing 的数据源
+  const detail = await (await db.prepare(`
+    SELECT date(created_at) as day, provider, model,
+      SUM(prompt_tokens) as prompt_tokens, SUM(completion_tokens) as completion_tokens
+    FROM llm_call_logs
+    GROUP BY date(created_at), provider, model
+  `)).all() as any[]
+  const perDay = new Map<string, { sum: number, anyPriced: boolean }>()
+  for (const g of detail) {
+    const entry = pricing[`${g.provider}/${g.model}`]
+    const cur = perDay.get(String(g.day)) || { sum: 0, anyPriced: false }
+    if (entry) {
+      cur.sum += computeCost(g.prompt_tokens, g.completion_tokens, entry)
+      cur.anyPriced = true
+    }
+    perDay.set(String(g.day), cur)
+  }
+  const { totalCost, unknownPricing } = computeDayCost(detail, pricing)
   const byDayStmt = await db.prepare(`
     SELECT date(created_at) as day, COUNT(*) as calls, SUM(total_tokens) as tokens, SUM(duration_ms) as duration
     FROM llm_call_logs
@@ -44,14 +66,21 @@ statsRouter.get('/llm', async (req, res) => {
     ORDER BY day DESC
     LIMIT 30
   `)
-  const byDay = await byDayStmt.all() as any[]
+  const byDay = ((await byDayStmt.all()) as any[]).map(r => ({
+    ...r,
+    cost: perDay.get(String(r.day))?.anyPriced ? +perDay.get(String(r.day))!.sum.toFixed(4) : null,
+  }))
   const byModelStmt = await db.prepare(`
-    SELECT model, COUNT(*) as calls, SUM(total_tokens) as tokens, AVG(duration_ms) as avg_duration
+    SELECT provider, model, COUNT(*) as calls, SUM(total_tokens) as tokens, AVG(duration_ms) as avg_duration,
+      SUM(prompt_tokens) as prompt_tokens, SUM(completion_tokens) as completion_tokens
     FROM llm_call_logs
-    GROUP BY model
+    GROUP BY provider, model
   `)
-  const byModel = await byModelStmt.all() as any[]
-  res.json({ byDay, byModel })
+  const byModel = ((await byModelStmt.all()) as any[]).map(r => {
+    const entry = pricing[`${r.provider}/${r.model}`]
+    return { ...r, cost: entry ? computeCost(r.prompt_tokens, r.completion_tokens, entry) : null }
+  })
+  res.json({ byDay, byModel, totalCost, unknownPricing, todayCost: await todayCost() })
 })
 
 /** 总览页聚合数据：流量大数、队列、领域/agent 分布、最近文件、动态时间线、7 天趋势 */
@@ -178,6 +207,7 @@ statsRouter.get('/dashboard', async (req, res) => {
       domains, fileSources, agents, recent, events,
       trend: { labels, vals, models, sum: vals.reduce((s, v) => s + v, 0) },
       llm30: { calls: trend30?.calls || 0, tokens: trend30?.tokens || 0, rate: trend30?.rate ?? 100 },
+      llmTodayCost: await todayCost(),
       defaultModel: null
     })
   } catch (e: any) {
@@ -246,6 +276,48 @@ statsRouter.get('/mcp', async (req, res) => {
       GROUP BY date(created_at) ORDER BY day ASC
     `)).all() as any[]
     res.json({ week: weekRow.c, total: totalRow.c, byTool, byDay })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/**
+ * E1 消费链路诊断面板：漏斗（search→read→source）+ 断链归因四分类 + 近 7 日调用趋势。
+ * 口径与 scripts/mcpFunnel.ts 完全一致（共用 funnelCore 纯计算模块——面板与脚本数字漂移即 bug）。
+ * 归因重放为轻量关键词路（wiki_fts MATCH + files LIKE），与调用时刻真实索引可能存在漂移，面板如实标注。
+ */
+statsRouter.get('/funnel', async (_req, res) => {
+  try {
+    const db = await getDb()
+    const rows = await (await db.prepare('SELECT id, tool, args, created_at FROM mcp_call_logs ORDER BY created_at ASC, id ASC')).all() as any[]
+    const { sessions, skipped } = clusterSessions(rows)
+    const metrics = computeFunnel(sessions, skipped, rows.length)
+
+    // 归因重放（只读 DB 查询注入，funnelCore 保持纯计算）
+    const replayFn = async (query: string): Promise<{ id: number, title: string }[]> => {
+      try {
+        const fts = await (await db.prepare(`
+          SELECT f.id AS id, COALESCE(NULLIF(w.title, ''), f.title, f.name) AS title
+          FROM wiki_fts ft JOIN wiki_entries_meta w ON w.id = ft.entry_id JOIN files f ON f.id = w.file_id
+          WHERE wiki_fts MATCH ? LIMIT 3`)).get([`"${query.replace(/"/g, ' ')}"`]) as any
+        const ftsRows = fts ? [fts] : []
+        if (ftsRows.length > 0) return ftsRows.map(r => ({ id: Number(r.id), title: String(r.title || '') }))
+      } catch { /* FTS 异常落 LIKE */ }
+      const like = `%${query.replace(/[%_]/g, ' ').slice(0, 60)}%`
+      const likeRows = await (await db.prepare(`
+        SELECT id, COALESCE(NULLIF(title, ''), name) AS title FROM files
+        WHERE status = 'active' AND (title LIKE ? OR name LIKE ?) LIMIT 3`)).all([like, like]) as any[]
+      return likeRows.map(r => ({ id: Number(r.id), title: String(r.title || '') }))
+    }
+    const attribution = await attributeSearches(sessions, replayFn)
+
+    // 近 7 日 search 调用趋势（检索质量趋势的分母基线；命中率趋势待基线重放接入 D1 后补）
+    const trend = await (await db.prepare(`
+      SELECT date(created_at) as day, COUNT(*) as calls FROM mcp_call_logs
+      WHERE tool = 'search_knowledge' AND created_at >= datetime('now', '-7 days')
+      GROUP BY date(created_at) ORDER BY day ASC`)).all() as any[]
+
+    res.json({ success: true, metrics, attribution, trend })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e) })
   }
