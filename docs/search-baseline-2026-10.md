@@ -1,4 +1,5 @@
 # 检索基线记录（2026-10 裁决对照）
+> corpusFingerprint: {"filesCount":54664,"maxFileId":185304} generatedAt: 2026-09-21T15:25:27.697Z
 > 正文（query 重放 Top-3 对比表）由检索基线任务补充；本文件先落附录。
 
 ## 正文：search_knowledge Top-3 重放（生成于 2026-09-20，复现命令：`npx tsx server/scripts/searchBaseline.ts /tmp/af-baseline-queries.txt --db server/data/app.db`）
