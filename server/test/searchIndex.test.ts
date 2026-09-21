@@ -123,6 +123,25 @@ test('ensureFtsPopulated：FTS 非空跳过；FTS 清空后回填一次；超上
   await rebuildFts(db2) // 恢复索引，供后续用例使用
 })
 
+test('部分填充自愈：FTS 有部分数据时启动期回填跳过，rebuildFts 必须补齐主表全量（WHY：2026-09 存量欠账根因——增量同步的 2519 行让 ensureFtsPopulated 永久短路 fts_not_empty，唯一修复路径是显式 rebuild，此用例钉死「部分覆盖可被 rebuild 治愈」）', async () => {
+  const db = await getDb()
+  // 构造部分填充：清空后只回填 1 条，主表行数 > FTS 行数（复刻生产欠账形态）
+  await db.exec('DELETE FROM wiki_fts')
+  const partial = await (await db.prepare('SELECT id, title, summary, entry_path FROM wiki_entries_meta LIMIT 1')).get() as any
+  let content = ''
+  try { content = await fs.readFile(String(partial.entry_path || ''), 'utf8') } catch { /* 文件缺失退化为标题+摘要 */ }
+  await upsertFtsEntry(db, Number(partial.id), String(partial.title || ''), String(partial.summary || ''), content)
+
+  const skip = await ensureFtsPopulated(db)
+  assert.equal(skip.reason, 'fts_not_empty', 'FTS 非空（哪怕覆盖严重不足）必须跳过启动期回填——这正是欠账无法自愈的根因')
+
+  const n = await rebuildFts(db)
+  const ftsCount = Number((await (await db.prepare('SELECT COUNT(*) AS n FROM wiki_fts')).get() as any)?.n || 0)
+  const metaCount = Number((await (await db.prepare('SELECT COUNT(*) AS n FROM wiki_entries_meta')).get() as any)?.n || 0)
+  assert.equal(n, metaCount, 'rebuild 返回条数必须等于主表规模')
+  assert.equal(ftsCount, metaCount, '自愈后 FTS 行数必须覆盖主表全量（欠账场景回归钉子）')
+})
+
 test('chunkEntryMd：多 heading 分块数与顺序、heading_path 层级路径正确', () => {
   const chunks = chunkEntryMd([
     '文件顶部前言',

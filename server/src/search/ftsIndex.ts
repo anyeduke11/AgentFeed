@@ -14,8 +14,10 @@ import fs from 'fs/promises'
 
 const FTS_TABLE = 'wiki_fts'
 
-/** 全量回填上限保护：主表超过该规模时拒绝启动期回填，防误伤大库（测试可经 opts.cap 覆盖） */
-export const FTS_BACKFILL_CAP = 20000
+/** 全量回填上限保护：主表超过该规模时拒绝启动期回填（测试可经 opts.cap 覆盖）。
+ * 20000 → 200000（2026-09-21 裁决「FTS 全量回填」）：旧 cap 使 4.8 万+ 词条主库的启动期回填被永久跳过，
+ * FTS 覆盖率停留在增量同步的 ≈5.2%；提高后覆盖当前库规模并留增长余量，超大库防护语义保留。 */
+export const FTS_BACKFILL_CAP = 200000
 
 let ftsTokenizer: 'trigram' | 'unicode61' | null = null
 
@@ -139,8 +141,9 @@ export async function deleteFtsEntry(db: SqliteDatabase, entryId: number): Promi
   await (await db.prepare(`DELETE FROM ${FTS_TABLE} WHERE entry_id = ?`)).run([entryId])
 }
 
-/** 全量重建：清空 FTS 后从主表 + entry.md 逐条回填；文件缺失退化为标题+摘要；重复调用结果一致（幂等） */
-export async function rebuildFts(db: SqliteDatabase): Promise<number> {
+/** 全量重建：清空 FTS 后从主表 + entry.md 逐条回填；文件缺失退化为标题+摘要；重复调用结果一致（幂等）。
+ * opts.onProgress：可选进度回调（每 2000 条触发一次），供长耗时回填的运维脚本输出进度。 */
+export async function rebuildFts(db: SqliteDatabase, opts: { onProgress?: (done: number, total: number) => void } = {}): Promise<number> {
   if (!ftsTokenizer) await ensureFtsTable(db)
   if (!ftsTokenizer) return 0
   await db.exec(`DELETE FROM ${FTS_TABLE}`)
@@ -153,8 +156,45 @@ export async function rebuildFts(db: SqliteDatabase): Promise<number> {
     } catch { /* entry.md 缺失（外部词条未落盘/已清理）：标题+摘要仍可索引 */ }
     await upsertFtsEntry(db, Number(r.id), String(r.title || ''), String(r.summary || ''), content)
     n++
+    if (opts.onProgress && n % 2000 === 0) opts.onProgress(n, rows.length)
   }
   return n
+}
+
+// ==== Wave 1 验收口径的命名接口（与上方原语的关系）====
+// syncWikiFts / rebuildWikiFts / ftsSearchWiki 是任务验收要求的稳定入口：
+// sync 覆盖「词条写入/更新后单条重建」与「词条已删除时清索引」两语义；不传 entryId 等价全量重建。
+// ftsSearchWiki 返回纯 id 列表，供第二波融合检索直接消费；带片段/分数的完整命中仍走 searchFts。
+
+/** 单词条同步（幂等）：主表已无此行 → 清索引（删单条语义）；有 → 重读标题/摘要/entry.md 全文 upsert（文件缺失退化为标题+摘要） */
+export async function syncWikiFts(db: SqliteDatabase, entryId: number): Promise<void> {
+  if (!ftsTokenizer) await ensureFtsTable(db)
+  if (!ftsTokenizer) return
+  const row = await (await db.prepare('SELECT id, title, summary, entry_path FROM wiki_entries_meta WHERE id = ?')).get([entryId]) as any
+  if (!row) {
+    await deleteFtsEntry(db, entryId)
+    return
+  }
+  let content = ''
+  try {
+    content = await fs.readFile(String(row.entry_path || ''), 'utf8')
+  } catch { /* entry.md 缺失（外部词条未落盘/已清理）：标题+摘要仍可索引 */ }
+  await upsertFtsEntry(db, Number(row.id), String(row.title || ''), String(row.summary || ''), content)
+}
+
+/** 全量重建（命名别名，与 rebuildFts 同一实现，重复执行幂等） */
+export async function rebuildWikiFts(db: SqliteDatabase): Promise<number> {
+  return rebuildFts(db)
+}
+
+/**
+ * FTS 关键词检索（id 列表口径）：trigram MATCH 路按 bm25 相关度降序返回命中的 wiki_entries_meta.id；
+ * LIKE 回退路径（短 CJK query / unicode61 库）无 bm25 可用，按 title > summary > content 命中优先级近似排序。
+ * 空 query / FTS5 完全不可用返回空数组，不抛错。
+ */
+export async function ftsSearchWiki(db: SqliteDatabase, query: string, limit = 10): Promise<number[]> {
+  const hits = await searchFts(db, query, limit)
+  return hits.map(h => h.entry_id)
 }
 
 /**

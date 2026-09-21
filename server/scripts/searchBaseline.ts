@@ -30,6 +30,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { searchKnowledgeCore } from '../src/knowledge.js'
+import { computeCorpusFingerprint } from '../src/exportWiki.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -210,6 +211,17 @@ async function main() {
   // close 会报 SQLITE_BUSY: unable to close due to unfinalized statements。
   // 本脚本是一次性只读 CLI，进程退出时由 OS 回收连接；OPEN_READONLY 模式下无任何写残留风险。
 
+  // 语料指纹锚点（v0.1.5 D1）：写入输出头部，供 scripts/baselineCheck.ts 机械对比
+  // 「这份基线的重放数字是否仍对应当前语料」。computeCorpusFingerprint 只做 SELECT，
+  // 与 OPEN_READONLY 兼容；files 表不存在视为空库（同 replay 的 isNoSuchTable 口径）。
+  let fingerprint: { filesCount: number, maxFileId: number }
+  try {
+    fingerprint = await computeCorpusFingerprint(db)
+  } catch (err) {
+    if (!isNoSuchTable(err)) throw err
+    fingerprint = { filesCount: 0, maxFileId: 0 }
+  }
+
   const generatedAt = new Date().toISOString().slice(0, 10)
   const reproCmd = queriesFile
     ? `npx tsx server/scripts/searchBaseline.ts ${queriesFile} --db ${dbPath}`
@@ -221,6 +233,8 @@ async function main() {
   out.push('')
   const skippedNote = source === 'logs' && skippedLogRows > 0 ? `；解析失败跳过 ${skippedLogRows} 行` : ''
   out.push(`query 来源：${SOURCE_LABEL[source]}，去重后共 ${queries.length} 条${skippedNote}。库：\`${dbPath}\`（只读）。`)
+  out.push('')
+  out.push(`> corpusFingerprint: ${JSON.stringify(fingerprint)} generatedAt: ${new Date().toISOString()}`)
   out.push('')
   out.push('| # | query | Top-1 | Top-2 | Top-3 | 标注 |')
   out.push('| --- | --- | --- | --- | --- | --- |')
