@@ -5,6 +5,8 @@ import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from './db.js'
 import { searchKnowledgeCore } from './knowledge.js'
+import { cleanTitle, cleanSummary } from './formatter.js'
+import { disabledResponse, getContextHandler, getUserContextHandler, isMcpEnabled, logToolCall } from './mcpTools.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const WIKI_DIR = path.join(DATA_DIR, 'wiki', 'entries')
@@ -14,37 +16,13 @@ const server = new McpServer(
   { capabilities: { logging: {} } }
 )
 
-/** MCP 总闸：关闭后所有工具调用拒绝响应（config 表 mcp.enabled，缺省/异常视为开启） */
-async function isMcpEnabled(): Promise<boolean> {
-  try {
-    const db = await getDb()
-    const row = await (await db.prepare("SELECT value FROM config WHERE key = 'mcp.enabled'")).get() as any
-    return row ? String(row.value) !== 'false' : true
-  } catch { return true }
-}
-
-function disabledResponse() {
-  return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'MCP 服务已停用（总闸关闭），可在看板发车区重新开启' }) }] }
-}
-
-/** 工具调用落库（发车统计；args 摘要截断 200 字符，供盘点 agent 实际查询内容） */
-async function logToolCall(tool: string, args?: unknown) {
-  try {
-    const db = await getDb()
-    let argsSummary: string | null = null
-    if (args !== undefined) {
-      const full = JSON.stringify(args)
-      argsSummary = full.length > 200 ? full.slice(0, 200) : full
-    }
-    await (await db.prepare('INSERT INTO mcp_call_logs (tool, client, args) VALUES (?, ?, ?)')).run([tool, 'unknown', argsSummary])
-  } catch { /* 日志失败不影响工具调用 */ }
-}
+// 总闸/停用响应/埋点三守卫自 mcpTools.ts 迁入（v0.1.5 E2：handler 需可单测，mcp.ts 顶层 main() 有 stdio 副作用）
 
 const searchKnowledge = server.registerTool(
   'search_knowledge',
   {
     title: 'Search Knowledge',
-    description: 'Search wiki entries and files by query, domain, tags, or agent; optional since/until (ISO date, inclusive) filter by file mtime',
+    description: 'Search wiki entries and files by query, domain, tags, or agent; optional since/until (ISO date, inclusive) filter by file mtime. Hybrid recall: files LIKE + wiki FTS + vector fusion with RRF (k=60)',
     inputSchema: z.object({
       query: z.string().describe('Search query for title/summary/path'),
       domain: z.string().optional().describe('Domain name filter'),
@@ -61,11 +39,16 @@ const searchKnowledge = server.registerTool(
     const db = await getDb()
     const rows = await searchKnowledgeCore(db, args)
     const results = rows.map((r) => {
-      const entryPath = path.join(WIKI_DIR, String(r.id), 'entry.md')
+      // 混合召回下 wiki 命中可能无关联 file（id = 词条 id），此时行内自带 entry_path 真实词条路径
+      const entryPath = typeof r.entry_path === 'string' && r.entry_path
+        ? r.entry_path
+        : path.join(WIKI_DIR, String(r.id), 'entry.md')
       return {
         id: r.id,
-        title: r.title,
-        summary: r.summary,
+        // A3 双保险：searchKnowledgeCore 已清洗，这里再过一遍 formatter（幂等），
+        // 兜底 wiki 词条独立映射分支等未来直连数据源的行
+        title: typeof r.title === 'string' ? cleanTitle(r.title) : r.title,
+        summary: typeof r.summary === 'string' ? cleanSummary(r.summary) : r.summary,
         path: r.path,
         source_agent: r.source_agent,
         domain: r.domain_name,
@@ -81,7 +64,7 @@ server.registerTool(
   'read_entry',
   {
     title: 'Read Wiki Entry',
-    description: 'Read wiki entry markdown by file id',
+    description: 'Read the full distilled wiki entry (markdown) by file id. After search_knowledge returns results, call this to deep-read any promising hit — the search summary is only a teaser, the entry contains key points and detail. Takes the id field from search results.',
     inputSchema: z.object({
       id: z.number().int().describe('File id'),
     }),
@@ -109,7 +92,7 @@ server.registerTool(
   'get_source',
   {
     title: 'Get Source Path',
-    description: 'Get original source file absolute path by file id',
+    description: 'Get the original source file absolute path by file id, for opening in your own tools. Pair it after read_entry when you need the raw artifact behind the distilled wiki entry.',
     inputSchema: z.object({
       id: z.number().int().describe('File id'),
     }),
@@ -204,6 +187,32 @@ server.registerTool(
       ],
     }
   }
+)
+
+// E2 第 8 工具：领域开工上下文（handler 逻辑在 mcpTools.ts，便于无副作用单测）
+server.registerTool(
+  'getContext',
+  {
+    title: 'Get Domain Context',
+    description: 'Get a domain overview to inject at task start: top distilled entries with key points, prioritized by quality. Call this BEFORE searching when starting work in a domain you know the name of — it gives you a map first, then use search_knowledge to drill down. Takes a domain name (see list_domains).',
+    inputSchema: z.object({
+      domain: z.string().describe('Domain name (from list_domains)'),
+    }),
+  },
+  async (args) => getContextHandler(args)
+)
+
+// J3 第 9 工具：机读画像第一出口（handler 逻辑在 mcpTools.ts，便于无副作用单测）
+server.registerTool(
+  'get_user_context',
+  {
+    title: 'Get User Context',
+    description: 'Get the user role profile and domain-tendency claims distilled from local reading history — use it as grounding for personalized answers or recommendations. Vetoed claims never appear. Optional domain (from list_domains) appends that domain\'s claims.',
+    inputSchema: z.object({
+      domain: z.string().optional().describe('Optional domain name to append domain-level claims'),
+    }),
+  },
+  async (args) => getUserContextHandler(args)
 )
 
 async function main() {
