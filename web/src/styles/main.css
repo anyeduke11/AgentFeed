@@ -167,6 +167,22 @@ select.inp { padding: 6px 8px; }
 .tl-time { font-family: var(--mono); font-size: 11px; color: var(--text-2); margin-right: 8px; }
 .tl-text { font-size: 13px; }
 
+/* E1 消费链路诊断面板 */
+.fn-funnel { display: flex; align-items: center; justify-content: center; gap: 14px; padding: 14px 14px 8px; }
+.fn-stage { text-align: center; min-width: 72px; }
+.fn-num { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+.fn-num.ok { color: var(--ok, #67c23a); }
+.fn-lab { font-size: 11px; color: var(--text-2); margin-top: 2px; }
+.fn-arrow { color: var(--text-3, #999); font-size: 16px; }
+.fn-attrib { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px; }
+.fn-chip { font-size: 11px; border: 1px solid var(--border); border-radius: 10px; padding: 2px 8px; color: var(--text-2); cursor: default; }
+.fn-chip b { font-family: var(--mono); }
+.fn-chip.weak_match { border-color: var(--warn, #e6a23c); color: var(--warn, #b88230); }
+.fn-chip.args_null { opacity: .7; }
+.fn-samples { padding: 4px 14px 8px; display: flex; flex-direction: column; gap: 3px; }
+.fn-sample { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.fn-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* 条形图 */
 .bars { padding: 10px 14px 12px; display: flex; flex-direction: column; gap: 5px; }
 .bar-row { display: grid; grid-template-columns: 108px minmax(0,1fr) 40px; gap: 10px; align-items: center; }

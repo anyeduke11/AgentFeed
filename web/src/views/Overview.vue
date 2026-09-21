@@ -123,6 +123,57 @@
       <div v-else class="cap" style="padding:14px">今日暂无精选 · 推荐池与库内有内容后这里每天自动换一批。</div>
     </div>
 
+    <!-- 今日学习建议（I3 RSI）：信号聚合 + 模型判断时机 + 每日 ≤1 次硬顶，与消费链路诊断并列 -->
+    <div class="sect" style="margin-bottom:16px">
+      <div class="sect-head">
+        <span class="sq"></span><h2 class="stitle">今日学习建议</h2>
+        <div class="sright"><span class="cap">I3 · 到期复习 &gt; 高频在读 &gt; 目标缺口 · 每日至多推送一次</span></div>
+      </div>
+      <div v-if="rsi.items?.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;padding:12px 14px">
+        <div v-for="it in rsi.items" :key="it.fileId" class="bcard" style="cursor:pointer" title="进站内阅读器" @click="router.push(`/reader/${it.fileId}`)">
+          <b style="font-size:13px;line-height:1.5;display:block;margin:4px 0 2px">{{ it.title }}</b>
+          <p class="cap" style="margin:6px 0 0;line-height:1.6;color:var(--dim)">{{ it.reason }}</p>
+        </div>
+      </div>
+      <div v-else class="cap" style="padding:14px">{{ rsiHint }}</div>
+    </div>
+
+    <div class="sect">
+      <div class="sect-head"><span class="sq"></span><h2 class="stitle">消费链路诊断</h2><div class="sright"><span class="cap">E1 · search→read→source · 与 mcpFunnel 脚本同口径</span></div></div>
+      <template v-if="funnel">
+        <div class="fn-funnel">
+          <div class="fn-stage">
+            <div class="fn-num">{{ funnel.metrics.sessionsWithSearch }}</div>
+            <div class="fn-lab">search 会话</div>
+          </div>
+          <div class="fn-arrow">→</div>
+          <div class="fn-stage">
+            <div class="fn-num" :class="{ ok: funnel.metrics.level1Rate > 0 }">{{ funnel.metrics.level1Done }}</div>
+            <div class="fn-lab">深读跟随 · {{ (funnel.metrics.level1Rate * 100).toFixed(0) }}%</div>
+          </div>
+          <div class="fn-arrow">→</div>
+          <div class="fn-stage">
+            <div class="fn-num" :class="{ ok: funnel.metrics.level2Rate > 0 }">{{ funnel.metrics.level2Done }}</div>
+            <div class="fn-lab">取源码 · {{ (funnel.metrics.level2Rate * 100).toFixed(0) }}%</div>
+          </div>
+        </div>
+        <div class="fn-attrib">
+          <span v-for="k in (['followed', 'args_null', 'weak_match', 'needs_review'] as const)" :key="k" class="fn-chip" :class="k" :title="ATTRIB_HINT[k]">
+            <b>{{ funnel.attribution.counts[k] ?? 0 }}</b> {{ ATTRIB_LABEL[k] }}
+          </span>
+        </div>
+        <div class="fn-samples" v-if="funnel.attribution.samples?.length">
+          <div v-for="s in funnel.attribution.samples.slice(0, 5)" :key="s.logId" class="fn-sample">
+            <span class="mono c-dim">#{{ s.logId }}</span>
+            <span class="fn-q">{{ s.query ?? '（args 缺失）' }}</span>
+            <span class="c-dim" v-if="s.overlap !== null">重合 {{ (s.overlap * 100).toFixed(0) }}%</span>
+          </div>
+        </div>
+        <div class="cap" style="margin-top:6px">归因重放为关键词路近似（与调用时刻索引或有漂移）；趋势：近 7 日 search {{ funnel.trend.reduce((s: number, t: any) => s + Number(t.calls || 0), 0) }} 次</div>
+      </template>
+      <div v-else class="cap" style="padding:14px">暂无 MCP 调用数据——agent 挂载并使用后，此处展示消费链路漏斗与断链归因。</div>
+    </div>
+
     <div class="ov-grid">
       <div class="ov-col">
         <div class="sect">
@@ -294,10 +345,28 @@ const router = useRouter()
 const d = ref<any>({})
 const mcp = ref<any>({ week: 0, total: 0, byTool: [] })
 const scan = ref<any>({})
+// E1 消费链路诊断面板（/api/stats/funnel）
+const funnel = ref<any>(null)
+const ATTRIB_LABEL: Record<string, string> = {
+  followed: '跟随深读', args_null: '不可归因', weak_match: '疑似检索弱', needs_review: '待复核'
+}
+const ATTRIB_HINT: Record<string, string> = {
+  followed: 'search 后 30 分钟内跟随 read_entry（链路健康）',
+  args_null: '存量 args 缺失（埋点缺口，不可归因，单列计数）',
+  weak_match: '重放 Top-3 与 query 词面重合低——疑似检索质量问题，A1/A2 是解药',
+  needs_review: '词面重合尚可但未深读——summary 够用或工具描述未引导，人工复核'
+}
 const scanning = ref(false)
 const exec = ref<any>({ items: [], counts: { pending: 0, overdue: 0, doneToday: 0 } })
 const rstats = ref<any>({})
 const daily = ref<any>({ items: [], date: '' })
+// 今日学习建议（I3 RSI）：加载即正式触发一次，当日后续被硬顶自然拦截（不重复烧模型）
+const rsi = ref<any>({ items: [], generated: false, hardBlocked: undefined })
+const rsiHint = computed(() => {
+  if (rsi.value.hardBlocked === 'daily-cap') return '今日学习建议已推送过 · 明天再来。'
+  if (rsi.value.hardBlocked === 'disabled') return '学习建议推送已关闭 · 可在 设置 → AI 设置 中开启。'
+  return '暂无建议 · 有到期复习、高频在读或周目标缺口时会出现在这里。'
+})
 let timer: ReturnType<typeof setInterval> | null = null
 
 const todayLabel = computed(() => {
@@ -477,6 +546,7 @@ async function refreshAll() {
   d.value = dash
   mcp.value = m
   scan.value = s
+  api.stats.funnel().then((f: any) => { funnel.value = f?.success && f.metrics?.totalCalls > 0 ? f : null }).catch(() => {})
   if (ex) exec.value = ex
   if (rs) rstats.value = rs
   ui.queuePaused = !!dash.queue?.paused
@@ -525,6 +595,7 @@ async function scanNow() {
 onMounted(async () => {
   await refreshAll()
   api.recommend.daily().then((r: any) => { daily.value = r }).catch(() => {})
+  api.rsi.suggestions().then((r: any) => { if (r?.success) rsi.value = r }).catch(() => {})
   timer = setInterval(refreshAll, 15000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })

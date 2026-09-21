@@ -8,6 +8,7 @@ import { scan, ScanOptions } from '../scanner.js'
 import { llmQueue } from '../llm/index.js'
 import { getProviders, getDefaultModel } from '../llm/llmClient.js'
 import { ensureTag } from '../llm/tagGovernance.js'
+import { deleteFtsEntry } from '../search/ftsIndex.js'
 
 export const filesRouter = Router()
 
@@ -16,7 +17,13 @@ async function purgeFile(db: any, fileId: number) {
   await db.exec(`DELETE FROM file_tags WHERE file_id = ${fileId}`)
   await db.exec(`DELETE FROM file_versions WHERE file_id = ${fileId} OR related_file_id = ${fileId}`)
   await db.exec(`DELETE FROM llm_feedback WHERE file_id = ${fileId}`)
+  // Wave 1 挂点：词条删除前先取 meta id，删除后同步清理 FTS 索引与分块向量（防孤儿索引行）
+  const metaIds = ((await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE file_id = ?')).all([fileId])) as any[]).map(r => Number(r.id))
   await db.exec(`DELETE FROM wiki_entries_meta WHERE file_id = ${fileId}`)
+  for (const mid of metaIds) {
+    await deleteFtsEntry(db, mid)
+    await db.exec(`DELETE FROM entry_chunks WHERE entry_id = ${mid}`)
+  }
   await db.exec(`DELETE FROM files WHERE id = ${fileId}`)
   const wikiDir = path.join(process.cwd(), 'data', 'wiki', 'entries', String(fileId))
   await fs.rm(wikiDir, { recursive: true, force: true })
@@ -190,7 +197,7 @@ filesRouter.get('/:id/content', async (req, res) => {
       // R4-M2：进阅读器即记一次打开（source=reader，与外部打开并列），并带出池内进度供前端回位
       const rec = await (await db.prepare('SELECT progress FROM recommendations WHERE file_id = ?')).get(fileId) as any
       await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${fileId}, '${String(f.path).replace(/'/g, "''")}', 'reader')`)
-      res.json({ success: true, html, toc, title: f.title || f.name, truncated, inPool: !!rec, lastProgress: rec && rec.progress > 0 && rec.progress < 100 ? rec.progress : 0 })
+      res.json({ success: true, html, toc, title: f.title || f.name, truncated, inPool: !!rec, lastProgress: rec && rec.progress > 0 && rec.progress < 100 ? rec.progress : 0, path: f.path })
     } finally {
       await fh.close()
     }

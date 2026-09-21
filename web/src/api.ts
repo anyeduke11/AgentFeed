@@ -23,7 +23,7 @@ export const api = {
       return getJSON<any>(`${base}/files${qs ? '?' + qs : ''}`)
     },
     open: (id: number, source?: string) => post(`${base}/files/${id}/open`, source ? { source } : undefined),
-    content: (id: number) => getJSON<{ success: boolean; html?: string; toc?: { level: number; text: string; id: string }[]; title?: string; truncated?: boolean; unsupported?: boolean; inPool?: boolean; lastProgress?: number; message?: string }>(`${base}/files/${id}/content`),
+    content: (id: number) => getJSON<{ success: boolean; html?: string; toc?: { level: number; text: string; id: string }[]; title?: string; truncated?: boolean; unsupported?: boolean; inPool?: boolean; lastProgress?: number; path?: string; message?: string }>(`${base}/files/${id}/content`),
     reveal: (id: number) => post(`${base}/files/${id}/reveal`),
     update: (id: number, data: any) => patch(`${base}/files/${id}`, data),
     batchLlmTag: (fileIds: number[]) => post(`${base}/files/batch-llm-tag`, { fileIds }),
@@ -81,7 +81,8 @@ export const api = {
     llm: () => getJSON<any>(`${base}/stats/llm`),
     dashboard: () => getJSON<any>(`${base}/stats/dashboard`),
     board: () => getJSON<any>(`${base}/stats/board`),
-    mcp: () => getJSON<any>(`${base}/stats/mcp`)
+    mcp: () => getJSON<any>(`${base}/stats/mcp`),
+    funnel: () => getJSON<any>(`${base}/stats/funnel`)
   },
   llm: {
     queue: () => getJSON<any>(`${base}/llm/queue`),
@@ -120,7 +121,10 @@ export const api = {
     detail: (id: number) => getJSON<any>(`${base}/wiki/${id}`),
     detailImported: (metaId: number) => getJSON<any>(`${base}/wiki/imported/${metaId}`),
     importPreview: (dir: string) => post(`${base}/wiki/import/preview`, { dir }),
-    importExec: (dir: string) => post(`${base}/wiki/import`, { dir })
+    importExec: (dir: string) => post(`${base}/wiki/import`, { dir }),
+    chunkBackfillStatus: () => getJSON<any>(`${base}/wiki/chunks/backfill/status`),
+    chunkBackfillStart: (limit = 50) => post(`${base}/wiki/chunks/backfill/start`, { limit }),
+    chunkBackfillStop: () => post(`${base}/wiki/chunks/backfill/stop`)
   },
   gate: {
     validate: () => getJSON<{ masterEnabled: boolean; fields: any[] }>(`${base}/gate/validate`),
@@ -151,6 +155,37 @@ export const api = {
     execDone: (id: number) => post(`${base}/reading/exec/${id}/done`),
     execDismiss: (id: number) => post(`${base}/reading/exec/${id}/dismiss`),
     goal: (weeklyGoal: number) => post(`${base}/reading/goal`, { weeklyGoal }),
-    stats: () => getJSON<any>(`${base}/reading/stats`)
+    stats: () => getJSON<any>(`${base}/reading/stats`),
+    related: (fileId: number) => getJSON<{ success: boolean; items: Array<{ id: number; title: string; path: string; opens: number }> }>(`${base}/reading/related/${fileId}`),
+    feedback: (fileId: number | null, path: string, rating: number, feedback?: string) => post(`${base}/reading/feedback`, { fileId, path, rating, feedback })
+  },
+
+  profile: {
+    get: (scope: 'global' | 'domain', domainId?: number) =>
+      getJSON<any>(`${base}/profile?scope=${scope}${domainId ? `&domainId=${domainId}` : ''}`),
+    versions: (scope: 'global' | 'domain', domainId?: number) =>
+      getJSON<any>(`${base}/profile/versions?scope=${scope}${domainId ? `&domainId=${domainId}` : ''}`),
+    versionDetail: (id: number) => getJSON<any>(`${base}/profile/versions/${id}`),
+    veto: (versionId: number, claim: string) => post(`${base}/profile/veto`, { versionId, claim }),
+    addClaim: (scope: 'global' | 'domain', claim: string, domainId?: number) =>
+      post(`${base}/profile/claim`, { scope, claim, domainId }),
+    revert: (versionId: number) => post(`${base}/profile/revert`, { versionId }),
+    evidence: (ptr: string) => getJSON<any>(`${base}/profile/evidence?ptr=${encodeURIComponent(ptr)}`),
+    distill: () => post(`${base}/profile/distill`),
+    status: () => getJSON<any>(`${base}/profile/status`)
+  },
+
+  chat: {
+    sessions: () => getJSON<{ success: boolean; sessions: Array<{ sessionId: string; preview: string; msgCount: number; lastAt: string }> }>(`${base}/chat/sessions`),
+    sessionDetail: (id: string) => getJSON<{ success: boolean; messages: Array<{ id: number; role: string; content: string; createdAt: string }> }>(`${base}/chat/sessions/${encodeURIComponent(id)}`),
+    recap: (sessionId: string) => post(`${base}/chat/recap`, { sessionId })
+  },
+
+  rsi: {
+    suggestions: (peek = false) => getJSON<{ success: boolean; items: Array<{ fileId: number; title: string; reason: string }>; generated: boolean; hardBlocked?: 'daily-cap' | 'disabled' }>(`${base}/rsi/suggestions${peek ? '?peek=1' : ''}`),
+    quiz: (fileId: number) => getJSON<{ success: boolean; questions?: Array<{ q: string; a: string }>; error?: string; message?: string }>(`${base}/rsi/quiz/${fileId}`),
+    answer: (fileId: number, correct: boolean, execQueueId?: number) => post(`${base}/rsi/quiz/answer`, { fileId, correct, execQueueId }),
+    status: () => getJSON<{ success: boolean; quizEnabled: boolean; suggestionsEnabled: boolean; lastSuggestionDay: string | null }>(`${base}/rsi/status`),
+    toggle: (key: 'quiz' | 'suggestions', value: boolean) => post(`${base}/rsi/toggle`, { key, value })
   }
 }
