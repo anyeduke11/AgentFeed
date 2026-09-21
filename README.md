@@ -12,7 +12,9 @@
 AgentFeed 把散落在各个 AI Agent 数据目录（Claude Code、Trae、Qoder、Coze、Workbuddy……）里的
 Markdown / HTML 产物统一采集入库为**热知识缓存**：经**门禁过滤 → 领域分拣**完成分拣入库，**LLM 蒸馏**按队列增量补充摘要/标签等增强信息，Wiki 词条支持导入挂载，
 最终通过 **Web 看板** 与 **MCP Server** 双出口，供人和任意 Agent 按关键词（LIKE）检索消费。
-所有数据仅在本机流转，不出网关。
+与 DataMind 类 data plane 错位竞争：data plane 管**会话内记忆**（边聊边写、下一句即用）；
+AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经门禁与蒸馏沉淀，跨会话持续复利。
+采集与存储全部在本机完成；LLM 环节默认未启用，启用后仅发往你自行配置的服务商——外发边界见下方[「数据与隐私边界」](#-数据与隐私边界)一节。
 
 ---
 
@@ -27,7 +29,7 @@ Markdown / HTML 产物统一采集入库为**热知识缓存**：经**门禁过�
 - **📊 调度总览 + 数据看板** — 双 Tab 看板：今日流量/趋势/来源占比一屏尽览；Agent 生产卡可下钻二级目录，领域占比以彩色气泡图呈现
 - **📚 阅读推荐闭环** — 规则分 + LLM 质量分双排序推荐池，每日精选零成本轮转；阅读进度手动挡 + 滚动自动记录，续读自动回位；两维打分入执行队列，周目标环与薄弱领域/停滞提示复盘
 - **📖 站内阅读器** — md/html 沙箱渲染（双保险：服务端白名单清洗 + iframe 禁脚本，内容零脚本执行），目录侧栏、字号与夜间主题，图片资源经扫描根边界代理
-- **🔗 MCP Server** — stdio 方式暴露 `search_knowledge` / `read_entry` / `stats` 等 7 个工具，Trae / Claude Desktop / Cursor 直接挂载
+- **🔗 MCP Server** — stdio 方式暴露 `search_knowledge` / `read_entry` / `stats` / `getContext` / `get_user_context` 等 9 个工具，Trae / Claude Desktop / Cursor 直接挂载
 
 ## 🏗 架构
 
@@ -48,7 +50,7 @@ flowchart LR
     end
     subgraph 消费出口
         WEB[Vue 3 看板<br/>总览 · 看板 · 库 · 阅读闭环]
-        MCP[MCP Server stdio<br/>7 个知识工具]
+        MCP[MCP Server stdio<br/>9 个知识工具]
     end
     A1 & A2 & A3 & A4 & A5 --> W
     A1 & A2 & A3 & A4 & A5 --> S
@@ -120,7 +122,7 @@ open http://127.0.0.1:5188
 }
 ```
 
-暴露工具：`search_knowledge` · `read_entry` · `get_source` · `list_domains` · `list_agents` · `list_tags` · `stats`
+暴露工具：`search_knowledge` · `read_entry` · `get_source` · `list_domains` · `list_agents` · `list_tags` · `stats` · `getContext`（领域开工上下文）· `get_user_context`（用户画像）——详见 [MCP_SETUP.md](MCP_SETUP.md)
 
 ## 📁 目录结构
 
@@ -142,9 +144,28 @@ AgentFeed/
 └── docs/                 # 设计文档（阅读闭环 PRD · 阅读器 PRD · 门禁设计）
 ```
 
+## 🛡 数据与隐私边界
+
+AgentFeed 自身不内置任何云端依赖、无遥测上报；但**扫描根内入库的内容会在下列环节被送往你在设置页自行配置的 LLM 服务商**。服务商完全由你决定（预设均为 OpenAI 兼容接口，含本地 Ollama——只配 Ollama 即可全本地零外发；不配置任何服务商则所有 LLM 环节静默跳过）。
+
+| 环节 | 外发内容 | 触发时机 |
+| --- | --- | --- |
+| 蒸馏（wiki 词条生成） | 文件头部 ≤512KB 原文（>100KB 自动降为 4000 字摘要）；API Key / 密码 / Bearer 令牌等常见密钥形态已正则脱敏；视觉模型另附文档内嵌图片 ≤3 张（仅限扫描根内） | 文件过门禁入库后自动入队 |
+| 推荐语 / 质量分 / 批量策展 | 标题 + 原文开头 1500 字符（脱敏后）；批量策展只送 30 篇的标题 / 领域 / 摘要片段 | 推荐语随入池自动；补分与策展为手动触发 |
+| 向量化（embedding） | 标题 + LLM 摘要；wiki 词条（LLM 产物）按标题分块的文本 | 蒸馏成功后自动；需先在设置中启用嵌入模型 |
+| 语义检索 | 你输入的检索词 | 使用语义 / 向量检索时 |
+| 标签治理 | 标签名与使用次数（不含文件正文） | 设置页手动启动语义归组 / 分级扫描 |
+| 用户画像蒸馏 | 30 天聚合统计 + 标签权重 + 上版画像断言（**不含任何原始阅读 / 对话内容**） | 月频信号累积触发，可整体关闭 |
+| 对话问答 I1 | 用户提问 + 检索摘要上下文（**随本版 I1 落地后生效**） | 使用对话功能时 |
+
+- **门禁过滤是纯本地规则**（大小 / 字符数 / 代码占比 / 黑白名单），不外发任何内容，也没有 LLM 语义判定调用
+- **不希望外发的内容**：到设置页「过滤门禁 → 排除目录」配置，命中即完全不入库，自然不会被任何 LLM 环节处理
+- 画像蒸馏可通过 `userProfile.enabled` 关闭，向量化可通过 `ai.embedding.enabled` / `search.vectorEnabled` 关闭
+- 逐链路代码位置与核实依据见 [docs/privacy-boundary.md](docs/privacy-boundary.md)
+
 ## 🔒 隐私与安全
 
-- **数据不出本机**：采集、存储、蒸馏、检索全部在本地完成；LLM 蒸馏仅在你于设置页自行配置 API Key 后启用
+- **本体零联网**：采集、存储、检索全部在本地完成，无任何遥测；LLM 环节仅在你自行配置服务商后启用（外发内容见上方「数据与隐私边界」）
 - **密钥不入库**：API Key 仅存于本地 `server/data/`（已 gitignore）；仓库不含任何 `.env`、数据库、日志与压缩包
 - **MCP 仅 stdio**：知识工具通过标准输入输出通信，不监听任何网络端口
 
