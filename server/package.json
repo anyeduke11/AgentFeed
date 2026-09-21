@@ -1,6 +1,6 @@
 {
   "name": "agentfeed-server",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,9 @@
     "start": "node dist/index.js",
     "db:migrate": "tsx src/db.ts",
     "test": "tsx --test test/*.test.ts",
-    "mcp": "tsx src/mcpServer.ts"
+    "mcp": "tsx src/mcpServer.ts",
+    "baseline:check": "tsx scripts/baselineCheck.ts",
+    "eval:quality": "tsx scripts/qualityEval.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.85.1",
