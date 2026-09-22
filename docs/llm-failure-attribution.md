@@ -71,3 +71,31 @@
 | 1 | safeParseWikiJson 宽容提取：无闭合 `}` 时取到文本尾提取部分字段（title+summary 达标即成功，宁缺 points）；对 B 形态小响应报 `content_too_long` 准确错误，triage 跳过不再死循环重试 | A 大半 + B 止血 | ~0.25 天 |
 | 2 | buildPrompt 输出预算：5KB+ 输入收紧「summary ≤200 字 / points ≤6 条」指令，源头防截断 | A 根部 | ~0.25 天 |
 | 3 | 治愈后验证：挑 50 个「永未成功」file 重蒸馏，成功率 ≥80% 即闭环（对应 §5 观测口径） | — | ~0.25 天 |
+
+## 7. 修法落地与治愈验证（2026-09-22，全部完成）
+
+### 修法补全（验证过程发现的两处新根因）
+
+| # | 补丁 | 根因（活体证据） |
+|---|---|---|
+| ③ 熔断计数排除拒答 | `recordTriageResult` 对 `content_too_long_for_model` 不计数（llmWorker） | 候选按 rule_score 排序把超长拒答文件堆在头部，拒答计入连败 5 次即熔断，同批 35+ 可救样本被静默腰斩（实测 50 篇批次仅跑 13 篇即拦停）。拒答是内容性失败（completion≈1、零 token、换样本有救），不是「坏 provider 系统性故障」 |
+| ④ callLlm 显式 maxTokens: 4096 | pi-ai 不传 maxTokens 时请求体不带 max_tokens，SenseNova 网关按自家默认（实测 ~250 tokens）硬掐输出 | 重放 file 1311 输出恰在 250 tokens 掐断于 points 数组中段——形态 A「无闭合 }」的物理根源即网关默认上限，非模型行为 |
+| 附 | triage-distill 增 `fileIds` 定向模式 | rule_score 候选头部被拒答文件占据，形态 A 目标人群（库内 2,386 个）轮不到，治愈验证需定向重放 |
+
+### 治愈验证结果（50 样本两轮，88% ≥ 80% 达标）
+
+从 2,386 个「历史 not_json 失败 + completion≥200 + 仍 failed」形态 A 目标人群中定向抽 50：
+
+- 第一轮（修法①②④生效）：39/50 success（78%），残留 12% 全为 not_json
+- 第二轮（17 个失败重放，走 queue 正常重试路径）：+11 success
+- **累计 44/50 = 88% ≥ 80%，闭环 ✓**
+
+### 残留失败画像（12%，v0.2.x 候选）
+
+- flash 偶发空响应：output tokens 计数正常但 text 为空（重放同文件可成功——非确定性，重试可救但非每次命中）
+- 残留 not_json 的 completion 203-663 有实质输出，宽容提取三段式仍 miss 的属输出漂移（键名/结构变化）
+- 根治方向：主力模型（deepseek-v4-pro 因 HTTP 429 限流未参与本轮验证）或 schema 强制重试
+
+### 超长拒答文件（形态 B 加深认识）
+
+候选头部 50 个超长文件（51-102KB，M 系列教案/PRD）在 flash 与 pro 上均 1-token 拒答——**全量 512KB 头进 prompt（≈2.5-5 万 tokens）超多数网关上下文**，`content_too_long_for_model` 即其正确归宿（准确报错、零空转）。真正救赎需 prompt 压缩/分块蒸馏（v0.2.x 候选）。

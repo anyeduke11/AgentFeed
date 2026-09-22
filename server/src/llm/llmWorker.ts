@@ -120,7 +120,13 @@ async function buildPrompt(filePath: string, content: string, domainNames: strin
   const effective = size > MAX_FILE_SIZE ? summarizeContent(content) : content
   const fileName = path.basename(filePath)
   const domainHint = domainNames.length > 0 ? `\n可选领域（从中选一个最匹配的，都没有合适则留空）：${domainNames.join('、')}` : ''
-  return `请为以下知识文件生成结构化 wiki 词条。输出 JSON：{"title":"","summary":"2-3 句摘要","points":["3-6 条关键要点，每条一句话"],"entities":[{"n":"名称","t":"类型"}],"relations":[{"a":"主体","v":"关系动词","b":"客体","note":"备注"}],"domain":"","tags":["2-4 个主题标签"]}。\ndomain 必须从给出的可选领域列表中选择；tags 是自由主题词。${domainHint}\n文件：${fileName}\n内容：\n${effective}`
+  // 输出预算（H1 修法②，2026-09-22）：长输入是截断失败的主形态（归因报告 §6-A）——大文档要求大 JSON
+  // 会中途被截断成无闭合残缺 JSON。5KB+ 输入收紧指令：summary 上限 200 字、points 最多 6 条，
+  // 从源头把输出体积压进安全区（实测失败样本 82% 为 5-50KB .md）。
+  const budget = size > 5000
+    ? '\n注意：内容较长，请严格控制输出体积——summary 不超过 200 字，points 最多 6 条且每条一句话，entities 最多 8 个，relations 最多 5 条。宁可精炼，禁止截断式长输出。'
+    : ''
+  return `请为以下知识文件生成结构化 wiki 词条。输出 JSON：{"title":"","summary":"2-3 句摘要","points":["3-6 条关键要点，每条一句话"],"entities":[{"n":"名称","t":"类型"}],"relations":[{"a":"主体","v":"关系动词","b":"客体","note":"备注"}],"domain":"","tags":["2-4 个主题标签"]}。${budget}\ndomain 必须从给出的可选领域列表中选择；tags 是自由主题词。${domainHint}\n文件：${fileName}\n内容：\n${effective}`
 }
 
 function sanitizeSensitive(text: string): string {
@@ -146,26 +152,47 @@ function safeParseWikiJson(text: string): {
   domain: string
   tags: string[]
 } {
-  try {
-    const match = text.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('no_json')
-    const obj = JSON.parse(match[0]) as Record<string, any>
-    const title = String(obj.title || '').trim()
-    const summary = String(obj.summary || '').trim()
-    const points = Array.isArray(obj.points) ? obj.points.filter((p: any) => typeof p === 'string' && p.trim()).map(String) : []
-    const entities = Array.isArray(obj.entities)
-      ? obj.entities.filter((e: any) => e && typeof e === 'object' && typeof e.n === 'string').map((e: any) => ({ n: e.n, t: typeof e.t === 'string' ? e.t : '' }))
-      : []
-    const relations = Array.isArray(obj.relations)
-      ? obj.relations.filter((r: any) => r && typeof r === 'object' && typeof r.a === 'string' && typeof r.b === 'string')
-          .map((r: any) => ({ a: r.a, v: typeof r.v === 'string' ? r.v : '相关', b: r.b, note: typeof r.note === 'string' ? r.note : undefined }))
-      : []
-    const domain = typeof obj.domain === 'string' ? obj.domain.trim() : ''
-    const tags = Array.isArray(obj.tags) ? obj.tags.filter((t: any) => typeof t === 'string' && t.trim()).map((t: any) => String(t).trim()).slice(0, 4) : []
-    return { title, summary, points, entities, relations, domain, tags }
-  } catch {
-    return { title: '', summary: '', points: [], entities: [], relations: [], domain: '', tags: [] }
+  // H1 修法①（2026-09-22 归因 §6-A）：长输出截断产生无闭合 } 的残缺 JSON，原正则 \{[\s\S]*\} 要求
+  // 成对匹配必败 → 74% file 重试死循环。宽容提取三段式：
+  // ① 有闭合 }：原行为（最后一个 } 之前）——完整 JSON
+  // ② 无闭合：先试补尾修复（截断发生在末字符串值内时 `"}` 可闭合）
+  // ③ 仍败：逐字段正则提取 `"key":"value"` 对（title/summary 常在截断前已完整输出）
+  // 部分字段达标（title 或 summary 非空）即算可用——宁缺 points，不整单作废。
+  const parseObj = (body: string): Record<string, any> | null => {
+    try { return JSON.parse(body) as Record<string, any> } catch { return null }
   }
+  let obj: Record<string, any> | null = null
+  const closed = text.match(/\{[\s\S]*\}/)
+  if (closed) obj = parseObj(closed[0])
+  if (!obj) {
+    const open = text.indexOf('{')
+    if (open >= 0) {
+      const tail = text.slice(open)
+      obj = parseObj(tail + '"}')
+      if (!obj) {
+        // ③ 截断在数组/嵌套中段：补尾救不回，逐字段扫描顶层字符串键值对
+        const out: Record<string, any> = {}
+        for (const m of tail.matchAll(/"(title|summary|domain)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) {
+          out[m[1]] = m[2]
+        }
+        if (out.title || out.summary) obj = out
+      }
+    }
+  }
+  if (!obj) return { title: '', summary: '', points: [], entities: [], relations: [], domain: '', tags: [] }
+  const title = String(obj.title || '').trim()
+  const summary = String(obj.summary || '').trim()
+  const points = Array.isArray(obj.points) ? obj.points.filter((p: any) => typeof p === 'string' && p.trim()).map(String) : []
+  const entities = Array.isArray(obj.entities)
+    ? obj.entities.filter((e: any) => e && typeof e === 'object' && typeof e.n === 'string').map((e: any) => ({ n: e.n, t: typeof e.t === 'string' ? e.t : '' }))
+    : []
+  const relations = Array.isArray(obj.relations)
+    ? obj.relations.filter((r: any) => r && typeof r === 'object' && typeof r.a === 'string' && typeof r.b === 'string')
+        .map((r: any) => ({ a: r.a, v: typeof r.v === 'string' ? r.v : '相关', b: r.b, note: typeof r.note === 'string' ? r.note : undefined }))
+    : []
+  const domain = typeof obj.domain === 'string' ? obj.domain.trim() : ''
+  const tags = Array.isArray(obj.tags) ? obj.tags.filter((t: any) => typeof t === 'string' && t.trim()).map((t: any) => String(t).trim()).slice(0, 4) : []
+  return { title, summary, points, entities, relations, domain, tags }
 }
 
 /* ---------- triage 熔断：按需精选批次的连续失败保护（内存态，重启自动清零） ---------- */
@@ -258,7 +285,12 @@ async function processDistill(job: LlmJob): Promise<void> {
     const wiki = safeParseWikiJson(llmResult.text)
     // 解析结果全空 = 模型没按 JSON 输出：按失败处理（落失败泳道可重试），避免假 done（无标题/摘要/领域/标签）
     if (!wiki.title && !wiki.summary && wiki.points.length === 0) {
-      throw new Error('llm_output_not_json')
+      // H1 修法①（2026-09-22 归因 §6-B）：flash 级模型对超长 prompt 常回一句「内容过长」类短文本
+      // （completion 1-49 tokens 桶 10,223 次实测）——这是内容性拒答，重试同 prompt 必然再拒，
+      // 74% file 因此死循环烧 token。报 content_too_long（非 not_json）供上游跳过；llm_queue
+      // 的既有重试机制不识别它为可重试类（错误语义即「换样本才有救」）。
+      const short = (llmResult.completionTokens ?? llmResult.text.length) < 200
+      throw new Error(short ? 'content_too_long_for_model' : 'llm_output_not_json')
     }
     const entryDir = path.join(WIKI_DIR, String(job.fileId))
     await fs.mkdir(entryDir, { recursive: true })
@@ -338,8 +370,13 @@ async function processDistill(job: LlmJob): Promise<void> {
       error
     })
     await updateFileLlmState(db, job.fileId, status === 'success' ? 'done' : 'failed')
-    // triage 批次熔断统计：只统计带 origin='triage' 标记的 job，普通 push 蒸馏的成败不进计数
-    if (job.options?.origin === 'triage') recordTriageResult(status === 'success')
+    // triage 批次熔断统计：只统计带 origin='triage' 标记的 job，普通 push 蒸馏的成败不进计数。
+    // H1 补丁（2026-09-22 治愈验证）：content_too_long_for_model 是内容性拒答（completion≈1、零 token 成本、
+    // 换样本才有救），不属于「坏 provider 系统性故障」——计入连败会让候选头部的超长文件扎堆拒答时
+    // 误触熔断，把同批可救样本一并腰斩（实测 50 篇批次仅跑 13 篇即被拦）。拒答对连败计数保持中性。
+    if (job.options?.origin === 'triage' && error !== 'content_too_long_for_model') {
+      recordTriageResult(status === 'success')
+    }
     // 蒸馏成功后自动向量化：投独立 embed 队列（失败自动重试、串行不打架），不占蒸馏并发、不阻塞下一个蒸馏任务
     if (status === 'success') {
       enqueueEmbed(job.fileId)

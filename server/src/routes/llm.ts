@@ -530,7 +530,7 @@ async function resolveTriageBudget(db: any, budgetTokens: unknown): Promise<numb
 llmRouter.post('/triage-distill', async (req, res) => {
   try {
     const db = await getDb()
-    const { domains, limit, budgetTokens, resetTripped } = req.body || {}
+    const { domains, limit, budgetTokens, resetTripped, fileIds } = req.body || {}
     const breaker = getTriageBreakerState()
     if (breaker.tripped && !resetTripped) {
       return res.json({
@@ -551,18 +551,32 @@ llmRouter.post('/triage-distill', async (req, res) => {
       lim = n
     }
     // 候选：active + 有内容（size>0，库内无 content 列以体积为证）+ 未成功蒸馏（llm_state != 'done'）
-    let where = "f.status = 'active' AND f.llm_state != 'done' AND COALESCE(f.size, 0) > 0"
-    const params: any[] = []
-    if (Array.isArray(domains) && domains.length) {
-      where += ` AND d.name IN (${domains.map(() => '?').join(', ')})`
-      params.push(...domains.map(String))
+    // fileIds 定向模式（H1 治愈验证）：传入文件 id 列表时按列表重放（仍要求 active + 有内容），
+    // 用于对特定失败形态（如截断类）定向重蒸馏——rule_score 排序会把超长拒答文件堆在候选头部，
+    // 目标人群反而轮不到。
+    let candidates: any[]
+    if (Array.isArray(fileIds) && fileIds.length) {
+      const ids = [...new Set(fileIds.map(Number).filter(Number.isInteger))]
+      if (!ids.length) return res.status(400).json({ success: false, error: 'fileIds 必须是有效文件 id 数组' })
+      candidates = await (await db.prepare(`
+        SELECT f.id, f.path FROM files f
+        WHERE f.status = 'active' AND f.llm_state != 'done' AND COALESCE(f.size, 0) > 0
+          AND f.id IN (${ids.map(() => '?').join(', ')})
+        LIMIT ${lim}`)).all(ids) as any[]
+    } else {
+      let where = "f.status = 'active' AND f.llm_state != 'done' AND COALESCE(f.size, 0) > 0"
+      const params: any[] = []
+      if (Array.isArray(domains) && domains.length) {
+        where += ` AND d.name IN (${domains.map(() => '?').join(', ')})`
+        params.push(...domains.map(String))
+      }
+      candidates = await (await db.prepare(`
+        SELECT f.id, f.path FROM files f
+        LEFT JOIN domains d ON f.domain_id = d.id
+        WHERE ${where}
+        ORDER BY COALESCE(f.rule_score, 0) DESC, f.id ASC
+        LIMIT ${lim}`)).all(params) as any[]
     }
-    const candidates = await (await db.prepare(`
-      SELECT f.id, f.path FROM files f
-      LEFT JOIN domains d ON f.domain_id = d.id
-      WHERE ${where}
-      ORDER BY COALESCE(f.rule_score, 0) DESC, f.id ASC
-      LIMIT ${lim}`)).all(params) as any[]
     const provider = await getDefaultProvider()
     const model = await getDefaultModel()
     let budgetUsed = 0
