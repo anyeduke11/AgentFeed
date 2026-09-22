@@ -91,7 +91,14 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
     reasoning: 'low',
     // SenseNova 结构化输出（response_format=json_object）：强制模型输出合法 JSON，治理 llm_output_not_json 失败
     // 文档要求 prompt 中含 json 关键字——systemPrompt「outputs only JSON」已满足
-    samplingParams: { response_format: { type: 'json_object' } },
+    samplingParams: {
+      response_format: { type: 'json_object' },
+      // H1 修法④（2026-09-22 治愈验证复现）：pi-ai 不传 maxTokens 时请求体不带 max_tokens，
+      // SenseNova 网关按自家默认上限（实测 ~250 tokens）硬掐输出——形态 A「无闭合 } 截断」的
+      // 物理根源即此。蒸馏产物（title+summary+points+entities+relations）按输出预算上限
+      // 约 1500 tokens，给 4096 余量防掐断。
+      maxTokens: 4096,
+    },
     // 网络层快速重试（0.5-2s 退避）：覆盖 408/409/5xx 瞬时错误，尊重 retry-after 响应头
     maxRetries: 4,
   })
