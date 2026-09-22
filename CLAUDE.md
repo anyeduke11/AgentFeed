@@ -3,6 +3,10 @@
 本地 AI Agent 产物知识库：采集 → 门禁 → 分拣 → LLM 蒸馏 → Web 看板 + MCP 双出口；
 npm workspaces（server + web），SQLite 单文件（19 表），端口 5188。阅读推荐闭环（M1~M5）与站内阅读器（R4-M1~M3）已全部交付。
 
+## 开工指引（E2）
+
+开工先调 AgentFeed MCP 工具 `getContext('<domain>')` 获取领域知识库上下文（可用域名先查 `list_domains`）；检索命中只是摘要，深读用 `read_entry`。工具分层见 `MCP_SETUP.md`。
+
 ## 命令速查
 
 | 命令 | 说明 |
