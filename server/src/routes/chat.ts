@@ -212,7 +212,11 @@ export function extractAnswer(text: string): string {
       const vals = Object.values(obj).filter((v): v is string => typeof v === 'string' && v.trim() !== '')
       if (vals.length > 0) return vals[0]
     }
-  } catch { /* 非 JSON：原文即答案 */ }
+  } catch { /* 非完整 JSON → 走截断信封兜底 */ }
+  // 截断信封兜底：LLM 超 max_tokens 被截断时输出 {"answer":"... 无闭合 ——parse 必败；
+  // 原文返回会把 {"answer":" 前缀泄漏到前端（I1 抽检实测发现）。剥前缀取余文（内部 \" 转义保留，可接受）
+  const trunc = body.match(/^\{\s*"answer"\s*:\s*"([\s\S]*)$/)
+  if (trunc) return trunc[1].replace(/\s*"?\s*\}[\s,]*$/, '')
   return t
 }
 

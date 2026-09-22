@@ -270,6 +270,9 @@ test('extractAnswer：信封解包 + 围栏剥离 + 非 JSON 原文兜底（格�
   assert.equal(extractAnswer('```json\n{"answer":"乙"}\n```'), '乙')
   assert.equal(extractAnswer('{"text":"丙"}'), '丙', '未知字段名时取首个非空字符串')
   assert.equal(extractAnswer('普通文本回答'), '普通文本回答', '非 JSON 原文原样返回')
+  // 截断信封兜底（I1 抽检实测发现）：max_tokens 截断导致 {"answer":"... 无闭合——前缀不得泄漏到前端
+  assert.equal(extractAnswer('{"answer":"被截断的回答'), '被截断的回答', '截断信封剥前缀')
+  assert.equal(extractAnswer('{"answer": "尾部恰好闭合"}, '), '尾部恰好闭合', '值已闭合但对象尾随逗号垃圾（剥尾巴）')
 })
 
 function mockJsonRes(sink: any) {
