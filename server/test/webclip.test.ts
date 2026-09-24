@@ -1,9 +1,11 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'fs'
 import fsp from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import { isPrivateIp, checkUrlSyntax, assertPublicUrl } from '../src/webclip/ssrf.js'
+import { slugify, buildDocBase, reserveBase } from '../src/webclip/naming.js'
 
 // 隔离方式：AGENTFEED_DATA_DIR 指向临时目录（同 domainDedupGate.test.ts 模式），绝不误伤生产 server/data/app.db。
 const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-'))
@@ -52,4 +54,23 @@ test('webclip/ssrf: 语法层拒绝非 http/带凭据/本地域名', () => {
 
 test('webclip/ssrf: assertPublicUrl 拒绝解析失败域名（fail-closed）', async () => {
   await assert.rejects(() => assertPublicUrl('https://this-domain-definitely-not-exist-xyz.invalid/'), /解析失败|ssrf/)
+})
+
+test('webclip/naming: slugify 保留中英与连字符', () => {
+  assert.equal(slugify('Hello World / 测试: 2026!'), 'hello-world-测试-2026')
+  assert.equal(slugify('   '), 'untitled')
+  assert.equal(slugify('a'.repeat(100)).length, 40)
+})
+
+test('webclip/naming: buildDocBase 固定时间戳格式', () => {
+  const base = buildDocBase('Hello', new Date('2026-09-24T15:30:12+08:00'))
+  assert.equal(base, '20260924-153012-hello')
+})
+
+test('webclip/naming: reserveBase 磁盘冲突加序号', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'webclip-'))
+  fs.writeFileSync(path.join(dir, '20260924-153012-a.md'), 'x')
+  assert.equal(reserveBase(dir, '20260924-153012-a'), '20260924-153012-a-2')
+  fs.writeFileSync(path.join(dir, '20260924-153012-a-2.md'), 'x')
+  assert.equal(reserveBase(dir, '20260924-153012-a'), '20260924-153012-a-3')
 })
