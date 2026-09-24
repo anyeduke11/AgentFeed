@@ -7,6 +7,7 @@ import path from 'path'
 import { isPrivateIp, checkUrlSyntax, assertPublicUrl } from '../src/webclip/ssrf.js'
 import { slugify, buildDocBase, reserveBase } from '../src/webclip/naming.js'
 import { htmlToMarkdown, rewriteSnapshot } from '../src/webclip/convert.js'
+import { yamlSafe, commentSafe } from '../src/webclip/sanitize.js'
 
 // 隔离方式：AGENTFEED_DATA_DIR 指向临时目录（同 domainDedupGate.test.ts 模式），绝不误伤生产 server/data/app.db。
 const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-'))
@@ -108,4 +109,25 @@ test('webclip/convert: rewriteSnapshot 已下载图改相对路径，未下载�
   assert.ok(out.includes('src="assets/b/img-0.png"'))
   assert.ok(!out.includes('data:image'))
   assert.ok(out.includes('[内嵌图]'))
+})
+
+test('webclip/sanitize: yamlSafe 双引号包裹并转义换行/引号/反斜杠', () => {
+  assert.equal(yamlSafe('https://a.com/x'), '"https://a.com/x"')
+  assert.equal(yamlSafe('a\r\ninjected: true'), '"a injected: true"')
+  assert.equal(yamlSafe('say "hi"'), '"say \\"hi\\""')
+  assert.equal(yamlSafe('b\\c'), '"b\\\\c"')
+})
+
+test('webclip/sanitize: commentSafe 破坏换行与 --> 序列', () => {
+  assert.equal(commentSafe('a\nb --> c'), 'a b - - > c')
+  assert.equal(commentSafe('x-->y'), 'x- - >y')
+})
+
+test('webclip/ssrf: IPv6 十六进制映射与 fe80::/10 全段（M2 加固）', () => {
+  for (const ip of ['::ffff:7f00:1', '::ffff:0a00:1', 'fe80::1', 'febf::1', 'ff02::1', 'fd00::1', '::ffff:127.0.0.1']) {
+    assert.ok(isPrivateIp(ip), `${ip} 应判私网`)
+  }
+  for (const ip of ['::ffff:8.8.8.8', '2001:db8::1', 'fec0::1']) {
+    assert.ok(!isPrivateIp(ip), `${ip} 应判公网`)
+  }
 })
