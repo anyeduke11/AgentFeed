@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="assets/readme/hero.svg" alt="AgentFeed：本地 AI Agent 工作产物的热知识库。管线：Agent 数据目录（ClaudeCode 等 20+）→ 双通道采集 → 内容门禁 → SQLite 库 → LLM 蒸馏 → Web 看板与 MCP 双出口" width="100%"/>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero.svg"/>
+  <img src="assets/readme/hero-light.svg" alt="AgentFeed：本地 AI Agent 工作产物的热知识库。管线：Agent 数据目录（ClaudeCode 等 20+）→ 双通道采集 → 内容门禁 → SQLite 库 → LLM 蒸馏 → Web 看板与 MCP 双出口" width="100%"/>
+</picture>
 
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
