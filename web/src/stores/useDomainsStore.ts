@@ -7,10 +7,18 @@ export const useDomainsStore = defineStore('domains', () => {
   const loading = ref(false)
   const domOpen = ref<Record<number, boolean>>({})
 
+  const zhColl = new Intl.Collator('zh')
+  /** 展示序：同级按名称拼音（ICU zh）升序，递归作用于子级——与标签墙「主要（一级）」排序口径一致 */
+  function sortTree(list: any[]): any[] {
+    return [...list]
+      .sort((a, b) => zhColl.compare(String(a.name), String(b.name)))
+      .map(n => (n.children?.length ? { ...n, children: sortTree(n.children) } : n))
+  }
+
   async function fetchDomains() {
     loading.value = true
     try {
-      tree.value = await api.domains.list()
+      tree.value = sortTree(await api.domains.list())
     } finally {
       loading.value = false
     }
