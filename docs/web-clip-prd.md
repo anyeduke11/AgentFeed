@@ -90,7 +90,7 @@ MD frontmatter（归因走信任序第一位，见 extractor.ts inferAgent）：
 ---
 agent: webclip
 source_url: https://example.com/post
-clipped_at: 2026-09-24T15:30:12+08:00
+clipped_at: 2026-09-24T15:30:12+08:00   # UTC ISO8601（M2 裁定统一 UTC，本地偏移示例仅示意）
 snapshot: ./20260924-153012-<slug>.html   # 相对路径指快照
 ---
 ```
@@ -173,3 +173,4 @@ HTML 文件 `<head>` 注入锚点注释：`<!-- AgentFeed webclip: 20260924-1530
 
 - 2026-09-24 v1.0：初稿定稿。MD+HTML 双文件全量入库（均蒸馏+向量化），磁盘同名对 + frontmatter/锚点注释 + webclip_records 双 file_id 三层关联。
 - 2026-09-24 v1.1：M1 交付合入 main（f7d8ceb，e2e 10/10）；M2 范围定稿见 `docs/superpowers/plans/2026-09-24-web-clip-m2.md`（retry/失败分类/限额可配 + 终审 follow-up 收拢；埋点 source 集合显式扩容 +webclip，CLAUDE.md 红线 5 随 M2-T9 同步）。
+- 2026-09-24 v1.2：M2 交付合入 main（36c6976，终审 APPROVE）。落地：busy 并发互斥 / frontmatter+锚点注入清洗 / IPv6 私网加固 / convertCore+retry（原行更新）/ code 失败分类列 / webclip.limits 限额可配 / 埋点 source=webclip / isReady 增强 / CJK 资产路径双重编码修复（reader 归一化，安全用例 7/7）/ 图片扩展名按 Content-Type。clipped_at 裁定统一 UTC ISO8601。
