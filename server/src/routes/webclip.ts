@@ -9,6 +9,7 @@ import { WebclipError, assertPublicUrl } from '../webclip/ssrf.js'
 import { buildDocBase, reserveBase } from '../webclip/naming.js'
 import { htmlToMarkdown, rewriteSnapshot } from '../webclip/convert.js'
 import { renderPage, isReady } from '../webclip/fetcher.js'
+import { yamlSafe, commentSafe } from '../webclip/sanitize.js'
 
 export const webclipRouter = Router()
 
@@ -17,7 +18,10 @@ const IMG_MAX_BYTES = 5 * 1024 * 1024
 const IMG_TIMEOUT_MS = 15000
 const DEADLINE_MS = 45 * 1000
 
-const STATUS_BY_CODE: Record<string, number> = { ssrf: 400, config: 400, dup: 409, fetch: 502, notready: 503, toolarge: 413 }
+const STATUS_BY_CODE: Record<string, number> = { ssrf: 400, config: 400, dup: 409, fetch: 502, notready: 503, toolarge: 413, busy: 429 }
+
+// 模块级并发互斥：同一时刻仅允许一个剪藏任务（Playwright 单实例 + 落盘串行）
+let clipBusy = false
 
 async function getStorageRoot(): Promise<string | null> {
   const db = await getDb()
@@ -78,6 +82,8 @@ webclipRouter.post('/convert', async (req, res) => {
   const db = await getDb()
   const storageRoot = await getStorageRoot()
   if (!storageRoot) return res.status(400).json({ success: false, message: '未配置剪藏目录，请先在设置页配置' })
+  if (clipBusy) return res.status(429).json({ success: false, code: 'busy', message: '已有剪藏任务执行中，请稍后再试' })
+  clipBusy = true
   const esc = (s: string) => s.replace(/'/g, "''")
 
   const fail = async (code: string, message: string) => {
@@ -138,11 +144,11 @@ webclipRouter.post('/convert', async (req, res) => {
 
     assertDeadline()
     const clippedAt = new Date().toISOString()
-    const fm = ['---', 'agent: webclip', `source_url: ${url}`, `clipped_at: ${clippedAt}`, ...(snapshot ? [`snapshot: ./${base}.html`] : []), '---', ''].join('\n')
+    const fm = ['---', 'agent: webclip', `source_url: ${yamlSafe(String(url))}`, `clipped_at: ${clippedAt}`, ...(snapshot ? [`snapshot: ./${base}.html`] : []), '---', ''].join('\n')
     await fs.writeFile(mdPath, fm + md, 'utf8')
     if (snapshot) {
       const snapHtml = rewriteSnapshot(html, String(url), relMap)
-      const anchored = snapHtml.replace('<head>', `<head>\n<!-- AgentFeed webclip: ${base} | source: ${url} | clipped_at: ${clippedAt} -->`)
+      const anchored = snapHtml.replace('<head>', `<head>\n<!-- AgentFeed webclip: ${base} | source: ${commentSafe(String(url))} | clipped_at: ${clippedAt} -->`)
       await fs.writeFile(htmlPath, anchored, 'utf8')
     }
 
@@ -157,6 +163,8 @@ webclipRouter.post('/convert', async (req, res) => {
   } catch (e: any) {
     if (e instanceof WebclipError) return await fail(e.code, e.message)
     return await fail('fetch', e?.message || String(e))
+  } finally {
+    clipBusy = false
   }
 })
 

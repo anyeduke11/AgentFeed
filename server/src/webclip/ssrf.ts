@@ -12,8 +12,23 @@ export class WebclipError extends Error {
 export function isPrivateIp(ip: string): boolean {
   if (ip.includes(':')) {
     const low = ip.toLowerCase()
-    return low === '::1' || low === '::' || low.startsWith('fe80:') || low.startsWith('fc') || low.startsWith('fd')
-      || low.startsWith('::ffff:127.') || low.startsWith('::ffff:10.') || low.startsWith('::ffff:192.168.')
+    if (low === '::1' || low === '::') return true
+    // ::ffff: 点分形式 → 还原 IPv4 判定
+    const dotted = low.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+    if (dotted) return isPrivateIp(dotted[1])
+    // ::ffff:十六进制映射（可含 0: 前缀）→ 取前 16 位还原 IPv4 前两段判定
+    const hex = low.match(/^::ffff:(?:0:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/)
+    if (hex) {
+      const v1 = parseInt(hex[1], 16)
+      return isPrivateIp(`${v1 >> 8}.${v1 & 255}.0.0`)
+    }
+    const h0 = parseInt(low.split(':')[0], 16)
+    if (Number.isFinite(h0)) {
+      if (h0 >= 0xfe80 && h0 <= 0xfebf) return true // 链路本地 fe80::/10
+      if (h0 >= 0xfc00 && h0 <= 0xfdff) return true // ULA fc00::/7
+      if (h0 >= 0xff00) return true                 // 组播 ff00::/8
+    }
+    return false
   }
   const parts = ip.split('.').map(Number)
   if (parts.length !== 4 || parts.some(p => !Number.isFinite(p))) return true
