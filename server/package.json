@@ -25,6 +25,7 @@
     "gray-matter": "^4.0.3",
     "markdown-it": "^15.0.2",
     "multer": "^2.3.0",
+    "playwright": "^1.63.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
