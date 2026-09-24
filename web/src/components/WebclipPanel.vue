@@ -44,7 +44,7 @@
             <td class="c-dim mono">{{ fmtTime(r.created_at) }}</td>
             <td class="c-main">{{ r.title || '—' }}</td>
             <td class="c-dim mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="r.url">{{ r.url }}</td>
-            <td><span v-if="r.status === 'success'" class="stb"><span class="dot dot-done"></span>成功</span><span v-else class="stb stb-del" :title="r.error">失败</span></td>
+            <td><span v-if="r.status === 'success'" class="stb"><span class="dot dot-done"></span>成功</span><span v-else class="stb stb-del" :title="r.error">失败</span><span class="tagchip" style="margin-left:4px" v-if="r.code && r.code !== 'busy'">{{ codeLabel(r.code) }}</span></td>
             <td class="c-dim mono">{{ r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + 's' : '—' }}</td>
             <td>
               <template v-if="r.status === 'success'">
@@ -121,6 +121,8 @@ async function submit() {
     submitting.value = false
   }
 }
+
+const codeLabel = (c: string) => ({ ssrf: 'SSRF拦截', dup: '重复', fetch: '网络', notready: '未就绪', toolarge: '超大', config: '配置', busy: '忙' }[c] || c)
 
 async function retryOne(r: any) {
   if (submitting.value) return

@@ -11,6 +11,15 @@
       · {{ webclipCfg.rootRegistered ? '已注册为扫描根' : '未注册' }}
       · Playwright {{ webclipCfg.playwrightReady ? '就绪' : '未安装' }}
     </div>
+    <!-- 限额（webclip.limits）：页面/单图 MB、单页图数、导航与总时限 ms -->
+    <div class="frow1" style="gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+      <label class="cap">页面 <input class="inp" style="width:76px" v-model.number="limits.pageMaxMB" type="number" min="1" aria-label="页面大小上限 MB" /> MB</label>
+      <label class="cap">单图 <input class="inp" style="width:76px" v-model.number="limits.imgMaxMB" type="number" min="1" aria-label="单图大小上限 MB" /> MB</label>
+      <label class="cap">单页图数 <input class="inp" style="width:76px" v-model.number="limits.imgMaxCount" type="number" min="1" aria-label="单页图片数量上限" /></label>
+      <label class="cap">导航 <input class="inp" style="width:92px" v-model.number="limits.navTimeoutMs" type="number" min="1" aria-label="导航超时毫秒" /> ms</label>
+      <label class="cap">总时限 <input class="inp" style="width:92px" v-model.number="limits.deadlineMs" type="number" min="1" aria-label="总时限毫秒" /> ms</label>
+      <button class="btn sm" :disabled="limitsSaving" @click="saveLimits">{{ limitsSaving ? '保存中…' : '保存限额' }}</button>
+    </div>
     <div v-if="webclipMsg" class="cap" :style="{ color: webclipMsg.ok ? 'var(--ok)' : 'var(--fail)' }">{{ webclipMsg.msg }}</div>
   </div>
 </template>
@@ -25,12 +34,29 @@ const webclipRoot = ref('')
 const webclipSaving = ref(false)
 const webclipMsg = ref<{ ok: boolean; msg: string } | null>(null)
 const webclipCfg = ref<any>({ storageRoot: null, rootRegistered: false, playwrightReady: false })
+const limits = ref<Record<string, number>>({ pageMaxMB: 20, imgMaxMB: 5, imgMaxCount: 30, navTimeoutMs: 30000, deadlineMs: 45000 })
+const limitsSaving = ref(false)
 
 async function loadWebclipCfg() {
   try {
     webclipCfg.value = await api.webclip.getConfig()
     webclipRoot.value = webclipCfg.value.storageRoot || ''
+    if (webclipCfg.value.limits) limits.value = { ...webclipCfg.value.limits }
   } catch { /* 网络错误静默，占位提示 */ }
+}
+
+async function saveLimits() {
+  limitsSaving.value = true
+  webclipMsg.value = null
+  try {
+    const r = await api.webclip.putLimits({ ...limits.value })
+    if (r.success) { limits.value = { ...r.limits }; webclipMsg.value = { ok: true, msg: '限额已保存' } }
+    else webclipMsg.value = { ok: false, msg: r.message || '限额保存失败' }
+  } catch (e: any) {
+    webclipMsg.value = { ok: false, msg: `限额保存失败：${e?.message || e}` }
+  } finally {
+    limitsSaving.value = false
+  }
 }
 
 async function saveWebclipRoot() {

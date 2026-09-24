@@ -8,7 +8,7 @@ const IMG_LIMIT = 30
  * 渲染后 HTML → Markdown。正文容器优先级 article > main > body；
  * 图片不下载，先落 __WEBCLIP_IMG_N__ 占位符由调用方替换（成功换相对路径，失败换 alt 降级文案）。
  */
-export function htmlToMarkdown(html: string, baseUrl: string): { title: string; markdown: string; images: ImgRef[] } {
+export function htmlToMarkdown(html: string, baseUrl: string, imgLimit = IMG_LIMIT): { title: string; markdown: string; images: ImgRef[] } {
   const $ = cheerio.load(html)
   const title = ($('title').text() || $('h1').first().text() || '').trim()
   let root = $('article').first()
@@ -23,7 +23,7 @@ export function htmlToMarkdown(html: string, baseUrl: string): { title: string; 
   const renderImg = (n: any): string => {
     const src = $(n).attr('src') || ''
     const alt = ($(n).attr('alt') || '').trim()
-    if (!src || images.length >= IMG_LIMIT) return ''
+    if (!src || images.length >= imgLimit) return ''
     try {
       const abs = new URL(src, baseUrl).href
       if (!/^https?:/i.test(abs)) return '' // data:/blob: 等不本地化

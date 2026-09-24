@@ -15,10 +15,10 @@ export { WebclipError }
 
 export const webclipRouter = Router()
 
-const PAGE_MAX_BYTES = 20 * 1024 * 1024
-const IMG_MAX_BYTES = 5 * 1024 * 1024
 const IMG_TIMEOUT_MS = 15000
-const DEADLINE_MS = 45 * 1000
+
+const DEFAULT_LIMITS = { pageMaxMB: 20, imgMaxMB: 5, imgMaxCount: 30, navTimeoutMs: 30000, deadlineMs: 45000 }
+export type WebclipLimits = typeof DEFAULT_LIMITS
 
 const STATUS_BY_CODE: Record<string, number> = { ssrf: 400, config: 400, dup: 409, fetch: 502, notready: 503, toolarge: 413, busy: 429 }
 
@@ -34,6 +34,14 @@ async function getStorageRoot(): Promise<string | null> {
   return v || null
 }
 
+/** 剪藏限额（config webclip.limits 覆盖默认值；损坏 JSON 回退默认） */
+export async function getLimits(): Promise<WebclipLimits> {
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.limits'")).get() as any
+  if (!row?.value) return { ...DEFAULT_LIMITS }
+  try { return { ...DEFAULT_LIMITS, ...JSON.parse(String(row.value)) } } catch { return { ...DEFAULT_LIMITS } }
+}
+
 webclipRouter.get('/config', async (req, res) => {
   try {
     const storageRoot = await getStorageRoot()
@@ -41,7 +49,7 @@ webclipRouter.get('/config', async (req, res) => {
     const rootRow = storageRoot
       ? await (await db.prepare('SELECT id, enabled FROM scan_roots WHERE path = ?')).get(storageRoot) as any
       : null
-    res.json({ success: true, storageRoot, rootRegistered: !!rootRow, rootEnabled: !!rootRow?.enabled, playwrightReady: await isReady() })
+    res.json({ success: true, storageRoot, rootRegistered: !!rootRow, rootEnabled: !!rootRow?.enabled, playwrightReady: await isReady(), limits: await getLimits() })
   } catch (e: any) {
     console.error('webclip /config failed', e)
     res.status(500).json({ success: false, message: e?.message || String(e) })
@@ -106,11 +114,12 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   const runScan = deps.runScan ?? ((roots: string[]) => scan({ roots, full: false, source: 'webclip' }))
   const assertUrl = deps.assertPublicUrl ?? assertPublicUrl
   const db = await getDb()
+  const limits = await getLimits()
   const storageRoot = await getStorageRoot()
   if (!storageRoot) throw new WebclipError('config', '未配置剪藏目录，请先在设置页配置')
 
   const assertDeadline = () => {
-    if (Date.now() - t0 > DEADLINE_MS) throw new WebclipError('fetch', '剪藏总耗时超过 45s 限额，已中止')
+    if (Date.now() - t0 > limits.deadlineMs) throw new WebclipError('fetch', `剪藏总耗时超过 ${Math.round(limits.deadlineMs / 1000)}s 限额，已中止`)
   }
 
   // 重复 URL：已有成功记录且未勾选强制重剪 → 拒绝
@@ -118,11 +127,11 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   if (dup && !opts.force) throw new WebclipError('dup', '该 URL 已剪藏成功过；如需重新抓取请勾选「强制重剪」')
 
   await assertUrl(String(url))
-  const { html } = await render(String(url), 30000)
+  const { html } = await render(String(url), limits.navTimeoutMs)
   assertDeadline()
-  if (Buffer.byteLength(html) > PAGE_MAX_BYTES) throw new WebclipError('toolarge', '页面超过 20MB 限额')
+  if (Buffer.byteLength(html) > limits.pageMaxMB * 1024 * 1024) throw new WebclipError('toolarge', `页面超过 ${limits.pageMaxMB}MB 限额`)
 
-  const { title, markdown, images } = htmlToMarkdown(html, String(url))
+  const { title, markdown, images } = htmlToMarkdown(html, String(url), limits.imgMaxCount)
   const base = reserveBase(storageRoot, buildDocBase(title))
   const mdPath = path.join(storageRoot, `${base}.md`)
   const htmlPath = path.join(storageRoot, `${base}.html`)
@@ -147,7 +156,7 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
       })
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const buf = Buffer.from(await r.arrayBuffer())
-      if (buf.byteLength > IMG_MAX_BYTES) throw new Error('超过单图 5MB 限额')
+      if (buf.byteLength > limits.imgMaxMB * 1024 * 1024) throw new Error(`超过单图 ${limits.imgMaxMB}MB 限额`)
       const ext = (path.extname(new URL(img.absUrl).pathname).replace(/[^.\w]/g, '') || '.img').slice(0, 8)
       const name = `img-${i}${ext}`
       await fs.writeFile(path.join(assetsDir, name), buf)
@@ -184,9 +193,9 @@ async function insertSuccessRecord(url: string, r: ConvertResult) {
     VALUES ('${esc(url)}', '${esc(r.title || '')}', '${esc(r.base)}', '${esc(r.mdPath)}', ${r.htmlPath ? `'${esc(r.htmlPath)}'` : 'NULL'}, ${r.mdFileId ?? 'NULL'}, ${r.htmlFileId ?? 'NULL'}, 'success', ${r.snapshot ? 1 : 0}, ${r.durationMs})`)
 }
 
-async function failRecord(url: string, snapshot: boolean, e: any, startedAt = Date.now()) {
+async function failRecord(url: string, snapshot: boolean, code: string, e: any, startedAt = Date.now()) {
   const db = await getDb()
-  await db.exec(`INSERT INTO webclip_records (url, status, snapshot, error, duration_ms) VALUES ('${esc(url)}', 'failed', ${snapshot ? 1 : 0}, '${esc(e?.message || String(e))}', ${Date.now() - startedAt})`)
+  await db.exec(`INSERT INTO webclip_records (url, status, code, snapshot, error, duration_ms) VALUES ('${esc(url)}', 'failed', '${esc(code)}', ${snapshot ? 1 : 0}, '${esc(e?.message || String(e))}', ${Date.now() - startedAt})`)
 }
 
 /** 重试失败记录：force 重跑核心，成功后原行原地更新为 success（不新增行）；记录不存在/已成功直接抛错不改行 */
@@ -231,8 +240,8 @@ webclipRouter.post('/convert', async (req, res) => {
     await insertSuccessRecord(String(url), r)
     res.json(r)
   } catch (e: any) {
-    await failRecord(String(url), snapshot, e, t0)
     const code = e instanceof WebclipError ? e.code : 'fetch'
+    await failRecord(String(url), snapshot, code, e, t0)
     res.status(STATUS_BY_CODE[code] ?? 500).json({ success: false, code, message: e?.message || String(e) })
   } finally {
     clipBusy = false
@@ -253,6 +262,24 @@ webclipRouter.post('/records/:id/retry', async (req, res) => {
     res.status(STATUS_BY_CODE[code] ?? 500).json({ success: false, code, message: e?.message || String(e) })
   } finally {
     clipBusy = false
+  }
+})
+
+webclipRouter.put('/limits', async (req, res) => {
+  try {
+    const body = (req.body || {}) as Record<string, unknown>
+    const next: Record<string, number> = { ...DEFAULT_LIMITS }
+    for (const k of Object.keys(DEFAULT_LIMITS) as (keyof WebclipLimits)[]) {
+      const v = Number(body[k])
+      if (Number.isFinite(v) && v > 0) next[k] = v
+      else if (body[k] !== undefined) return res.status(400).json({ success: false, message: `${k} 必须为正数` })
+    }
+    const db = await getDb()
+    await db.exec(`UPDATE config SET value = '${JSON.stringify(next).replace(/'/g, "''")}', updated_at = CURRENT_TIMESTAMP WHERE key = 'webclip.limits'`)
+    res.json({ success: true, limits: next })
+  } catch (e: any) {
+    console.error('webclip /limits failed', e)
+    res.status(500).json({ success: false, message: e?.message || String(e) })
   }
 })
 

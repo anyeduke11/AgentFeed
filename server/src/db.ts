@@ -133,6 +133,10 @@ export async function getDb(): Promise<SqliteDatabase> {
     await ensureColumns(db, 'llm_call_logs', [
       { name: 'stop_reason', ddl: 'stop_reason TEXT' }
     ])
+    // 既有库列迁移（webclip M2：失败分类 code——ssrf/config/dup/fetch/notready/toolarge/busy 落库可观测）
+    await ensureColumns(db, 'webclip_records', [
+      { name: 'code', ddl: 'code TEXT' }
+    ])
     await seedDefaults(db)
     await migrateTagLevels(db)
     await reconcileDomainTagSync(db)
@@ -570,6 +574,7 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' },
     { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' },
     { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' },
+    { key: 'webclip.limits', value: '{"pageMaxMB":20,"imgMaxMB":5,"imgMaxCount":30,"navTimeoutMs":30000,"deadlineMs":45000}', type: 'json', description: '网页剪藏限额（页面MB/单图MB/单页图数/导航ms/总时限ms）' },
     { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' }
   ]
 
