@@ -76,8 +76,8 @@ export const useFilesStore = defineStore('files', () => {
     return api.files.batchLlmTag(ids)
   }
 
-  async function openFile(id: number) {
-    return api.files.open(id)
+  async function openFile(id: number, source?: string) {
+    return api.files.open(id, source)
   }
 
   async function revealFile(id: number) {

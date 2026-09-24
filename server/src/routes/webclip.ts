@@ -56,23 +56,29 @@ webclipRouter.get('/config', async (req, res) => {
   }
 })
 
+/** 剪藏存储根校验（纯校验不落盘）：与既有扫描根嵌套（双向）一律拒绝；相等仅允许 webclip 自己注册的根（幂等重存）。返回错误消息或 null */
+export async function validateStorageRoot(db: any, rootPath: string): Promise<string | null> {
+  const rows = await (await db.prepare('SELECT path, agent FROM scan_roots')).all() as any[]
+  for (const r of rows) {
+    const p = String(r.path)
+    if (p !== rootPath && (rootPath.startsWith(p + '/') || p.startsWith(rootPath + '/'))) {
+      return `与既有扫描根嵌套：${p}`
+    }
+    if (p === rootPath && r.agent !== 'webclip') {
+      return `该目录已是其他扫描根（${p}），请换目录`
+    }
+  }
+  return null
+}
+
 webclipRouter.put('/config', async (req, res) => {
   try {
     const raw = String((req.body as any)?.storageRoot || '').trim()
     if (!raw || !path.isAbsolute(raw)) return res.status(400).json({ success: false, message: 'storageRoot 必须是绝对路径' })
     const rootPath = path.resolve(raw)
     const db = await getDb()
-    // 与既有扫描根：嵌套（双向）一律拒绝；相等仅允许 webclip 自己注册的根（幂等重存）
-    const rows = await (await db.prepare('SELECT path, agent FROM scan_roots')).all() as any[]
-    for (const r of rows) {
-      const p = String(r.path)
-      if (p !== rootPath && (rootPath.startsWith(p + '/') || p.startsWith(rootPath + '/'))) {
-        return res.status(400).json({ success: false, message: `与既有扫描根嵌套：${p}` })
-      }
-      if (p === rootPath && r.agent !== 'webclip') {
-        return res.status(400).json({ success: false, message: `该目录已是其他扫描根（${p}），请换目录` })
-      }
-    }
+    const err = await validateStorageRoot(db, rootPath)
+    if (err) return res.status(400).json({ success: false, message: err })
     await fs.mkdir(rootPath, { recursive: true })
     const existing = await (await db.prepare('SELECT id FROM scan_roots WHERE path = ?')).get(rootPath) as any
     if (!existing) {
@@ -194,8 +200,12 @@ async function insertSuccessRecord(url: string, r: ConvertResult) {
 }
 
 async function failRecord(url: string, snapshot: boolean, code: string, e: any, startedAt = Date.now()) {
-  const db = await getDb()
-  await db.exec(`INSERT INTO webclip_records (url, status, code, snapshot, error, duration_ms) VALUES ('${esc(url)}', 'failed', '${esc(code)}', ${snapshot ? 1 : 0}, '${esc(e?.message || String(e))}', ${Date.now() - startedAt})`)
+  try {
+    const db = await getDb()
+    await db.exec(`INSERT INTO webclip_records (url, status, code, snapshot, error, duration_ms) VALUES ('${esc(url)}', 'failed', '${esc(code)}', ${snapshot ? 1 : 0}, '${esc(e?.message || String(e))}', ${Date.now() - startedAt})`)
+  } catch (err) {
+    console.error('webclip record write failed', err)
+  }
 }
 
 /** 重试失败记录：force 重跑核心，成功后原行原地更新为 success（不新增行）；记录不存在/已成功直接抛错不改行 */

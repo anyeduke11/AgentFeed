@@ -14,7 +14,7 @@ const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-
 process.env.AGENTFEED_DATA_DIR = DATA_TMP
 
 const { getDb, closeDb } = await import('../src/db.js')
-const { convertCore, retryRecord, getLimits, WebclipError } = await import('../src/routes/webclip.js')
+const { convertCore, retryRecord, getLimits, validateStorageRoot, WebclipError } = await import('../src/routes/webclip.js')
 
 after(async () => {
   try { await closeDb() } catch { /* 临时库句柄未全部 finalize，进程退出自然释放 */ }
@@ -65,9 +65,23 @@ test('webclip/naming: slugify 保留中英与连字符', () => {
   assert.equal(slugify('a'.repeat(100)).length, 40)
 })
 
-test('webclip/naming: buildDocBase 固定时间戳格式', () => {
-  const base = buildDocBase('Hello', new Date('2026-09-24T15:30:12+08:00'))
-  assert.equal(base, '20260924-153012-hello')
+test('webclip/naming: buildDocBase 时区无关（本地分量构造）', () => {
+  const d = new Date(2026, 8, 24, 15, 30, 12)
+  assert.equal(buildDocBase('Hello', d), '20260924-153012-hello')
+})
+
+test('webclip/config: validateStorageRoot 三态（幂等/嵌套/占用）', async () => {
+  const db = await getDb()
+  const a = path.join(DATA_TMP, 'root-a'); await fsp.mkdir(a, { recursive: true })
+  assert.equal(await validateStorageRoot(db, a), null)                       // 空白场景放行
+  await db.exec(`INSERT INTO scan_roots (path, agent) VALUES ('${a.replace(/'/g, "''")}', 'webclip')`)
+  assert.equal(await validateStorageRoot(db, a), null)                       // 自身 webclip 根幂等放行
+  const nested = path.join(a, 'sub')
+  assert.match(String(await validateStorageRoot(db, nested)), /嵌套/)         // 子路径拒绝
+  assert.match(String(await validateStorageRoot(db, DATA_TMP)), /嵌套/)       // 父路径拒绝
+  const occupied = path.join(DATA_TMP, 'occupied')
+  await db.exec(`INSERT INTO scan_roots (path, agent) VALUES ('${occupied.replace(/'/g, "''")}', NULL)`)
+  assert.match(String(await validateStorageRoot(db, occupied)), /已是其他扫描根/)
 })
 
 test('webclip/naming: reserveBase 磁盘冲突加序号', () => {

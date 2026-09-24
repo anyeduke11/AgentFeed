@@ -38,18 +38,18 @@
       </div>
       <div v-if="!records.length" class="cap sect-empty">还没有剪藏记录 · 粘贴一个链接试试</div>
       <table v-else class="rtable">
-        <thead><tr><th>时间</th><th>标题</th><th>URL</th><th>状态</th><th>耗时</th><th>文件</th><th style="text-align:right">操作</th></tr></thead>
+        <thead><tr><th>时间</th><th>标题</th><th>URL</th><th>状态</th><th>耗时</th><th>文件</th><th style="text-align:right">错误</th></tr></thead>
         <tbody>
           <tr v-for="r in records" :key="r.id">
             <td class="c-dim mono">{{ fmtTime(r.created_at) }}</td>
-            <td class="c-main">{{ r.title || '—' }}</td>
+            <td class="c-main"><button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">{{ r.title || '—' }}</button><template v-else>{{ r.title || '—' }}</template></td>
             <td class="c-dim mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="r.url">{{ r.url }}</td>
-            <td><span v-if="r.status === 'success'" class="stb"><span class="dot dot-done"></span>成功</span><span v-else class="stb stb-del" :title="r.error">失败</span><span class="tagchip" style="margin-left:4px" v-if="r.code && r.code !== 'busy'">{{ codeLabel(r.code) }}</span></td>
+            <td><span v-if="r.status === 'success'" class="stb"><span class="dot dot-done"></span>成功</span><span v-else class="stb stb-del" :title="r.error">失败</span><span class="tagchip" style="margin-left:4px" v-if="r.status === 'failed' && r.code && r.code !== 'busy'">{{ codeLabel(r.code) }}</span></td>
             <td class="c-dim mono">{{ r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + 's' : '—' }}</td>
             <td>
               <template v-if="r.status === 'success'">
-                <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id)">md</button>
-                <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id)">html</button>
+                <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">md</button>
+                <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id, 'webclip')">html</button>
               </template>
               <button v-else-if="r.status === 'failed'" class="btn xs" :disabled="submitting" @click="retryOne(r)">重试</button>
             </td>
@@ -57,7 +57,7 @@
           </tr>
         </tbody>
       </table>
-      <div class="lib-foot">
+      <div v-if="records.length" class="lib-foot">
         <span class="mono">共 {{ total }} 条</span><span style="flex:1"></span>
         <button class="btn xs" :disabled="page <= 1" @click="loadRecords(page - 1)">上一页</button>
         <button class="btn xs" :disabled="page * 20 >= total" @click="loadRecords(page + 1)">下一页</button>
@@ -95,7 +95,7 @@ async function loadRecords(p = 1) {
     const r = await api.webclip.records({ page: String(p), limit: '20', status: statusFilter.value })
     records.value = r.items || []
     total.value = r.total || 0
-  } catch { records.value = [] }
+  } catch { records.value = []; total.value = 0 }
 }
 
 function setStatus(s: string) { statusFilter.value = s; loadRecords(1) }
@@ -108,7 +108,7 @@ async function submit() {
   try {
     const r = await api.webclip.convert({ url, snapshot: optSnapshot.value, force: optForce.value })
     if (r.success) {
-      lastResult.value = { ok: true, msg: `剪藏成功（${r.durationMs ? (r.durationMs / 1000).toFixed(1) : '?'}s · 图片 ${r.images} 张），已进入蒸馏队列` }
+      lastResult.value = { ok: true, msg: `剪藏成功（${r.durationMs ? (r.durationMs / 1000).toFixed(1) : '?'}s · 图片 ${r.images ?? 0} 张），已进入蒸馏队列` }
       urlInput.value = ''
       await loadRecords(1)
     } else {
