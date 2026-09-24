@@ -17,6 +17,16 @@ export const webclipRouter = Router()
 
 const IMG_TIMEOUT_MS = 15000
 
+// 图片落盘扩展名只允许资产代理白名单可服务的后缀（files.ts ASSET_EXTS，不含 .avif——产出即 404，fail-closed）
+const KNOWN_IMG_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.svgz'])
+const EXT_BY_CONTENT_TYPE: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg'
+}
+
 const DEFAULT_LIMITS = { pageMaxMB: 20, imgMaxMB: 5, imgMaxCount: 30, navTimeoutMs: 30000, deadlineMs: 45000 }
 export type WebclipLimits = typeof DEFAULT_LIMITS
 
@@ -163,7 +173,11 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const buf = Buffer.from(await r.arrayBuffer())
       if (buf.byteLength > limits.imgMaxMB * 1024 * 1024) throw new Error(`超过单图 ${limits.imgMaxMB}MB 限额`)
-      const ext = (path.extname(new URL(img.absUrl).pathname).replace(/[^.\w]/g, '') || '.img').slice(0, 8)
+      // 扩展名：URL 后缀仅在白名单内才采用，否则按 Content-Type 映射；仍未知 → 抛错降级 alt 文案（不写 .img 这种代理必 404 的文件）
+      const urlExt = (path.extname(new URL(img.absUrl).pathname).replace(/[^.\w]/g, '') || '').toLowerCase().slice(0, 8)
+      const ctype = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+      const ext = KNOWN_IMG_EXT.has(urlExt) ? urlExt : EXT_BY_CONTENT_TYPE[ctype]
+      if (!ext) throw new Error('未支持的图片类型')
       const name = `img-${i}${ext}`
       await fs.writeFile(path.join(assetsDir, name), buf)
       const rel = `assets/${base}/${name}`
@@ -225,15 +239,16 @@ export async function retryRecord(recordId: number, deps: ConvertDeps = {}): Pro
     status = 'success',
     snapshot = ${r.snapshot ? 1 : 0},
     duration_ms = ${r.durationMs},
+    code = NULL,
     error = NULL
     WHERE id = ${recordId}`)
   return r
 }
 
-async function markRetryFailed(recordId: number, e: any) {
+async function markRetryFailed(recordId: number, code: string, e: any) {
   try {
     const db = await getDb()
-    await db.exec(`UPDATE webclip_records SET status = 'failed', error = '${esc(e?.message || String(e))}', duration_ms = NULL WHERE id = ${recordId}`)
+    await db.exec(`UPDATE webclip_records SET status = 'failed', code = '${esc(code)}', error = '${esc(e?.message || String(e))}', duration_ms = NULL WHERE id = ${recordId}`)
   } catch (err) {
     console.error('webclip markRetryFailed failed', err)
   }
@@ -268,7 +283,7 @@ webclipRouter.post('/records/:id/retry', async (req, res) => {
     res.json(r)
   } catch (e: any) {
     const code = e instanceof WebclipError ? e.code : 'fetch'
-    if (code !== 'dup' && code !== 'config') await markRetryFailed(id, e) // 重试再失败：原行置 failed
+    if (code !== 'dup' && code !== 'config') await markRetryFailed(id, code, e) // 重试再失败：原行置 failed（code 同步落库）
     res.status(STATUS_BY_CODE[code] ?? 500).json({ success: false, code, message: e?.message || String(e) })
   } finally {
     clipBusy = false
