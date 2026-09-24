@@ -10,16 +10,51 @@
     </div>
 
     <div class="chat-grid">
-      <!-- 左栏：会话列表 -->
+      <!-- 左栏：会话列表（批次 A：搜索 / 归档切换 / 标记 chips / 行内操作） -->
       <aside class="sect chat-side">
         <div class="sect-head"><span class="sq"></span><h2 class="stitle">会话</h2><span class="sect-en">Sessions</span><div class="sright"><span class="cap mono">{{ sessions.length }}</span></div></div>
+        <div class="chat-side-tools">
+          <input v-model="searchQ" class="chat-input chat-search" type="text" placeholder="搜索会话…" />
+          <button class="chip" :class="{ on: showArchived }" @click="toggleArchivedView">{{ showArchived ? '看活跃' : '已归档' }}</button>
+        </div>
         <div class="chat-sessions">
-          <button v-for="s in sessions" :key="s.sessionId" class="chat-sitem" :class="{ on: s.sessionId === sessionId }" @click="openSession(s)">
-            <span class="chat-sprev">{{ s.preview || '（空会话）' }}</span>
-            <span class="cap mono">{{ fmtTime(s.lastAt) }} · {{ s.msgCount }} 条</span>
-          </button>
+          <div v-for="s in sessions" :key="s.sessionId" class="chat-sitem" :class="{ on: s.sessionId === sessionId }">
+            <template v-if="renamingId === s.sessionId">
+              <input
+                v-model="renamingTitle"
+                class="chat-input chat-rename"
+                type="text"
+                placeholder="会话标题（1~80 字）"
+                maxlength="80"
+                @keydown.enter.prevent="commitRename()"
+                @keydown.esc.prevent="renamingId = ''"
+              />
+              <div class="chat-sacts">
+                <button class="chat-sact" @click="commitRename()">存</button>
+                <button class="chat-sact" @click="renamingId = ''">取消</button>
+              </div>
+            </template>
+            <template v-else>
+              <button class="chat-smain" @click="openSession(s)">
+                <span class="chat-sprev">{{ s.title || s.preview || '（空会话）' }}</span>
+                <span class="chat-smeta">
+                  <span v-if="s.domain" class="chat-schip" :title="'领域：' + s.domain">{{ s.domain }}</span>
+                  <span v-for="t in (s.tags || []).slice(0, 2)" :key="t" class="chat-schip tag">{{ t }}</span>
+                  <span class="cap mono">{{ fmtTime(s.lastAt) }} · {{ s.msgCount }} 条</span>
+                </span>
+              </button>
+              <div class="chat-sacts">
+                <button class="chat-sact" title="重命名" @click.stop="startRename(s)">改</button>
+                <button class="chat-sact" :title="s.archived ? '恢复到活跃列表' : '归档'" @click.stop="toggleArchive(s)">{{ s.archived ? '恢复' : '归档' }}</button>
+                <button class="chat-sact" title="导出 / 蒸馏入库" @click.stop="openExport(s)">出</button>
+                <button class="chat-sact danger" title="删除（留删除日志）" @click.stop="removeSession(s)">删</button>
+              </div>
+            </template>
+          </div>
           <div v-if="!sessions.length" class="chat-side-empty">
-            <span class="cap">还没有会话记录。<br>提问一次即自动留存，可随时回看。</span>
+            <span v-if="showArchived" class="cap">暂无归档会话。</span>
+            <span v-else-if="searchQ.trim()" class="cap">没有匹配的会话。</span>
+            <span v-else class="cap">还没有会话记录。<br>提问一次即自动留存，可随时回看。</span>
           </div>
         </div>
       </aside>
@@ -36,6 +71,22 @@
           <button class="chip" :disabled="!sessionId || recapping || sending" :title="sessionId ? 'AI 复盘当前会话' : '先选择或发起一个会话'" @click="doRecap">
             {{ recapping ? '复盘中…' : '复盘' }}
           </button>
+          <!-- 会话标记（批次 A）：领域 + 标签，变更即 PATCH 元数据；仅选中会话时出现 -->
+          <template v-if="sessionId">
+            <span class="chat-mark-sep"></span>
+            <select v-model="sessionDomain" class="chat-domain" title="会话领域标记（可搜索命中）" @change="saveMarkers">
+              <option value="">标记领域…</option>
+              <option v-for="d in domainOptions" :key="d.id" :value="d.name">{{ d.name }}</option>
+            </select>
+            <input
+              v-model="sessionTagsInput"
+              class="chat-input chat-tags"
+              type="text"
+              placeholder="会话标签，逗号分隔"
+              title="会话标签（可搜索命中），逗号分隔"
+              @change="saveMarkers"
+            />
+          </template>
         </div>
 
         <div ref="msgsEl" class="chat-msgs">
@@ -90,13 +141,36 @@
             {{ sending ? '回答中…' : '发送' }}
           </button>
         </div>
+
+        <!-- 导出/蒸馏入库弹层（批次 B）：预览可编辑 → 纯导出落盘 或 蒸馏入库走 wiki 挂载内核 -->
+        <div v-if="exportOpen" class="chat-export-mask" @click.self="exportOpen = false">
+          <div class="chat-export">
+            <div class="chat-export-head">
+              <b>会话导出 · {{ exportSessionTitle }}</b>
+              <button class="chat-sact" @click="exportOpen = false">关闭</button>
+            </div>
+            <div class="chat-export-tools">
+              <label class="cap" style="display:flex;align-items:center;gap:4px;cursor:pointer">
+                <input v-model="exportRefined" type="checkbox" @change="regenPreview" /> AI 提炼为知识词条
+              </label>
+              <button class="btn xs" :disabled="exportBusy" @click="regenPreview">重新生成</button>
+              <span v-if="exportRefineNote" class="cap muted">{{ exportRefineNote }}</span>
+            </div>
+            <textarea v-model="exportMarkdown" class="chat-export-md" spellcheck="false"></textarea>
+            <div class="chat-export-foot">
+              <input v-model="exportDir" class="chat-input chat-export-dir" type="text" placeholder="导出目录（留空 = 设置中的会话导出目录）" />
+              <button class="btn sm" :disabled="exportBusy || !exportMarkdown.trim()" @click="doExportFile">导出文件</button>
+              <button class="btn sm primary" :disabled="exportBusy || !exportMarkdown.trim()" title="落盘并经 wiki import 内核入库，立即可被检索命中" @click="doDistill">{{ exportBusy ? '处理中…' : '蒸馏入库' }}</button>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { useUiStore } from '../stores/useUiStore'
@@ -110,6 +184,8 @@ const ui = useUiStore()
 interface RefItem { id: number, title: string }
 interface FallbackItem { id: number, title: string, summary: string }
 interface Msg { role: 'user' | 'assistant', content: string, refs?: RefItem[], fallback?: FallbackItem[], error?: string, streaming?: boolean, recap?: boolean }
+/** 会话列表项：元数据来自 chat_sessions（老会话无行时 title 回退首问预览、其余缺省） */
+interface SessionItem { sessionId: string, title: string, domain: string | null, tags: string[], archived: boolean, preview: string, msgCount: number, lastAt: string }
 
 const SKILL_BTNS = [
   { key: 'explain', label: '解释这篇', dflt: '请解释这篇' },
@@ -119,7 +195,7 @@ const SKILL_BTNS = [
 ] as const
 type SkillKey = typeof SKILL_BTNS[number]['key']
 
-const sessions = ref<Array<{ sessionId: string, preview: string, msgCount: number, lastAt: string }>>([])
+const sessions = ref<SessionItem[]>([])
 const sessionId = ref('')
 const msgs = ref<Msg[]>([])
 const input = ref('')
@@ -128,6 +204,13 @@ const recapping = ref(false)
 const domain = ref('')
 const domainOptions = ref<Array<{ id: number, name: string }>>([])
 const msgsEl = ref<HTMLElement | null>(null)
+// 批次 A：搜索 / 归档视图 / 会话标记 / 行内重命名
+const searchQ = ref('')
+const showArchived = ref(false)
+const sessionDomain = ref('')
+const sessionTagsInput = ref('')
+const renamingId = ref('')
+const renamingTitle = ref('')
 
 const skillFileId = computed(() => {
   const q = parseInt(String(route.query.fileId || ''))
@@ -140,9 +223,146 @@ function scrollBottom() {
 
 async function loadSessions() {
   try {
-    const r = await api.chat.sessions()
+    const params = new URLSearchParams()
+    if (showArchived.value) params.set('archived', '1')
+    if (searchQ.value.trim()) params.set('q', searchQ.value.trim())
+    const qs = params.toString()
+    const r = await api.chat.sessions(qs ? `?${qs}` : '')
     sessions.value = r.sessions || []
   } catch { sessions.value = [] }
+}
+
+/** 搜索防抖：300ms 停顿才发请求（输入中途不打 API） */
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+watch(searchQ, () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(loadSessions, 300)
+})
+
+function toggleArchivedView() {
+  showArchived.value = !showArchived.value
+  loadSessions()
+}
+
+/** 选中会话时同步标记编辑区（提问领域 persona 的 domain ref 互不干扰）；会话不在当前列表时跳过 */
+function syncMarkerEditors(s?: SessionItem) {
+  if (!s) return
+  sessionDomain.value = s.domain || ''
+  sessionTagsInput.value = (s.tags || []).join(', ')
+}
+
+async function patchCurrentOrItem(id: string, payload: { title?: string, domain?: string | null, tags?: string[], archived?: boolean }) {
+  const r: any = await api.chat.patchSession(id, payload)
+  if (!r?.success) ui.toast(r?.message || '保存失败')
+  loadSessions()
+  return r
+}
+
+function startRename(s: SessionItem) {
+  renamingId.value = s.sessionId
+  renamingTitle.value = s.title || s.preview || ''
+}
+
+async function commitRename() {
+  const title = renamingTitle.value.trim()
+  if (!renamingId.value || !title) { renamingId.value = ''; return }
+  const id = renamingId.value
+  await patchCurrentOrItem(id, { title })
+  if (id === sessionId.value) syncMarkerEditors(sessions.value.find(x => x.sessionId === id) as SessionItem)
+  renamingId.value = ''
+}
+
+async function toggleArchive(s: SessionItem) {
+  await patchCurrentOrItem(s.sessionId, { archived: !s.archived })
+}
+
+async function removeSession(s: SessionItem) {
+  const label = s.title || s.preview || s.sessionId.slice(0, 8)
+  if (!confirm(`删除会话「${label}」？\n消息与标记将被清除（保留删除日志，可在 /api/chat/deletions 审计）。`)) return
+  try {
+    const r: any = await api.chat.deleteSession(s.sessionId)
+    if (r?.success) {
+      if (sessionId.value === s.sessionId) { sessionId.value = ''; msgs.value = []; sessionDomain.value = ''; sessionTagsInput.value = '' }
+      ui.toast(`已删除（${r.deletedMessages} 条消息留痕）`)
+    } else {
+      ui.toast(r?.message || '删除失败')
+    }
+  } catch { ui.toast('删除失败') }
+  loadSessions()
+}
+
+/** 会话标记保存：domain + tags（逗号分隔）一起 PATCH */
+async function saveMarkers() {
+  if (!sessionId.value) return
+  const tags = sessionTagsInput.value.split(/[,，]/).map(t => t.trim()).filter(Boolean)
+  const r: any = await patchCurrentOrItem(sessionId.value, { domain: sessionDomain.value || null, tags })
+  if (r?.success) ui.toast('会话标记已保存')
+}
+
+// ---- 批次 B：会话导出 / 蒸馏入库 ----
+const exportOpen = ref(false)
+const exportBusy = ref(false)
+const exportRefined = ref(false)
+const exportMarkdown = ref('')
+const exportDir = ref('')
+const exportSessionId = ref('')
+const exportSessionTitle = ref('')
+const exportRefineNote = ref('')
+
+/** 打开弹层：拉预览（纯导出文本起步），目录留空 = 后端按设置解析 */
+async function openExport(s: SessionItem) {
+  exportSessionId.value = s.sessionId
+  exportSessionTitle.value = s.title || s.preview || '未命名会话'
+  exportMarkdown.value = ''
+  exportDir.value = ''
+  exportRefined.value = false
+  exportRefineNote.value = ''
+  exportOpen.value = true
+  await regenPreview()
+}
+
+async function regenPreview() {
+  exportBusy.value = true
+  exportRefineNote.value = ''
+  try {
+    const r: any = await api.chat.exportPreview(exportSessionId.value, exportRefined.value, exportDir.value.trim())
+    if (r?.success) {
+      exportMarkdown.value = r.markdown
+      if (!exportDir.value.trim()) exportDir.value = r.dir || ''
+      if (exportRefined.value && !r.refined) exportRefineNote.value = 'AI 提炼失败，已回退对话体导出'
+    } else {
+      ui.toast(r?.message || '预览生成失败')
+      exportOpen.value = false
+    }
+  } catch (e: any) {
+    ui.toast('预览生成失败：' + String(e?.message || e))
+    exportOpen.value = false
+  }
+  exportBusy.value = false
+}
+
+async function doExportFile() {
+  exportBusy.value = true
+  try {
+    const r: any = await api.chat.exportSave(exportSessionId.value, { markdown: exportMarkdown.value, dir: exportDir.value.trim() || undefined })
+    if (r?.success) { ui.toast('已导出：' + r.path); exportOpen.value = false }
+    else ui.toast(r?.message || '导出失败')
+  } catch (e: any) { ui.toast('导出失败：' + String(e?.message || e)) }
+  exportBusy.value = false
+}
+
+async function doDistill() {
+  exportBusy.value = true
+  try {
+    const r: any = await api.chat.distill(exportSessionId.value, { markdown: exportMarkdown.value, dir: exportDir.value.trim() || undefined })
+    if (r?.success) {
+      ui.toast(r.match === 'already' ? '该文件已入库过（幂等跳过）' : '已入库为词条，立即可被检索命中')
+      exportOpen.value = false
+    } else {
+      ui.toast(r?.message || '蒸馏入库失败')
+    }
+  } catch (e: any) { ui.toast('蒸馏入库失败：' + String(e?.message || e)) }
+  exportBusy.value = false
 }
 
 async function loadDomains() {
@@ -180,9 +400,10 @@ function mapMessages(messages: Array<{ role: string, content: string, refs?: Ref
   })
 }
 
-async function openSession(s: { sessionId: string }) {
+async function openSession(s: SessionItem) {
   if (sending.value) return
   sessionId.value = s.sessionId
+  syncMarkerEditors(s)
   try {
     const r = await api.chat.sessionDetail(s.sessionId)
     msgs.value = mapMessages(r.messages || [])
@@ -308,17 +529,43 @@ onMounted(() => {
 
 /* 左栏会话列表 */
 .chat-side { display: flex; flex-direction: column; max-height: calc(100vh - 150px); }
+.chat-side-tools { display: flex; gap: 6px; padding: 8px 8px 0; }
+.chat-search { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }
+.chat-side-tools .chip.on { border-color: var(--ink); background: var(--bg-2); }
 .chat-sessions { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
-.chat-sitem { display: flex; flex-direction: column; gap: 3px; text-align: left; padding: 8px 10px; border: 1px solid var(--border); background: var(--card); border-radius: var(--r); cursor: pointer; transition: border-color .15s, background .15s; }
+.chat-sitem { position: relative; display: flex; flex-direction: column; gap: 3px; border: 1px solid var(--border); background: var(--card); border-radius: var(--r); transition: border-color .15s, background .15s; }
 .chat-sitem:hover { border-color: var(--ink); }
 .chat-sitem.on { border-color: var(--ink); background: var(--bg-2); }
+.chat-smain { display: flex; flex-direction: column; gap: 3px; text-align: left; padding: 8px 10px; background: none; border: none; cursor: pointer; color: inherit; font: inherit; }
 .chat-sprev { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-smeta { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.chat-schip { font-size: 10.5px; line-height: 1; padding: 2px 5px; border: 1px solid var(--border); border-radius: var(--r); color: var(--text-2); background: var(--bg-2); max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-schip.tag { border-style: dashed; }
+.chat-sacts { position: absolute; top: 4px; right: 4px; display: none; gap: 3px; }
+.chat-sitem:hover .chat-sacts, .chat-sitem:focus-within .chat-sacts { display: flex; }
+.chat-sact { font-size: 10.5px; line-height: 1; padding: 3px 5px; border: 1px solid var(--border); background: var(--card); color: var(--text-2); border-radius: var(--r); cursor: pointer; }
+.chat-sact:hover { border-color: var(--ink); color: var(--ink); }
+.chat-sact.danger:hover { border-color: var(--fail); color: var(--fail); }
+.chat-rename { margin: 6px 8px 0; font-size: 12.5px; padding: 5px 8px; }
 .chat-side-empty { padding: 18px 10px; text-align: center; }
 
 /* 主区 */
 .chat-main { display: flex; flex-direction: column; height: calc(100vh - 150px); min-height: 420px; }
 .chat-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .chat-domain { font-size: 12.5px; padding: 4px 8px; border: 1px solid var(--border); background: var(--card); color: var(--ink); border-radius: var(--r); max-width: 180px; }
+/* 会话标记编辑区（批次 A）：竖线分隔 + 标签输入 */
+.chat-mark-sep { width: 1px; height: 16px; background: var(--border); }
+.chat-tags { width: 150px; font-size: 12.5px; padding: 4px 8px; }
+
+/* 导出/蒸馏弹层（批次 B） */
+.chat-export-mask { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; z-index: 60; }
+.chat-export { display: flex; flex-direction: column; gap: 8px; width: min(760px, 92vw); height: min(80vh, 640px); padding: 14px; background: var(--card); border: 1px solid var(--border); border-radius: var(--r); }
+.chat-export-head { display: flex; align-items: center; justify-content: space-between; font-size: 13.5px; }
+.chat-export-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-export-md { flex: 1; min-height: 0; resize: none; font-family: var(--mono, monospace); font-size: 12px; line-height: 1.6; padding: 10px; border: 1px solid var(--border); background: var(--bg-2); color: var(--ink); border-radius: var(--r); }
+.chat-export-md:focus { outline: none; border-color: var(--ink); }
+.chat-export-foot { display: flex; gap: 8px; }
+.chat-export-dir { flex: 1; font-size: 12.5px; padding: 6px 9px; }
 
 .chat-msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .chat-row { display: flex; }

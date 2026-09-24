@@ -55,9 +55,24 @@ CREATE TABLE IF NOT EXISTS chat_delete_logs (
 5. DELETE：消息与元数据清除、日志落库、GET /deletions 可查、会话从列表消失
 6. 既有用例全绿（含只读红线指纹）
 
-## 批次 B 预告（另出设计）
+## 批次 B（已交付）：会话 → 知识复利
 
-会话→知识复利，两种形态：
-- 导出：会话转 markdown 写入已启用扫描根（过 withinScanRoots）
-- 蒸馏入库：LLM 把会话沉淀成词条（标题/摘要/正文）→ 预览确认 → 复用 `POST /api/wiki/import` 入库，
-  进入门禁→蒸馏→推荐全管道
+两种形态均经「预览确认后落盘」交互（Chat 会话项 hover「出」弹层，markdown 可编辑）：
+
+- **纯导出**：`GET /sessions/:id/export/preview`（组装 markdown + 解析目标目录，不写盘）
+  → `POST /sessions/:id/export`（落盘，不入库）
+- **蒸馏入库**：预览勾选「AI 提炼」（`refined=1`，distillLlmFn 把会话沉淀为词条 markdown，
+  失败回退对话体导出 fail-soft）→ 确认后 `POST /sessions/:id/distill`（落盘 +
+  复用 wiki import 单文件挂载内核 `importMarkdownFile`：解析行内元数据 → 比对库内文件 →
+  wiki_entries_meta + FTS 同步；同路径重复入库幂等 already）
+
+关键设计：
+
+- 导出目录：config 键 `chat.exportDir`（设置→检索页配置）。空 = 首个启用扫描根下 `conversations/`；
+  任何入参/配置目录写盘前过 `withinScanRoots`（红线 1 fail-closed，越界 400）
+- 蒸馏产物遵循 wiki import 的行内解析约定（`# 标题` + `**来源**/**标签** \`#tag\`` + 末行 最后更新），
+  首段正文即词条摘要；入库后立即可被混合检索 / MCP search_knowledge 命中（FTS 同步写入）
+- 只读红线口径更新：wiki_entries_meta 的唯一合法新增入口 = 蒸馏入库（source_type='imported'），
+  files 表照旧分毫不动（测试钉死）
+- 实现注记：wiki.ts 的 /import 单词条挂载体抽为 `mountExtEntry`（与 importMarkdownFile 共用，防漂移）；
+  esbuild 词法层陷阱两枚已钉死——模板串内嵌裸反引号、块注释内容含 `*/` 序列（`**xx**/**yy**` 即中招）

@@ -120,6 +120,7 @@ await (await db0.prepare('INSERT INTO tags (name, level, domain_id) VALUES (?, ?
 await (await db0.prepare("INSERT INTO read_history (file_id, path, source) VALUES (?, '/chat/f1.md', 'reader')")).run([fHit])
 
 const FINGERPRINT_BEFORE = await readonlyFingerprint()
+// 批次 B 红线口径（见文件尾红线用例）：蒸馏入库合法新增 wiki_entries_meta（imported），files 仍须分毫不动
 
 // ---- fake LLM：默认返回长文本信封（多 delta）；用例内按需覆写 ----
 const ANSWER_TEXT = '这是库内锚定的回答。'.repeat(8) // >40 字符 → 至少 2 个 delta 块
@@ -313,8 +314,226 @@ test('存量回填边界：超界 [n] 忽略、无标记落 []、[复盘] 前缀
   assert.equal(recap.refs, null, '复盘行保持 NULL（语义即无引用，不写缓存）')
 })
 
-test('对话只读红线：全程跑完后 files / wiki_entries_meta 行数与内容指纹不变', async () => {
-  assert.equal(await readonlyFingerprint(), FINGERPRINT_BEFORE, '对话不得写库内知识表（只允许 chat_messages/llm_call_logs）')
+// ---- 批次 A：会话管理（元数据基座 / 归档 / 标记 / 搜索 / 删除留痕） ----
+
+test('会话元数据：POST 自动落 chat_sessions（title=首问截断、domain 标记）；续问不覆盖', async () => {
+  const out = await sseCall({ message: '元数据首问自动标题甲乙丙', domain: 'chat-域甲' })
+  const done = out.events[out.events.length - 1]
+  const row = await (await db0.prepare('SELECT title, domain FROM chat_sessions WHERE session_id = ?')).get([done.sessionId]) as any
+  assert.ok(row, '问答必须自动落元数据行')
+  assert.equal(row.title, '元数据首问自动标题甲乙丙')
+  assert.equal(row.domain, 'chat-域甲')
+  // 续问不带 domain：不得抹掉已有标记，也不得改 title
+  await sseCall({ message: '续问不覆盖元数据', sessionId: done.sessionId })
+  const row2 = await (await db0.prepare('SELECT title, domain FROM chat_sessions WHERE session_id = ?')).get([done.sessionId]) as any
+  assert.equal(row2.title, row.title)
+  assert.equal(row2.domain, 'chat-域甲')
+})
+
+test('PATCH /sessions/:id：title/domain/tags 更新生效；越界与空更新 400；老会话补建元数据行', async () => {
+  // 用已有真实会话（正常问答落库的）验证老会话首次标记自动补建
+  const list = await (await db0.prepare('SELECT session_id FROM chat_messages GROUP BY session_id LIMIT 1')).get() as any
+  const sid = String(list.session_id)
+  const patch = handlerOf('patch', '/sessions/:id')
+  const sink: any = {}
+  await patch(reqOf({ title: '改名后的标题', domain: 'chat-域乙', tags: ['标签甲', '标签甲', '标签乙'] }, { id: sid }), mockJsonRes(sink))
+  assert.equal(sink.json.success, true, 'PATCH 必须成功（含老会话补建）')
+  assert.deepEqual(sink.json.session.tags, ['标签甲', '标签乙'], 'tags 去重')
+  const row = await (await db0.prepare('SELECT title, domain, tags FROM chat_sessions WHERE session_id = ?')).get([sid]) as any
+  assert.equal(row.title, '改名后的标题')
+  assert.equal(row.domain, 'chat-域乙')
+
+  const bad1: any = {}; await patch(reqOf({ title: '' }, { id: sid }), mockJsonRes(bad1))
+  assert.equal(bad1.status, 400, '空 title 必须 400')
+  const bad2: any = {}; await patch(reqOf({ tags: Array.from({ length: 21 }, (_, i) => '标签' + i) }, { id: sid }), mockJsonRes(bad2))
+  assert.equal(bad2.status, 400, '超 20 项 tags 必须 400')
+  const bad3: any = {}; await patch(reqOf({}, { id: sid }), mockJsonRes(bad3))
+  assert.equal(bad3.status, 400, '无可更新字段必须 400')
+})
+
+test('归档：archived=1 后默认列表不含、归档视图可见', async () => {
+  const list = await (await db0.prepare('SELECT session_id FROM chat_messages GROUP BY session_id LIMIT 1')).get() as any
+  const sid = String(list.session_id)
+  await handlerOf('patch', '/sessions/:id')(reqOf({ archived: true }, { id: sid }), mockJsonRes({}))
+  const active: any = {}; await handlerOf('get', '/sessions')(reqOf(undefined), mockJsonRes(active))
+  assert.ok(!active.json.sessions.some((s: any) => s.sessionId === sid), '归档会话不得出现在默认列表')
+  const archived: any = {}; await handlerOf('get', '/sessions')(reqOf(undefined, {}, { archived: '1' }), mockJsonRes(archived))
+  const hit = archived.json.sessions.find((s: any) => s.sessionId === sid)
+  assert.ok(hit && hit.archived === true, '归档视图必须含归档会话')
+  // 还原为活跃，避免影响后续用例
+  await handlerOf('patch', '/sessions/:id')(reqOf({ archived: false }, { id: sid }), mockJsonRes({}))
+})
+
+test('搜索 q：分别命中 title / 消息正文 / tags（唯一 token 不误伤）', async () => {
+  const db = await getDb()
+  const sid = 'search-target'
+  await (await db.prepare('INSERT OR IGNORE INTO chat_sessions (session_id, title, tags) VALUES (?, ?, ?)')).run([sid, '搜索唯一标题QZX', JSON.stringify(['磁悬浮标签QZX'])])
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'user', '正文唯一词HNZC'])
+  const get = (q: string) => new Promise<any>(async resolve => {
+    const sink: any = {}
+    await handlerOf('get', '/sessions')(reqOf(undefined, {}, { q }), mockJsonRes(sink))
+    resolve(sink.json.sessions)
+  })
+  assert.ok((await get('搜索唯一标题QZX')).some((s: any) => s.sessionId === sid), 'q 命中 title')
+  assert.ok((await get('正文唯一词HNZC')).some((s: any) => s.sessionId === sid), 'q 命中消息正文')
+  assert.ok((await get('磁悬浮标签QZX')).some((s: any) => s.sessionId === sid), 'q 命中 tags')
+})
+
+test('删除会话：消息与元数据清除、删除日志落留痕、/deletions 可查、列表消失', async () => {
+  const db = await getDb()
+  const sid = 'delete-target'
+  await (await db.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', '待删首问KMLO')")).run([sid])
+  await (await db.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', '待删回答')")).run([sid])
+  await (await db.prepare('INSERT OR IGNORE INTO chat_sessions (session_id, title) VALUES (?, ?)')).run([sid, '待删会话'])
+
+  const delRes: any = {}
+  await handlerOf('delete', '/sessions/:id')(reqOf(undefined, { id: sid }), mockJsonRes(delRes))
+  assert.equal(delRes.json.success, true)
+  assert.equal(delRes.json.deletedMessages, 2, '须报告删除的消息数')
+
+  const msgLeft = await (await db.prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ?')).get([sid]) as any
+  const metaLeft = await (await db.prepare('SELECT COUNT(*) AS n FROM chat_sessions WHERE session_id = ?')).get([sid]) as any
+  assert.equal(Number(msgLeft.n) + Number(metaLeft.n), 0, '消息与元数据必须清干净')
+
+  const log = await (await db.prepare('SELECT preview, msg_count FROM chat_delete_logs WHERE session_id = ? ORDER BY id DESC LIMIT 1')).get([sid]) as any
+  assert.ok(log && log.msg_count === 2 && String(log.preview).includes('KMLO'), '删除日志必须留 preview + msg_count')
+
+  const dels: any = {}
+  await handlerOf('get', '/deletions')(reqOf(undefined), mockJsonRes(dels))
+  assert.equal(dels.json.success, true)
+  assert.ok(dels.json.deletions.some((d: any) => d.sessionId === sid && d.msgCount === 2), '/deletions 必须可查到该留痕')
+
+  const active: any = {}; await handlerOf('get', '/sessions')(reqOf(undefined), mockJsonRes(active))
+  assert.ok(!active.json.sessions.some((s: any) => s.sessionId === sid), '已删会话不得出现在列表')
+})
+
+// ---- 批次 B：会话导出 / 蒸馏入库（复利） ----
+
+// 导出目录 fail-closed 依赖已启用扫描根：种一个测试扫描根（DATA_TMP/scan，库内文件路径同域不越界）
+const SCAN_ROOT = path.join(DATA_TMP, 'scan')
+await (await db0.prepare('INSERT OR IGNORE INTO scan_roots (path, agent, enabled) VALUES (?, ?, 1)')).run([SCAN_ROOT, 'test'])
+
+// 批次 B 前 wiki 基线（注册期求值 = 蒸馏未发生）：红线用例钉「wiki 新增必须全部来自蒸馏入库（imported）」
+const WIKI_ROWS_BEFORE_B = await countOf('SELECT COUNT(*) AS n FROM wiki_entries_meta')
+const WIKI_IMPORTED_BEFORE_B = await countOf(`SELECT COUNT(*) AS n FROM wiki_entries_meta WHERE source_type = 'imported'`)
+const nonImportCharsRow = await (await db0.prepare(`SELECT COALESCE(SUM(length(COALESCE(title,'')) + length(COALESCE(summary,''))), 0) AS c FROM wiki_entries_meta WHERE source_type != 'imported'`)).get() as any
+const WIKI_NON_IMPORT_CHARS_BEFORE_B = Number(nonImportCharsRow.c)
+
+test('导出预览：markdown 组装（标题/来源/对话体）+ 默认目录解析到扫描根 conversations/，不写盘', async () => {
+  const out = await sseCall({ message: '导出预览用会话QWERT' })
+  const done = out.events[out.events.length - 1]
+  const layer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.get && l.route.path === '/sessions/:id/export/preview')
+  assert.ok(layer, 'preview 路由必须存在')
+  const sink: any = {}
+  await layer.route.stack[0].handle(reqOf(undefined, { id: done.sessionId }, {}), mockJsonRes(sink))
+  assert.equal(sink.json.success, true, sink.json.message)
+  assert.ok(sink.json.markdown.includes('# 导出预览用会话QWERT'), '标题 = 首问')
+  assert.ok(sink.json.markdown.includes(`**来源**: chat/${done.sessionId}`), '来源行遵循 import 解析约定')
+  assert.ok(sink.json.markdown.includes(ANSWER_TEXT), '对话体含 assistant 消息')
+  assert.ok(sink.json.dir.startsWith(SCAN_ROOT + path.sep) && sink.json.dir.endsWith('conversations'), `默认目录 = 扫描根下 conversations（实际 ${sink.json.dir}）`)
+})
+
+test('纯导出落盘：写文件成功且内容一致；越界目录 fail-closed 拒绝', async () => {
+  const db = await getDb()
+  const md = '# 导出落盘测试POIUY\n\n正文内容'
+  const layer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.post && l.route.path === '/sessions/:id/export')
+  const sink: any = {}
+  await layer.route.stack[0].handle(reqOf({ markdown: md }, { id: 'any-session' }), mockJsonRes(sink))
+  assert.equal(sink.json.success, true, sink.json.message)
+  const onDisk = await fs.readFile(sink.json.path, 'utf8')
+  assert.equal(onDisk, md, '落盘内容与提交 markdown 一致')
+  assert.ok(sink.json.path.startsWith(SCAN_ROOT + path.sep), '落盘路径必须在扫描根内')
+
+  const bad: any = {}
+  await layer.route.stack[0].handle(reqOf({ markdown: md, dir: DATA_TMP }, { id: 'any-session' }), mockJsonRes(bad))
+  assert.equal(bad.status, 400, '越界目录必须 400（红线 1 fail-closed）')
+  assert.ok(String(bad.json.message).includes('扫描根'))
+})
+
+test('蒸馏入库：落盘 + wiki_entries_meta 挂载 + FTS 同步；重复入库幂等 already；越界拒绝', async () => {
+  const db = await getDb()
+  const md = [
+    '# 蒸馏入库词条ZXCVB',
+    '',
+    '**来源**: chat/distill-test',
+    '**置信度**: 会话蒸馏',
+    '**标签**: `#蒸馏标签MNBV`',
+    '',
+    '这是一篇由会话蒸馏生成的知识词条，用于验证挂载内核。',
+    '',
+    '## 要点',
+    '- 知识点甲',
+    '最后更新：2026-09-24',
+  ].join('\n')
+  const layer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.post && l.route.path === '/sessions/:id/distill')
+  const sink: any = {}
+  await layer.route.stack[0].handle(reqOf({ markdown: md }, { id: 'distill-session' }), mockJsonRes(sink))
+  assert.equal(sink.json.success, true, sink.json.message)
+  assert.equal(sink.json.match, 'standalone')
+  assert.ok(sink.json.entryId > 0, '须返回 wiki_entries_meta.id')
+  const row = await (await db.prepare('SELECT title, summary, source_type FROM wiki_entries_meta WHERE id = ?')).get([sink.json.entryId]) as any
+  assert.equal(row.title, '蒸馏入库词条ZXCVB')
+  assert.equal(row.source_type, 'imported')
+  assert.ok(String(row.summary).includes('用于验证挂载内核'), '摘要 = 元数据后首段正文（import 解析口径）')
+  // FTS 同步：词条标题可被 FTS 命中
+  const { ftsSearchWiki } = await import('../src/search/ftsIndex.js')
+  const ftsHits = await ftsSearchWiki(db, '蒸馏入库词条ZXCVB', 10)
+  assert.ok(ftsHits.includes(sink.json.entryId), '蒸馏词条必须同步进 FTS（检索立即可命中）')
+
+  // 幂等：同路径重复入库 → already 不重复建行
+  const again: any = {}
+  await layer.route.stack[0].handle(reqOf({ markdown: md }, { id: 'distill-session' }), mockJsonRes(again))
+  assert.equal(again.json.success, true)
+  assert.equal(again.json.match, 'already', '同路径重复入库必须幂等跳过')
+  const cnt = await (await db.prepare('SELECT COUNT(*) AS n FROM wiki_entries_meta WHERE title = ?')).get(['蒸馏入库词条ZXCVB']) as any
+  assert.equal(Number(cnt.n), 1, '不得产生重复词条行')
+
+  const bad: any = {}
+  await layer.route.stack[0].handle(reqOf({ markdown: md, dir: DATA_TMP }, { id: 'distill-session' }), mockJsonRes(bad))
+  assert.equal(bad.status, 400, '蒸馏落盘越界同样 fail-closed')
+})
+
+test('AI 蒸馏预览：distillLlmFn 注入 fake 生成结构化词条；失败回退纯导出（fail-soft）', async () => {
+  const { setDistillLlmFn } = await import('../src/routes/chat.js')
+  const out = await sseCall({ message: '蒸馏预览用会话LKJHGs' })
+  const done = out.events[out.events.length - 1]
+  const layer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.get && l.route.path === '/sessions/:id/export/preview')
+  let captured = ''
+  setDistillLlmFn(async (_p: string, _m: string, prompt: string) => {
+    captured = prompt
+    return { text: JSON.stringify({ answer: '# 蒸馏出的知识点FGHJK\n\n**来源**: x\n\n蒸馏正文摘要。\n\n最后更新：2026-09-24' }), usage: { input: 5, output: 5 } }
+  })
+  try {
+    const sink: any = {}
+    await layer.route.stack[0].handle(reqOf(undefined, { id: done.sessionId }, { refined: '1' }), mockJsonRes(sink))
+    assert.equal(sink.json.success, true, sink.json.message)
+    assert.equal(sink.json.refined, true, '蒸馏成功须标记 refined=true')
+    assert.ok(sink.json.markdown.startsWith('# 蒸馏出的知识点FGHJK'), '预览 = AI 蒸馏产物')
+    assert.ok(captured.includes('蒸馏预览用会话LKJHGs'), '会话记录须进入蒸馏 prompt')
+    assert.ok(captured.includes('**标签**'), 'prompt 约定 import 解析口径的元数据格式')
+  } finally {
+    // 还原为会抛错的默认链路外 fake（不触网）：后续用例不用 refined
+    setDistillLlmFn(async () => { throw new Error('distill disabled in tests') })
+  }
+  // 失败回退：refined=1 但 LLM 挂 → 回退纯导出，refined=false
+  const sink2: any = {}
+  await layer.route.stack[0].handle(reqOf(undefined, { id: done.sessionId }, { refined: '1' }), mockJsonRes(sink2))
+  assert.equal(sink2.json.success, true, 'LLM 失败必须回退纯导出（fail-soft）')
+  assert.equal(sink2.json.refined, false)
+  assert.ok(sink2.json.markdown.includes('# 蒸馏预览用会话LKJHGs'), '回退产物 = 对话体')
+})
+
+test('对话只读红线：files 分毫不动；wiki_entries_meta 仅蒸馏入库设计内新增（imported），既有行内容分毫不动', async () => {
+  const db = await getDb()
+  assert.equal((await readonlyFingerprint()).split(';')[0], FINGERPRINT_BEFORE.split(';')[0], 'files 表任何 chat 路径都不得写（行数 + 内容指纹）')
+  const wikiNow = await countOf('SELECT COUNT(*) AS n FROM wiki_entries_meta')
+  const importedNow = await countOf(`SELECT COUNT(*) AS n FROM wiki_entries_meta WHERE source_type = 'imported'`)
+  assert.equal(
+    wikiNow - WIKI_ROWS_BEFORE_B, importedNow - WIKI_IMPORTED_BEFORE_B,
+    'wiki 新增行必须全部来自蒸馏入库（source_type=imported，唯一合法写入口）'
+  )
+  const r = await (await db.prepare(`SELECT COALESCE(SUM(length(COALESCE(title,'')) + length(COALESCE(summary,''))), 0) AS c FROM wiki_entries_meta WHERE source_type != 'imported'`)).get() as any
+  assert.equal(Number(r.c), WIKI_NON_IMPORT_CHARS_BEFORE_B, '非导入行（种子/蒸馏词条）内容分毫不动')
 })
 
 test('extractAnswer：信封解包 + 围栏剥离 + 非 JSON 原文兜底（格式漂移不丢回答）', async () => {

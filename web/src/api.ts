@@ -186,8 +186,14 @@ export const api = {
   },
 
   chat: {
-    sessions: () => getJSON<{ success: boolean; sessions: Array<{ sessionId: string; preview: string; msgCount: number; lastAt: string }> }>(`${base}/chat/sessions`),
+    sessions: (qs = '') => getJSON<{ success: boolean; sessions: Array<{ sessionId: string; title: string; domain: string | null; tags: string[]; archived: boolean; preview: string; msgCount: number; lastAt: string }> }>(`${base}/chat/sessions${qs}`),
     sessionDetail: (id: string) => getJSON<{ success: boolean; messages: Array<{ id: number; role: string; content: string; createdAt: string; refs?: Array<{ id: number; title: string }> }> }>(`${base}/chat/sessions/${encodeURIComponent(id)}`),
+    patchSession: (id: string, payload: { title?: string; domain?: string | null; tags?: string[]; archived?: boolean }) => patch(`${base}/chat/sessions/${encodeURIComponent(id)}`, payload),
+    deleteSession: (id: string) => del(`${base}/chat/sessions/${encodeURIComponent(id)}`),
+    deletions: () => getJSON<{ success: boolean; deletions: Array<{ sessionId: string; preview: string; msgCount: number; deletedAt: string }> }>(`${base}/chat/deletions`),
+    exportPreview: (id: string, refined = false, dir = '') => getJSON<{ success: boolean; markdown: string; dir: string; fileName: string; refined: boolean; message?: string }>(`${base}/chat/sessions/${encodeURIComponent(id)}/export/preview?${new URLSearchParams({ ...(refined ? { refined: '1' } : {}), ...(dir ? { dir } : {}) })}`),
+    exportSave: (id: string, payload: { markdown: string; dir?: string }) => post(`${base}/chat/sessions/${encodeURIComponent(id)}/export`, payload),
+    distill: (id: string, payload: { markdown: string; dir?: string }) => post(`${base}/chat/sessions/${encodeURIComponent(id)}/distill`, payload),
     recap: (sessionId: string) => post(`${base}/chat/recap`, { sessionId })
   },
 
