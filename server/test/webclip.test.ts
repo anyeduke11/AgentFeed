@@ -14,7 +14,7 @@ const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-
 process.env.AGENTFEED_DATA_DIR = DATA_TMP
 
 const { getDb, closeDb } = await import('../src/db.js')
-const { convertCore, retryRecord, WebclipError } = await import('../src/routes/webclip.js')
+const { convertCore, retryRecord, getLimits, WebclipError } = await import('../src/routes/webclip.js')
 
 after(async () => {
   try { await closeDb() } catch { /* 临时库句柄未全部 finalize，进程退出自然释放 */ }
@@ -183,4 +183,21 @@ test('webclip/retry: retryRecord 把 failed 记录更新为 success（原行复�
   assert.equal(r.success, true)
   const row = await (await db.prepare('SELECT status, md_file_id, error FROM webclip_records WHERE id = ?')).get(id) as any
   assert.equal(row.status, 'success'); assert.ok(row.md_file_id); assert.equal(row.error, null)
+})
+
+test('webclip/limits: 默认限额 seed + getLimits 合并', async () => {
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT value, type FROM config WHERE key = 'webclip.limits'")).get() as any
+  assert.ok(row, 'webclip.limits 未 seed')
+  assert.equal(row.type, 'json')
+  const parsed = JSON.parse(row.value)
+  assert.equal(parsed.imgMaxCount, 30)
+  const limits = await getLimits()
+  assert.equal(limits.deadlineMs, 45000)
+})
+
+test('webclip/convert: htmlToMarkdown 尊重图片上限参数', () => {
+  const many = Array.from({ length: 40 }, (_, i) => `<img src="https://a.com/${i}.png" alt="i${i}">`).join('')
+  const { images } = htmlToMarkdown(`<html><body><article>${many}</article></body></html>`, 'https://a.com/', 5)
+  assert.equal(images.length, 5)
 })
