@@ -69,7 +69,7 @@ export function supportsVision(modelId: string): boolean {
   return /ocr|vision|image|(^|[-_.])vl($|[-_.\d])/i.test(modelId)
 }
 
-export async function callLlm(providerName: string, modelId: string, prompt: string, apiKey?: string, images?: LlmImage[]): Promise<{ text: string; usage?: { input?: number; output?: number } }> {
+export async function callLlm(providerName: string, modelId: string, prompt: string, apiKey?: string, images?: LlmImage[]): Promise<{ text: string; usage?: { input?: number; output?: number }; stopReason?: string }> {
   const db = await getDb()
   const row = await (await db.prepare("SELECT value FROM config WHERE key = 'ai.providers'")).get() as any
   const providers: LlmProvider[] = row?.value ? JSON.parse(row.value) : []
@@ -96,8 +96,9 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
       // H1 修法④（2026-09-22 治愈验证复现）：pi-ai 不传 maxTokens 时请求体不带 max_tokens，
       // SenseNova 网关按自家默认上限（实测 ~250 tokens）硬掐输出——形态 A「无闭合 } 截断」的
       // 物理根源即此。蒸馏产物（title+summary+points+entities+relations）按输出预算上限
-      // 约 1500 tokens，给 4096 余量防掐断。
-      maxTokens: 4096,
+      // 约 1500 tokens，2048 已足够且给 8K 窗口输入侧多让 2K tokens（旧 4096 是压缩预算
+      // 超窗的共因之一）；仍显著高于网关默认 250，防掐断语义保留。
+      maxTokens: 2048,
     },
     // 网络层快速重试（0.5-2s 退避）：覆盖 408/409/5xx 瞬时错误，尊重 retry-after 响应头
     maxRetries: 4,
@@ -113,13 +114,33 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
     // 抛出真实错误（如 429 限流原文），由 friendlyLlmError 翻译后落库，便于排错
     throw new Error(String((response as any).errorMessage || 'empty_llm_response'))
   }
-  const text = response.content.map(b => (b.type === 'text' ? b.text : '')).join('')
+  // 配套修复①（2026-09-22 残留 12%）：混合推理模型（flash-lite 级）偶发全程走思考通道——
+  // reasoning_content 增量被 pi-ai 收进独立 thinking 块不进 text 块（openai-completions.js 适配器行为），
+  // 网关把 reasoning tokens 计入 usage.output，于是「output 计数正常但 text 为空」，上层误报
+  // llm_output_not_json。text 为空时回捞 thinking 文本——思考链内常含完整 JSON，走同一条提取路径。
+  const extractText = (r: typeof response): string => {
+    let t = r.content.map(b => (b.type === 'text' ? b.text : '')).join('')
+    if (!t.trim()) t = r.content.map(b => (b.type === 'thinking' ? b.thinking : '')).join('')
+    return t
+  }
+  let text = extractText(response)
+  // 配套修复②：空响应非确定性（重放同文件可成功）——原样重试 1 次；再空则报 empty_llm_response，
+  // 与 not_json 区分开（归因报告 §7 残留画像两类混杂即此因）
+  if (!text.trim()) {
+    response = await attempt()
+    text = extractText(response)
+  }
+  if (!text.trim()) {
+    throw new Error('empty_llm_response')
+  }
   return {
     text,
     usage: {
       input: (response.usage as any)?.input ?? undefined,
       output: (response.usage as any)?.output ?? undefined,
     },
+    // 配套修复③：落库网关 finish_reason 原文（length/stop/...），供后续失败分桶区分截断/拒答形态
+    stopReason: String((response as any).rawStopReason || response.stopReason || ''),
   }
 }
 
@@ -197,32 +218,11 @@ llmQueue.setExecutor(async (job) => {
 })
 
 /**
- * embed 独立队列：向量化（本地 Ollama）与蒸馏（远程 LLM）并行互不占位。
- * 并发 1 串行打本地模型，避免多篇同时向量化自相争抢；蒸馏后的自动向量化与「补向量」都走这里。
+ * 方案 B（2026-09-24 向量冗余收敛·彻底）：file 级向量链路（embedQueue / enqueueEmbed /
+ * sweepEmbedBacklog / processEmbed）整体移除——file_embeddings 已 DROP，检索主路唯一为
+ * 词条分块向量（蒸馏自动 indexWikiChunks + wiki 面板手动补嵌 + P2 内存索引）。
+ * 历史契约见 embedState.test.ts（已随链路废止移除）。
  */
-export const embedQueue = new LlmQueue(1)
-embedQueue.setExecutor(async (job) => {
-  // 瞬时失败自动重试（Ollama 冷启动 / 连接抖动）：最多 3 次，间隔 5s / 15s
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await processJob(job)
-      return
-    } catch (e: any) {
-      if (attempt >= 3) {
-        console.error(`embed job file ${job.fileId} failed after ${attempt} attempts:`, String(e?.message || e))
-        throw e
-      }
-      await new Promise(r => setTimeout(r, attempt === 1 ? 5000 : 15000))
-    }
-  }
-})
-
-/** 投递一个向量补齐任务（按文件去重；正在蒸馏或已排队向量化的文件跳过） */
-export function enqueueEmbed(fileId: number): boolean {
-  if (llmQueue.hasFile(fileId) || embedQueue.hasFile(fileId)) return false
-  embedQueue.enqueue({ fileId, provider: 'ollama', model: '', prompt: '', options: { type: 'embed' } })
-  return true
-}
 
 /** 内存队列水位：低于此值时从 DB 补充 pending 任务 */
 const FEED_WATERMARK = 8
@@ -251,9 +251,11 @@ export async function startLlmFeeder() {
       const provider = await getDefaultProvider()
       const model = await getDefaultModel()
       const rows = await (await db.prepare(`
-        SELECT id FROM files
-        WHERE llm_state = 'pending' AND status = 'active'
-        ORDER BY updated_at ASC LIMIT ${FEED_BATCH}
+        SELECT f.id FROM files f
+        ${CONSUMPTION_ORDER_SQL}
+        WHERE f.llm_state = 'pending' AND f.status = 'active'
+        ORDER BY (rh.last_read IS NOT NULL) DESC, rh.last_read DESC, f.updated_at ASC
+        LIMIT ${FEED_BATCH}
       `)).all() as any[]
       let fed = 0
       for (const r of rows) {
@@ -269,5 +271,13 @@ export async function startLlmFeeder() {
   await tick()
   setInterval(tick, 3000)
 }
+
+/** M3 消费反哺生产：被 read_history 记录过的文件（任何出口：阅读/检索命中）蒸馏时最优先，
+ *  按最近消费时间降序；从未消费的按 updated_at 兜底。语义是「消费过的先补」而非「零消费不补」——
+ *  生产预算有限时，已被证明有人要的知识先获得向量能力。sweeper 与手动补向量（llm.ts）保持同序。 */
+export const CONSUMPTION_ORDER_SQL = `
+  LEFT JOIN (SELECT file_id, MAX(opened_at) AS last_read FROM read_history WHERE file_id IS NOT NULL GROUP BY file_id) rh ON rh.file_id = f.id`
+
+export const CONSUMPTION_PRIORITY_ORDER = `(rh.last_read IS NOT NULL) DESC, rh.last_read DESC, f.updated_at DESC`
 
 export { llmQueue }

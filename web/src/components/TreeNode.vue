@@ -33,7 +33,7 @@ function save() {
 <style scoped>
 .node { margin: 6px 0; }
 .row { display: flex; align-items: center; gap: 8px; }
-.name { font-size: 13px; color: #374151; }
+.name { font-size: 13px; color: var(--ink); }
 .color { width: 80px; }
 .children { padding-left: 18px; }
 </style>

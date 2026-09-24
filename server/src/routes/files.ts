@@ -281,11 +281,14 @@ filesRouter.post('/batch-llm-tag', async (req, res) => {
 filesRouter.get('/:id/versions', async (req, res) => {
   const db = await getDb()
   const fileId = parseInt(req.params.id)
+  // old_md5 AS md5：FileDrawer 的 md5Short 读 v.md5，历史版本指纹来自版本链记录（同 path md5 迭代）
   const stmt = await db.prepare(`
-    SELECT fv.*, f2.name as related_name, f2.path as related_path, f2.file_mtime as related_mtime
+    SELECT fv.id, fv.file_id, fv.related_file_id, fv.relation_type, fv.old_md5 as md5, fv.created_at,
+           f2.name as related_name, f2.path as related_path, f2.file_mtime as related_mtime
     FROM file_versions fv
     JOIN files f2 ON fv.related_file_id = f2.id
     WHERE fv.file_id = ?
+    ORDER BY fv.created_at DESC, fv.id DESC
   `)
   const rows = await stmt.all(fileId) as any[]
   res.json(rows)

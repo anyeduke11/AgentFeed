@@ -6,7 +6,9 @@ import { getDb } from '../db.js'
 import { withinScanRoots } from './files.js'
 import { exportWiki, verifyWikiExport, WIKI_EXPORTS_DIR } from '../exportWiki.js'
 import { syncWikiFts } from '../search/ftsIndex.js'
+import { pruneOrphanFts } from '../search/ftsIndex.js'
 import { indexWikiChunks } from '../search/chunkEmbed.js'
+import { invalidateEntry } from '../search/vectorIndex.js'
 import { getEmbeddingConfig } from '../llm/embeddings.js'
 
 export const wikiRouter = Router()
@@ -163,7 +165,13 @@ wikiRouter.post('/import', async (req, res) => {
     let imported = 0, linked = 0
     for (const e of entries) {
       if (e.match === 'already') continue
-      // 幂等刷新：同路径 imported 行先删后插（重复导入会刷新摘要/标签等解析结果）
+      // 幂等刷新：同路径 imported 行先删后插（重复导入会刷新摘要/标签等解析结果）。
+      // 删 meta 会换 entry_id，旧 id 的 entry_chunks 必须同步清（P2 顺手修复：原实现留孤儿块）
+      const old = await (await db.prepare(`SELECT id FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).get([e.file]) as any
+      if (old) {
+        await (await db.prepare(`DELETE FROM entry_chunks WHERE entry_id = ?`)).run([old.id])
+        invalidateEntry(Number(old.id))
+      }
       await (await db.prepare(`DELETE FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).run([e.file])
       const distilledAt = /^\d{4}-\d{2}-\d{2}$/.test(e.updated) ? `${e.updated} 00:00:00` : new Date().toISOString()
       await (await db.prepare(
@@ -272,6 +280,16 @@ wikiRouter.get('/export', async (_req, res) => {
   try {
     const r = await exportWiki()
     res.json({ success: true, dir: r.dir, reused: r.reused, manifest: r.manifest })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+/** POST /api/wiki/fts/prune —— FTS 孤儿索引清理（entry_id 已不在主表的残留行，纯 DB 操作秒级） */
+wikiRouter.post('/fts/prune', async (_req, res) => {
+  try {
+    const pruned = await pruneOrphanFts(await getDb())
+    res.json({ success: true, pruned })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e?.message || e) })
   }

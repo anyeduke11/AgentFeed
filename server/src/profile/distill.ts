@@ -98,9 +98,18 @@ ${evLines || '（无）'}
 4. 每条断言必须给 evidence_refs（引用证据编号，至少 1 个；无证据支撑的断言不要输出）
 5. confidence ∈ [0,1]，信号越薄越低
 6. 断言必须可从统计推出，禁止臆造
+7. portrait：按以下结构整理一份个人使用画像（供跨 AI 工具协作一致性使用）——只保留持久性信息，
+   略去临时约定与一次性任务；缺失类别写「无」；全程以「用户」指代，不用第一/第二人称；
+   纯文本不加 Markdown：
+   【基本信息】称呼/别名、语言偏好、地区/时区
+   【工作背景】职位与职责、所在公司/团队、核心专业技能
+   【个人背景】家庭/人际关系、兴趣爱好、个人项目
+   【协作偏好】回复风格（长度、格式、语气）、常设规则或指令、已知的不喜欢或需要纠正之处
+   【长期记忆】跨信号观察到的稳定行为模式或重要事项
+   统计推不出的段落写「无」，禁止编造
 
 只输出 JSON（不要围栏不要解释）：
-{"role_pattern":"...","claims":[{"claim":"...","evidence_refs":["E1"],"confidence":0.8}],"domains":[{"domain":"域名","proficiency":"expert","claims":[{"claim":"...","evidence_refs":["E2"],"confidence":0.7}]}]}`
+{"role_pattern":"...","portrait":"【基本信息】...\\n【工作背景】...","claims":[{"claim":"...","evidence_refs":["E1"],"confidence":0.8}],"domains":[{"domain":"域名","proficiency":"expert","claims":[{"claim":"...","evidence_refs":["E2"],"confidence":0.7}]}]}`
 }
 
 /** 剥离可能的 ```json 围栏（LLM 常见行为），返回正文 */
@@ -110,12 +119,14 @@ function stripFence(text: string): string {
   return m ? m[1] : t
 }
 
-/** 解析 LLM 输出：编号翻译回真实指针；任何非法（坏 JSON/未知编号/空断言/置信越界）整包拒收返回 null */
-export function parseLlmProfileOutput(text: string, evidenceIndex: Map<string, string>): { role_pattern: string, claims: ProfileClaim[], domains: Map<string, ProfileClaim[]> } | null {
+/** 解析 LLM 输出：编号翻译回真实指针；任何非法（坏 JSON/未知编号/空断言/置信越界）整包拒收返回 null。
+ *  portrait（五段人读画像）可选：非 string 或空串按缺省处理，不触发整包拒收——claims 证据体系是主契约 */
+export function parseLlmProfileOutput(text: string, evidenceIndex: Map<string, string>): { role_pattern: string, portrait?: string, claims: ProfileClaim[], domains: Map<string, ProfileClaim[]> } | null {
   let obj: any
   try { obj = JSON.parse(stripFence(text)) } catch { return null }
   if (!obj || typeof obj !== 'object') return null
   if (typeof obj.role_pattern !== 'string') return null
+  const portrait = typeof obj.portrait === 'string' && obj.portrait.trim() ? obj.portrait.trim().slice(0, 4000) : undefined
   const translate = (raw: any): ProfileClaim | null => {
     if (!raw || typeof raw !== 'object') return null
     if (typeof raw.claim !== 'string' || raw.claim.trim() === '') return null
@@ -145,15 +156,17 @@ export function parseLlmProfileOutput(text: string, evidenceIndex: Map<string, s
       domains.set(d.domain, dc)
     }
   }
-  return { role_pattern: obj.role_pattern, claims, domains }
+  return { role_pattern: obj.role_pattern, portrait, claims, domains }
 }
 
-/** 合并策略：LLM 全新 active + 上版 user_added/vetoed 原样搬运（用户主权与负例留存） */
-export function mergeForCommit(prev: ProfileContent | null, fresh: { role_pattern: string, claims: ProfileClaim[] }): ProfileContent {
+/** 合并策略：LLM 全新 active + 上版 user_added/vetoed 原样搬运（用户主权与负例留存）。
+ *  portrait 每轮全量替换（新统计覆盖旧画像）；LLM 缺 portrait 时沿用上版（画像不应因一次缺失倒退为空） */
+export function mergeForCommit(prev: ProfileContent | null, fresh: { role_pattern: string, portrait?: string, claims: ProfileClaim[] }): ProfileContent {
   const carried = prev ? prev.claims.filter(c => c.status !== 'active') : []
   return {
     schema_version: '1',
     role_pattern: fresh.role_pattern || (prev?.role_pattern ?? ''),
+    portrait: fresh.portrait || prev?.portrait,
     claims: [...fresh.claims, ...carried]
   }
 }
@@ -227,8 +240,8 @@ export async function processProfileJob(job: LlmJob, opts?: ProfileDistillOption
     const parsed = parseLlmProfileOutput(text, evidenceIndex)
     if (!parsed) throw new Error('invalid_llm_output') // 坏产物拒收：整包丢弃保留旧版（PRD J1 异常流）
 
-    // global 提交（断言预算本地强制——LLM 超编不可信）
-    const globalMerged = enforceClaimBudget(mergeForCommit(prevActive?.content ?? null, { role_pattern: parsed.role_pattern, claims: parsed.claims }), 'global').content
+    // global 提交（断言预算本地强制——LLM 超编不可信）；portrait 随 fresh 传入（缺失沿用上版）
+    const globalMerged = enforceClaimBudget(mergeForCommit(prevActive?.content ?? null, { role_pattern: parsed.role_pattern, portrait: parsed.portrait, claims: parsed.claims }), 'global').content
     await commitProfile(db, 'global', null, globalMerged)
 
     // 域画像提交：每域 = LLM 域断言 + 该域上版 user_added/vetoed 搬运；未知域名丢弃
@@ -266,19 +279,25 @@ export async function processProfileJob(job: LlmJob, opts?: ProfileDistillOption
 }
 
 /**
- * 触发画像蒸馏（信号累积或手动入口调用）：开关检查 + in-flight 去重 + 入队（priority 0 不插队）。
+ * 触发画像蒸馏（信号累积或手动入口调用）：开关检查 + in-flight 去重 + 入队。
+ * - provider/model：与文件蒸馏 feeder 同源（getDefaultProvider + getDefaultModel）——
+ *   修复：曾用 providers[0]，默认服务商非列表首位时画像打到错误端点（"没用默认模型"的根因）
+ * - priority：手动入口（manual=true）= 100 插队——队列可能堆着数千重蒸馏积压，用户显式
+ *   点击的动作排队尾形同"没反应"；自动触发（信号累积）保持 0 不插队（PRD J1 不挤 triage 语义不变）
  * 返回是否成功入队。
  */
-export async function triggerProfileDistill(): Promise<boolean> {
+export async function triggerProfileDistill(manual = false): Promise<boolean> {
   const db = await getDb()
   if (distilling) return false
   if (!(await isProfileDistillEnabled(db))) return false
-  const providers = await getProviders()
-  if (providers.length === 0) return false
+  const { getDefaultProvider } = await import('../llm/llmClient.js')
+  const provider = await getDefaultProvider()
+  if (!provider) return false
   const { llmQueue } = await import('../llm/index.js')
   llmQueue.enqueue({
-    fileId: 0, provider: providers[0].name, model: '', prompt: '',
-    options: { type: 'profile' } // priority 缺省 0：与蒸馏同级不插队（PRD J1：不挤 triage）
+    fileId: 0, provider, model: '', prompt: '',
+    priority: manual ? 100 : 0,
+    options: { type: 'profile' }
   })
   return true
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url'
 import matter from 'gray-matter'
 import { getDb } from './db.js'
 import { getExtractor, extractMd, extractHtml, readHead, inferAgent, RootBinding } from './extractor.js'
-import { loadGateConfig, isExcludedPath, checkGate, checkGateSample, purgeExcludedFiles, archiveSkippedRecords, pathWhitelisted, normalizeRootPath } from './gate.js'
+import { loadGateConfig, isExcludedPath, checkGate, checkGateSample, streamCodeRatioStats, purgeExcludedFiles, archiveSkippedRecords, pathWhitelisted, normalizeRootPath } from './gate.js'
 import { computeRuleScore, RULE_SCORE_VERSION } from './ruleScore.js'
 import { extractAliasFromFile } from './extractor.js'
 
@@ -230,6 +230,18 @@ async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: 
         if (existing) await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ${existing.id}`)
         return { gated: true }
       }
+      // P1-⑤ 修复：抽样占比不可靠导致 codeRatio 对大文件整体失效——「头部散文、体内代码」
+      // 凭 64KB 抽样绕过门禁。占比只需行级围栏状态机，流式逐行扫全文件补判（O(1) 内存），
+      // 读取失败按放行处理（与 head 分支口径一致）
+      if (cfg.codeRatioEnabled) {
+        const stats = await streamCodeRatioStats(fp)
+        if (stats && stats.totalLines > 0 && stats.ratio > cfg.codeRatio) {
+          const reason = `代码占比过高（${Math.round(stats.ratio * 100)}% > ${Math.round(cfg.codeRatio * 100)}%）`
+          await upsertGateRecord(db, fp, ext, stat.size, currentMd5, reason, 'codeRatio', stats.ratio)
+          if (existing) await db.exec(`UPDATE files SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ${existing.id}`)
+          return { gated: true }
+        }
+      }
     }
   }
   // 曾经被拦截、现在合格 → 清理过滤记录
@@ -257,7 +269,17 @@ async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: 
       return { restored: true }
     }
   }
-  const sql = `INSERT INTO files (path, name, ext, title, alias, source_agent, file_mtime, content_time, size, md5, domain_id, summary, status, llm_state, rule_score, gate_sampled, updated_at) VALUES ('${fp.replace(/'/g, "''")}', '${name.replace(/'/g, "''")}', '${ext.replace(/'/g, "''")}', ${titleVal}, ${aliasVal}, ${agentVal}, '${mtime.replace(/'/g, "''")}', '${ctime.replace(/'/g, "''")}', ${stat.size}, '${currentMd5.replace(/'/g, "''")}', NULL, NULL, 'active', 'pending', ${ruleScoreSql}, ${gateSampled}, CURRENT_TIMESTAMP) ON CONFLICT(path) DO UPDATE SET name = excluded.name, ext = excluded.ext, title = excluded.title, alias = excluded.alias, source_agent = excluded.source_agent, file_mtime = excluded.file_mtime, content_time = excluded.content_time, size = excluded.size, md5 = excluded.md5, gate_sampled = excluded.gate_sampled, rule_score = COALESCE(${ruleScoreSql}, rule_score), status = 'active', updated_at = CURRENT_TIMESTAMP`
+  // 版本链：同 path 内容真变更（旧 md5 存在且 ≠ 新 md5）→ 记录 supersedes 迭代（前端抽屉版本链数据源）。
+  // self-referential（related=自身行）+ old_md5 携带历史指纹；同 file 重复出现同一旧 md5（A→B→A→B）去重跳过
+  if (existing && existing.md5 && existing.md5 !== currentMd5) {
+    await db.exec(`INSERT INTO file_versions (file_id, related_file_id, relation_type, old_md5)
+      SELECT ${existing.id}, ${existing.id}, 'supersedes', '${existing.md5.replace(/'/g, "''")}'
+      WHERE NOT EXISTS (SELECT 1 FROM file_versions WHERE file_id = ${existing.id} AND old_md5 = '${existing.md5.replace(/'/g, "''")}')`)
+  }
+  // P0 修复：内容真变更（md5 迭代）时把 done/failed 重置为 pending——否则 upsert 换了 md5 却保留旧
+  // llm_state，feeder 只喂 pending，文件永远不重蒸馏，词条/FTS/向量静默陈旧（上游变下游不知道的唯一断点）。
+  // running 不动（正在蒸馏的任务由本次扫描结果自然覆盖）；墓碑复活路径（md5 相同）不会走到本分支
+  const sql = `INSERT INTO files (path, name, ext, title, alias, source_agent, file_mtime, content_time, size, md5, domain_id, summary, status, llm_state, rule_score, gate_sampled, updated_at) VALUES ('${fp.replace(/'/g, "''")}', '${name.replace(/'/g, "''")}', '${ext.replace(/'/g, "''")}', ${titleVal}, ${aliasVal}, ${agentVal}, '${mtime.replace(/'/g, "''")}', '${ctime.replace(/'/g, "''")}', ${stat.size}, '${currentMd5.replace(/'/g, "''")}', NULL, NULL, 'active', 'pending', ${ruleScoreSql}, ${gateSampled}, CURRENT_TIMESTAMP) ON CONFLICT(path) DO UPDATE SET name = excluded.name, ext = excluded.ext, title = excluded.title, alias = excluded.alias, source_agent = excluded.source_agent, file_mtime = excluded.file_mtime, content_time = excluded.content_time, size = excluded.size, md5 = excluded.md5, gate_sampled = excluded.gate_sampled, rule_score = COALESCE(${ruleScoreSql}, rule_score), llm_state = CASE WHEN files.md5 != excluded.md5 AND files.llm_state IN ('done', 'failed') THEN 'pending' ELSE files.llm_state END, status = 'active', updated_at = CURRENT_TIMESTAMP`
   await db.exec(sql)
   return { added: !existing, updated: !!existing }
 }

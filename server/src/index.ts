@@ -4,6 +4,8 @@ import cors from 'cors'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { getDb, checkpointWal } from './db.js'
+import { migrateVectorsToBlob } from './llm/vectorBlobMigrate.js'
+import { ensureLoaded, indexCacheStats } from './search/vectorIndex.js'
 import { filesRouter } from './routes/files.js'
 import { domainsRouter } from './routes/domains.js'
 import { tagsRouter } from './routes/tags.js'
@@ -21,6 +23,7 @@ import { reportsRouter } from './routes/reports.js'
 import { profileRouter } from './routes/profile.js'
 import { chatRouter } from './routes/chat.js'
 import { rsiRouter } from './routes/rsi.js'
+import { searchRouter } from './routes/search.js'
 import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
@@ -43,6 +46,7 @@ app.use(express.json({ limit: '10mb' }))
 app.use(express.static(path.join(__dirname, '../public')))
 
 app.use('/api/files', filesRouter)
+app.use('/api/search', searchRouter)
 app.use('/api/domains', domainsRouter)
 app.use('/api/tags', tagsRouter)
 app.use('/api/scan', scanRouter)
@@ -179,4 +183,21 @@ app.listen(PORT, async () => {
       if (r && r.checkpointed > 0) console.log(`wal checkpoint(interval): frames=${r.frames} -> ${r.checkpointed}`)
     }).catch(e => console.error('wal checkpoint failed', e))
   }, 10 * 60 * 1000)
+
+  // L1 延迟治理：存量向量 JSON TEXT → BLOB 后台迁移（幂等；10s 后启动避开 boot 高峰，
+  // 分批 500 行不阻塞在线写入；迁移完成前后双读兼容，检索行为无感）
+  setTimeout(() => {
+    migrateVectorsToBlob().then(({ chunks, files }) => {
+      if (chunks || files) console.log(`vector blob migrate: ${chunks} chunks + ${files} file vectors converted`)
+    }).catch(e => console.error('vector blob migrate failed', e))
+  }, 10 * 1000)
+
+  // P2 内存向量索引预热：把 entry_chunks 向量搬进常驻缓存（~560MB，SSD 读数秒），
+  // 首次检索不再付加载代价；写入路径已挂增量失效/重载钩子保持一致
+  setTimeout(() => {
+    getDb().then(db => ensureLoaded(db)).then(() => {
+      const s = indexCacheStats()
+      console.log(`vector index warm: ${s.entries} entries / ${s.chunks} chunks resident`)
+    }).catch(e => console.error('vector index warm failed', e))
+  }, 15 * 1000)
 })

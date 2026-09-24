@@ -40,8 +40,8 @@
     </div>
 
     <!-- 五段流程带 -->
-    <div class="flowband">
-      <button v-for="(s, i) in segs" :key="s.view" class="flowseg" @click="$router.push(s.view)">
+    <div class="flowband" :class="{ live: (d.queue?.running ?? 0) > 0 }">
+      <button v-for="(s, i) in segs" :key="s.view" class="flowseg" :class="s.state ? 'st-' + s.state : ''" @click="$router.push(s.view)">
         <span class="fs-top"><span class="fs-num">{{ s.n }}</span><span class="fs-name">{{ s.name }}</span></span>
         <span class="fs-count">{{ s.count }}</span>
         <span class="fs-sub">{{ s.sub }}</span>
@@ -52,7 +52,7 @@
     <!-- 执行队列（阅读闭环：到点调起重读/实操）· 通栏第 3 行，宽度对齐内容区 -->
     <div class="sect" style="margin-bottom:16px">
       <div class="sect-head">
-        <span class="sq"></span><h2 class="stitle">执行队列</h2>
+        <span class="sq"></span><h2 class="stitle">执行队列</h2><span class="sect-en">Execution Queue</span>
         <div class="sright"><span class="cap mono">待执行 {{ exec.counts?.pending ?? 0 }} · 逾期 {{ exec.counts?.overdue ?? 0 }} · 今日完成 {{ exec.counts?.doneToday ?? 0 }}</span><router-link class="btn xs" to="/supply">发车区</router-link></div>
       </div>
       <table class="rtable" v-if="exec.items?.length">
@@ -60,7 +60,7 @@
         <tbody>
           <tr v-for="e in exec.items" :key="e.id">
             <td>
-              <b style="font-size:13px">{{ e.title }}</b>
+              <b class="row-title">{{ e.title }}</b>
               <br /><span class="cap">{{ e.domain_name || '未分类' }}<template v-if="e.ext"> · {{ String(e.ext).replace('.', '') }}</template></span>
             </td>
             <td><span class="cap" :style="e.overdue ? 'color:var(--fail);font-weight:600' : ''">{{ e.overdue ? '已逾期 ' : '' }}{{ fmtTime(e.due_at) }}</span></td>
@@ -74,17 +74,17 @@
           </tr>
         </tbody>
       </table>
-      <div v-else class="cap" style="padding:14px">执行队列是空的 · 在发车区给读完的文章打分并选「立即试 / 稍后试」，到点这里会调起重读。</div>
+      <div v-else class="cap sect-empty">执行队列是空的 · 在发车区给读完的文章打分并选「立即试 / 稍后试」，到点这里会调起重读。</div>
       <!-- 周卡（回顾区块）：本周阅读 / 打分分布 / 完成轮次 / 逾期堆积 / 周目标环（R3） -->
       <div class="cap" style="padding:0 14px 12px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px">
         <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池待读 {{ rstats.pool?.unread ?? 0 }}/{{ rstats.pool?.total ?? 0 }}</span>
         <span style="display:inline-flex;align-items:center;gap:6px;margin-left:auto">
           <svg width="20" height="20" viewBox="0 0 36 36" role="img" :aria-label="`周目标完成 ${goalPct}%`">
-            <circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="5" />
-            <circle cx="18" cy="18" r="15" fill="none" :stroke="goalDone ? '#1E8E5A' : '#B4651A'" stroke-width="5" stroke-linecap="round" :stroke-dasharray="`${goalPct} ${100 - goalPct}`" stroke-dashoffset="25" />
+            <circle cx="18" cy="18" r="15" fill="none" stroke="var(--border)" stroke-width="5" />
+            <circle cx="18" cy="18" r="15" fill="none" :stroke="goalDone ? 'var(--ok)' : 'var(--warn)'" stroke-width="5" stroke-linecap="round" :stroke-dasharray="`${goalPct} ${100 - goalPct}`" stroke-dashoffset="25" />
           </svg>
           <template v-if="!editingGoal">
-            <span class="mono" :style="goalDone ? 'color:#1E8E5A' : ''">周目标 {{ rstats.ratedFiles7 ?? 0 }}/{{ rstats.weeklyGoal ?? 5 }} 篇{{ goalDone ? ' · 已达成' : '' }}</span>
+            <span class="mono" :style="goalDone ? 'color:var(--ok)' : ''">周目标 {{ rstats.ratedFiles7 ?? 0 }}/{{ rstats.weeklyGoal ?? 5 }} 篇{{ goalDone ? ' · 已达成' : '' }}</span>
             <button class="btn xs" @click="startGoalEdit">改</button>
           </template>
           <template v-else>
@@ -93,11 +93,11 @@
           </template>
         </span>
       </div>
-      <div v-if="(rstats.staleCount ?? 0) > 0" class="notice" style="margin:0 14px 12px;color:#B4651A">
+      <div v-if="(rstats.staleCount ?? 0) > 0" class="notice mark-warn" style="margin:0 14px 12px">
         有 {{ rstats.staleCount }} 篇到期超 7 天未执行，建议回顾或忽略：{{ (rstats.stale || []).map((s: any) => s.title).join('、') }}
       </div>
       <!-- 薄弱点提示（M3）：按领域聚合本周低星与逾期堆积 -->
-      <div v-if="(rstats.weakDomains || []).length" class="notice" style="margin:0 14px 12px;color:#B4651A">
+      <div v-if="(rstats.weakDomains || []).length" class="notice mark-warn" style="margin:0 14px 12px">
         本周期薄弱领域：{{ (rstats.weakDomains || []).map((w: any) => `${w.name}（${[w.lowStars ? `低星 ${w.lowStars}` : '', w.stale ? `逾期 ${w.stale}` : ''].filter(Boolean).join(' · ')}）`).join('、') }}，建议优先补强。
       </div>
     </div>
@@ -105,41 +105,41 @@
     <!-- 每日精选（M4 R2）：池内 unread 按分轮转 3 篇，池不足时池外高分补位 -->
     <div class="sect" style="margin-bottom:16px">
       <div class="sect-head">
-        <span class="sq"></span><h2 class="stitle">每日精选</h2>
+        <span class="sq"></span><h2 class="stitle">每日精选</h2><span class="sect-en">Daily Picks</span>
         <div class="sright"><span class="cap mono">{{ daily.date || '—' }} · 零成本轮转</span><router-link class="btn xs" to="/supply">推荐池</router-link></div>
       </div>
       <div v-if="daily.items?.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;padding:12px 14px">
         <div v-for="(it, i) in daily.items" :key="it.file_id" class="bcard" style="cursor:pointer" @click="openDaily(it)">
           <div style="display:flex;align-items:center;gap:8px">
-            <span class="mono" style="font-size:11px;color:var(--dim)">TOP{{ i + 1 }}</span>
-            <span v-if="it.outOfPool" class="cap" style="color:#B4651A">池外推荐</span>
+            <span class="mono dim3" style="font-size:11px">TOP{{ i + 1 }}</span>
+            <span v-if="it.outOfPool" class="cap mark-warn">池外推荐</span>
             <span class="cap mono" style="margin-left:auto">{{ it.quality_score != null ? 'Q ' + it.quality_score : 'R ' + (it.score ?? it.rule_score ?? 0) }}</span>
           </div>
-          <b style="font-size:13px;line-height:1.5;display:block;margin:4px 0 2px">{{ it.title }}</b>
+          <b class="row-title" style="display:block;margin:4px 0 2px">{{ it.title }}</b>
           <span class="cap">{{ it.domain_name || '未分类' }}<template v-if="it.ext"> · {{ String(it.ext).replace('.', '') }}</template></span>
-          <p class="cap" style="margin:6px 0 0;line-height:1.6;color:var(--dim)">{{ it.reason }}</p>
+          <p class="cap" style="margin:6px 0 0;line-height:1.6">{{ it.reason }}</p>
         </div>
       </div>
-      <div v-else class="cap" style="padding:14px">今日暂无精选 · 推荐池与库内有内容后这里每天自动换一批。</div>
+      <div v-else class="cap sect-empty">今日暂无精选 · 推荐池与库内有内容后这里每天自动换一批。</div>
     </div>
 
     <!-- 今日学习建议（I3 RSI）：信号聚合 + 模型判断时机 + 每日 ≤1 次硬顶，与消费链路诊断并列 -->
     <div class="sect" style="margin-bottom:16px">
       <div class="sect-head">
-        <span class="sq"></span><h2 class="stitle">今日学习建议</h2>
+        <span class="sq"></span><h2 class="stitle">今日学习建议</h2><span class="sect-en">Learning Advice</span>
         <div class="sright"><span class="cap">I3 · 到期复习 &gt; 高频在读 &gt; 目标缺口 · 每日至多推送一次</span></div>
       </div>
       <div v-if="rsi.items?.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;padding:12px 14px">
         <div v-for="it in rsi.items" :key="it.fileId" class="bcard" style="cursor:pointer" title="进站内阅读器" @click="router.push(`/reader/${it.fileId}`)">
           <b style="font-size:13px;line-height:1.5;display:block;margin:4px 0 2px">{{ it.title }}</b>
-          <p class="cap" style="margin:6px 0 0;line-height:1.6;color:var(--dim)">{{ it.reason }}</p>
+          <p class="cap" style="margin:6px 0 0;line-height:1.6">{{ it.reason }}</p>
         </div>
       </div>
-      <div v-else class="cap" style="padding:14px">{{ rsiHint }}</div>
+      <div v-else class="cap sect-empty">{{ rsiHint }}</div>
     </div>
 
     <div class="sect">
-      <div class="sect-head"><span class="sq"></span><h2 class="stitle">消费链路诊断</h2><div class="sright"><span class="cap">E1 · search→read→source · 与 mcpFunnel 脚本同口径</span></div></div>
+      <div class="sect-head"><span class="sq"></span><h2 class="stitle">消费链路诊断</h2><span class="sect-en">Consumption Funnel</span><div class="sright"><span class="cap">E1 · search→read→source · 与 mcpFunnel 脚本同口径</span></div></div>
       <template v-if="funnel">
         <div class="fn-funnel">
           <div class="fn-stage">
@@ -170,14 +170,16 @@
           </div>
         </div>
         <div class="cap" style="margin-top:6px">归因重放为关键词路近似（与调用时刻索引或有漂移）；趋势：近 7 日 search {{ funnel.trend.reduce((s: number, t: any) => s + Number(t.calls || 0), 0) }} 次</div>
+        <!-- Web 检索半边（批次②⑤）：人侧 /api/search 埋点聚合，与 MCP 漏斗并列对照（clickRate = 点击/搜索） -->
+        <div v-if="funnel.web" class="cap">Web 检索：近 30 天搜索 {{ funnel.web.searches30d }} 次 · 点击打开 {{ funnel.web.clicks30d }} 次 · 点击率 {{ Math.round((funnel.web.clickRate || 0) * 100) }}%<template v-if="(funnel.web.topQueries || []).length"> · 高频「{{ funnel.web.topQueries[0].query }}」×{{ funnel.web.topQueries[0].n }}</template></div>
       </template>
-      <div v-else class="cap" style="padding:14px">暂无 MCP 调用数据——agent 挂载并使用后，此处展示消费链路漏斗与断链归因。</div>
+      <div v-else class="cap sect-empty">暂无 MCP 调用数据——agent 挂载并使用后，此处展示消费链路漏斗与断链归因。</div>
     </div>
 
     <div class="ov-grid">
       <div class="ov-col">
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">近期动态</h2><div class="sright"><span class="cap">收件 · 精炼 · 入库</span></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">近期动态</h2><span class="sect-en">Activity</span><div class="sright"><span class="cap">收件 · 精炼 · 入库</span></div></div>
           <div class="tl" v-if="d.events?.length">
             <div v-for="(e, i) in d.events" :key="i" class="tl-item">
               <span class="tl-dot" :style="{ background: e.c }"></span>
@@ -185,11 +187,11 @@
               <span class="tl-text">{{ e.text }}</span>
             </div>
           </div>
-          <div v-else class="cap" style="padding:14px">暂无动态，等待扫描与精炼任务。</div>
+          <div v-else class="cap sect-empty">暂无动态，等待扫描与精炼任务。</div>
         </div>
 
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">最近添加</h2><div class="sright"><router-link class="btn xs" to="/library">前往收件坪</router-link></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">最近添加</h2><span class="sect-en">Recent Intake</span><div class="sright"><router-link class="btn xs" to="/library">前往收件坪</router-link></div></div>
           <table class="rtable">
             <thead><tr><th>标题</th><th>领域</th><th>来源</th><th>时间</th><th>类型</th></tr></thead>
             <tbody>
@@ -207,7 +209,7 @@
 
       <div class="ov-col">
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">领域分布</h2><div class="sright"><router-link class="btn xs" to="/domains">分拣区</router-link></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">领域分布</h2><span class="sect-en">Domain Share</span><div class="sright"><router-link class="btn xs" to="/domains">分拣区</router-link></div></div>
           <div class="bars" v-if="domBars.length">
             <div v-for="b in domBars" :key="b.key" class="bar-row" :class="{ child: b.child }" :title="`${b.name}：${b.count} 项 · 占比 ${b.pct}%`">
               <span class="bar-name">{{ b.name }}</span>
@@ -215,11 +217,11 @@
               <span class="bar-count">{{ b.count }}</span>
             </div>
           </div>
-          <div v-else class="cap" style="padding:14px">尚无领域数据。</div>
+          <div v-else class="cap sect-empty">尚无领域数据。</div>
         </div>
 
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">来源文件</h2><div class="sright"><span class="cap mono">{{ (d.fileSources || []).length }} 个一级目录</span></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">来源文件</h2><span class="sect-en">Source Dirs</span><div class="sright"><span class="cap mono">{{ (d.fileSources || []).length }} 个一级目录</span></div></div>
           <div class="bars" v-if="fileSourceBars.length">
             <div v-for="a in fileSourceBars" :key="a.name" class="bar-row" :title="`${a.name}：${a.count} 项 · 占比 ${a.pct}%`">
               <span class="bar-name">{{ a.name || '未知' }}</span>
@@ -227,11 +229,11 @@
               <span class="bar-count">{{ a.count }}</span>
             </div>
           </div>
-          <div v-else class="cap" style="padding:14px">尚无来源数据。</div>
+          <div v-else class="cap sect-empty">尚无来源数据。</div>
         </div>
 
         <div class="sect">
-          <div class="sect-head"><span class="sq"></span><h2 class="stitle">来源 agent</h2><div class="sright"><span class="cap mono">{{ (d.agents || []).length }} 个 agent</span></div></div>
+          <div class="sect-head"><span class="sq"></span><h2 class="stitle">来源 agent</h2><span class="sect-en">Intake by Agent</span><div class="sright"><span class="cap mono">{{ (d.agents || []).length }} 个 agent</span></div></div>
           <div class="bars" v-if="agentBars.length">
             <div v-for="a in agentBars" :key="a.name" class="bar-row" :title="`${a.name}：${a.count} 项 · 占比 ${a.pct}%`">
               <span class="bar-name">{{ a.name || '未知' }}</span>
@@ -239,14 +241,14 @@
               <span class="bar-count">{{ a.count }}</span>
             </div>
           </div>
-          <div v-else class="cap" style="padding:14px">尚无来源数据。</div>
+          <div v-else class="cap sect-empty">尚无来源数据。</div>
         </div>
       </div>
     </div>
 
     <!-- 近 15 天 LLM 调用 · 通栏区块，按模型细分着色 -->
     <div class="sect" style="margin-bottom:16px">
-      <div class="sect-head"><span class="sq"></span><h2 class="stitle">近 15 天 LLM 调用</h2><div class="sright"><span class="cap mono">合计 {{ d.trend?.sum ?? 0 }}</span></div></div>
+      <div class="sect-head"><span class="sq"></span><h2 class="stitle">近 15 天 LLM 调用</h2><span class="sect-en">LLM Calls · 15d</span><div class="sright"><span class="cap mono">合计 {{ d.trend?.sum ?? 0 }}</span></div></div>
       <div class="trend" v-if="d.trend?.labels?.length">
         <div v-for="(v, i) in d.trend.vals" :key="i" class="tb" :class="{ today: i === d.trend.vals.length - 1 }">
           <span class="tb-v">{{ v || '' }}</span>
@@ -278,7 +280,7 @@
       <!-- ① Agent 生产情况（下钻二级目录） -->
       <div class="sect" style="margin-bottom:16px">
         <div class="sect-head">
-          <span class="sq"></span><h2 class="stitle">Agent 生产情况</h2>
+          <span class="sq"></span><h2 class="stitle">Agent 生产情况</h2><span class="sect-en">Agent Production</span>
           <div class="sright"><span class="cap mono">{{ (board.agentProd || []).length }} 个 agent 在产 · 目录条为该 agent 内占比</span></div>
         </div>
         <div class="bcards" v-if="(board.agentProd || []).length">
@@ -296,13 +298,13 @@
             </div>
           </div>
         </div>
-        <div v-else class="cap" style="padding:14px">暂无 agent 生产数据 · 先在扫描页挂载 agent 目录并完成扫描。</div>
+        <div v-else class="cap sect-empty">暂无 agent 生产数据 · 先在扫描页挂载 agent 目录并完成扫描。</div>
       </div>
 
       <!-- ② 领域占比气泡图（XY 轴 · 圆色=领域色 · 圆面积=文件数） -->
       <div class="sect" style="margin-bottom:16px">
         <div class="sect-head">
-          <span class="sq"></span><h2 class="stitle">领域占比气泡图</h2>
+          <span class="sq"></span><h2 class="stitle">领域占比气泡图</h2><span class="sect-en">Domain Bubbles</span>
           <div class="sright"><span class="cap mono">X 轴 · 领域 / Y 轴 · 占比 / 圆面积 · 文件数</span></div>
         </div>
         <div class="bubblewrap" v-if="(board.domainBubbles || []).length">
@@ -324,7 +326,7 @@
             </g>
           </svg>
         </div>
-        <div v-else class="cap" style="padding:14px">暂无领域数据 · 先在分拣区给文件归域。</div>
+        <div v-else class="cap sect-empty">暂无领域数据 · 先在分拣区给文件归域。</div>
       </div>
     </template>
   </div>
@@ -337,6 +339,8 @@ import Icon from '../components/Icon.vue'
 import { api } from '../api'
 import { useUiStore } from '../stores/useUiStore'
 import { useLlmStore } from '../stores/useLlmStore'
+import { fmtTimeRelative as fmtTime, fmtTokens } from '../utils/format'
+import { useTrendChart } from '../composables/ui'
 
 const ui = useUiStore()
 const llm = useLlmStore()
@@ -375,12 +379,13 @@ const todayLabel = computed(() => {
   return `${dt.toISOString().slice(0, 10)} 周${week} · 实时`
 })
 
+// 流程带段落状态：仅标注注意力态——精炼失败(红) > 精炼进行(蓝)，其余不标避免噪声
 const segs = computed(() => [
-  { n: '01', name: '收件', count: d.value.stats?.active ?? 0, sub: `资料库 · 本周 +${d.value.stats?.weekNew ?? 0}`, view: '/library' },
-  { n: '02', name: '分拣', count: d.value.stats?.domains ?? 0, sub: '领域 · 分拣区管理', view: '/domains' },
-  { n: '03', name: '精炼', count: d.value.queue?.pending ?? 0, sub: `管线 · 进行中 ${d.value.queue?.running ?? 0} · 失败 ${d.value.queue?.failed ?? 0}`, view: '/pipeline' },
-  { n: '04', name: '入库', count: d.value.stats?.entries ?? 0, sub: '词条 · 摘要与要点', view: '/entry' },
-  { n: '05', name: '发车', count: mcp.value.week, sub: '供给 · MCP 工具调用', view: '/supply' }
+  { n: '01', name: '收件', count: d.value.stats?.active ?? 0, sub: `资料库 · 本周 +${d.value.stats?.weekNew ?? 0}`, view: '/library', state: '' },
+  { n: '02', name: '分拣', count: d.value.stats?.domains ?? 0, sub: '领域 · 分拣区管理', view: '/domains', state: '' },
+  { n: '03', name: '精炼', count: d.value.queue?.pending ?? 0, sub: `管线 · 进行中 ${d.value.queue?.running ?? 0} · 失败 ${d.value.queue?.failed ?? 0}`, view: '/pipeline', state: (d.value.queue?.failed ?? 0) > 0 ? 'fail' : (d.value.queue?.running ?? 0) > 0 ? 'run' : '' },
+  { n: '04', name: '入库', count: d.value.stats?.entries ?? 0, sub: '词条 · 摘要与要点', view: '/entry', state: '' },
+  { n: '05', name: '发车', count: mcp.value.week, sub: '供给 · MCP 工具调用', view: '/supply', state: '' }
 ])
 
 /** 彩虹色系：按行序在色环上均匀取色；子行加亮以区分层级 */
@@ -501,39 +506,8 @@ async function saveGoal() {
   editingGoal.value = false
 }
 
-function trendH(v: number) {
-  const max = Math.max(1, ...(d.value.trend?.vals || []))
-  return Math.max(4, Math.round((v / max) * 100))
-}
-
-// 按模型细分：调色板 + 各日段高占比
-const MODEL_COLORS = ['#2456A6', '#B4651A', '#2E7D4F', '#7B4BA6', '#B3402A', '#1F7A8C', '#8C6D1F', '#5A5A5A']
-const trendModels = computed(() => d.value.trend?.models || [])
-function modelColor(i: number) {
-  return MODEL_COLORS[i % MODEL_COLORS.length]
-}
-function segPct(m: any, i: number) {
-  const total = d.value.trend?.vals?.[i] || 0
-  return total > 0 ? ((m.vals?.[i] || 0) / total) * 100 : 0
-}
-
-function fmtTime(t?: string) {
-  if (!t) return '—'
-  const dt = new Date(String(t).includes('T') ? t : t.replace(' ', 'T') + 'Z')
-  if (isNaN(dt.getTime())) return String(t)
-  const now = new Date()
-  const sameDay = dt.toDateString() === now.toDateString()
-  const hm = `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
-  if (sameDay) return `今天 ${hm}`
-  const yest = new Date(now.getTime() - 86400000)
-  if (dt.toDateString() === yest.toDateString()) return `昨天 ${hm}`
-  return `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${hm}`
-}
-
-function fmtTokens(n?: number | null) {
-  if (!n) return '0'
-  return n >= 1_000_000 ? (n / 1_000_000).toFixed(2) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n)
-}
+// 趋势图共享逻辑（与 Pipeline 同源单点维护：composables/ui）
+const { trendModels, trendH, modelColor, segPct } = useTrendChart(() => d.value.trend || { labels: [], vals: [] })
 
 async function refreshAll() {
   const [dash, m, s, ex, rs] = await Promise.all([

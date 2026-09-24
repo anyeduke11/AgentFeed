@@ -134,9 +134,11 @@ profileRouter.get('/evidence', async (req, res) => {
   res.json({ success: true, found: true, row: out })
 })
 
-/** 手动蒸馏入口（PRD J1：信号累积或手动触发；开关关闭/已在跑 → false） */
-profileRouter.post('/distill', async (_req, res) => {
-  const queued = await triggerProfileDistill()
+/** 手动蒸馏入口（PRD J1：信号累积或手动触发；开关关闭/已在跑 → false）。手动 = 插队（priority 100），
+ *  排在重蒸馏积压之前——用户显式点击的动作不应数分钟无响应 */
+profileRouter.post('/distill', async (req, res) => {
+  const manual = req.body?.manual !== false
+  const queued = await triggerProfileDistill(manual)
   const enabled = await isProfileDistillEnabled(await getDb())
   res.json({ success: true, queued, enabled })
 })

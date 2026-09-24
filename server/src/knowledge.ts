@@ -1,6 +1,7 @@
 import type { SqliteDatabase } from '@homeofthings/sqlite3'
 import { hybridSearchWiki } from './search/hybrid.js'
 import { cleanTitle, cleanSummary } from './formatter.js'
+import { parseQuery, rowMatchesTitle, rowMatchesExclude, parseAliases } from './search/querySyntax.js'
 
 // search_knowledge 共享核心：从 mcp.ts handler 的内联 SQL 逐字平移而来，
 // 供 MCP 工具、Phase 2 基线脚本、测试三方复用。
@@ -86,12 +87,36 @@ export async function legacySearchKnowledge(db: SqliteDatabase, params: SearchKn
 }
 
 export async function searchKnowledgeCore(db: SqliteDatabase, params: SearchKnowledgeParams): Promise<any[]> {
-  const rows = await hybridSearchWiki(db, params)
+  // 批次③：查询迷你语法（title:/tag:/短语/-排除 + 别名展开）在此统一解析，
+  // MCP search_knowledge / /api/search / chat 三方出口自动继承同一语义。
+  // 召回策略：title:/-排除 词同时并入召回 query（否则纯语法查询自由词为空，三路候选池
+  // 全库 mtime 序根本捞不到目标行），行后过滤再做精确筛选；tag: 合并进 params.tags 走 SQL 路。
+  // 向上多取 3 倍候选再过滤、最后截回 limit（行过滤会缩减数量，注释口径供调用方知悉）
+  const aliases = parseAliases(await readConfigValue(db, 'search.aliases'))
+  const parsed = parseQuery(String(params.query || ''), aliases)
+  const mergedTags = [...(params.tags || []), ...parsed.tags]
+  const recallQuery = [parsed.query, ...parsed.title].join(' ').trim()
+  // 全语法无自由词（如 tag:x）：recallQuery 为空串即“仅过滤”检索——空 query 下 files 路仍
+  // 全库候选、tag SQL 路照常收窄，wiki FTS/向量路自然跳过（hybrid 对空 query 的既定行为）
+  const effective = { ...params, query: recallQuery, tags: mergedTags.length ? mergedTags : undefined }
+  const oversampled = await hybridSearchWiki(db, { ...effective, limit: Math.max(1, (params.limit ?? 20) * 3) })
+
   // A3 出口层清洗：脏 title（如 11 万字符 JSON）只在返回行改写，库内数据绝不回写；
   // Web 搜索 / MCP search_knowledge / 基线脚本共用本核心，一处清洗三方继承。
-  return rows.map(r => ({
-    ...r,
-    title: typeof r.title === 'string' ? cleanTitle(r.title) : r.title,
-    summary: typeof r.summary === 'string' ? cleanSummary(r.summary) : r.summary,
-  }))
+  const rows = oversampled
+    .map(r => ({
+      ...r,
+      title: typeof r.title === 'string' ? cleanTitle(r.title) : r.title,
+      summary: typeof r.summary === 'string' ? cleanSummary(r.summary) : r.summary,
+    }))
+    .filter(r => rowMatchesTitle(r, parsed.title) && !rowMatchesExclude(r, parsed.exclude))
+  return rows.slice(0, params.limit ?? 20)
+}
+
+/** 读 config 单值（value TEXT；异常/缺省返回 null，检索不因配置读失败不可用） */
+async function readConfigValue(db: SqliteDatabase, key: string): Promise<string | null> {
+  try {
+    const row = await (await db.prepare('SELECT value FROM config WHERE key = ?')).get(key) as any
+    return row?.value ?? null
+  } catch { return null }
 }

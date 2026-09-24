@@ -101,7 +101,7 @@
     <div class="pipe-grid" style="grid-template-columns:minmax(0,1fr)">
       <!-- 趋势：与总览「近 15 天 LLM 调用」同款（同一接口 api.stats.dashboard，堆叠柱 + 模型图例）；调用日志已迁移至调度室·日志管理 -->
       <div class="sect">
-        <div class="sect-head"><span class="sq"></span><h2 class="stitle">近 15 天 LLM 调用</h2><div class="sright"><span class="cap mono">合计 {{ trend.sum }}</span></div></div>
+        <div class="sect-head"><span class="sq"></span><h2 class="stitle">近 15 天 LLM 调用</h2><span class="sect-en">LLM Calls · 15d</span><div class="sright"><span class="cap mono">合计 {{ trend.sum }}</span></div></div>
         <div class="trend" v-if="trend.labels.length">
           <div v-for="(v, i) in trend.vals" :key="i" class="tb" :class="{ today: i === trend.vals.length - 1 }">
             <span class="tb-v">{{ v || '' }}</span>
@@ -129,6 +129,8 @@ import Icon from '../components/Icon.vue'
 import { useLlmStore } from '../stores/useLlmStore'
 import { useUiStore } from '../stores/useUiStore'
 import { api } from '../api'
+import { fmtTime, fmtTokens } from '../utils/format'
+import { useTrendChart } from '../composables/ui'
 
 const llm = useLlmStore()
 const ui = useUiStore()
@@ -158,36 +160,11 @@ const queueSummary = computed(() => {
 })
 
 const trend = computed(() => dash.value.trend || { labels: [], vals: [], sum: 0 })
-
-function trendH(v: number) {
-  const max = Math.max(1, ...(trend.value.vals || []))
-  return Math.max(4, Math.round((v / max) * 100))
-}
-
-// 与 Overview.vue 保持一致：模型调色板 + 各日段占比（同一 api.stats.dashboard 数据）
-const MODEL_COLORS = ['#2456A6', '#B4651A', '#2E7D4F', '#7B4BA6', '#B3402A', '#1F7A8C', '#8C6D1F', '#5A5A5A']
-const trendModels = computed<any[]>(() => trend.value.models || [])
-function modelColor(i: number) {
-  return MODEL_COLORS[i % MODEL_COLORS.length]
-}
-function segPct(m: any, i: number) {
-  const total = trend.value.vals?.[i] || 0
-  return total > 0 ? ((m.vals?.[i] || 0) / total) * 100 : 0
-}
-function fmtTokens(n?: number) {
-  if (!n) return '0'
-  return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : String(n)
-}
+// 趋势图共享逻辑（与 Overview 同源单点维护：composables/ui）
+const { trendModels, trendH, modelColor, segPct } = useTrendChart(() => trend.value)
 
 function errOf(fileId: number) {
   return errMap.value[fileId] || 'LLM 调用失败（详见 调度室 → 日志管理 → LLM 调用）'
-}
-
-function fmtTime(t?: string) {
-  if (!t) return '—'
-  const dt = new Date(String(t).includes('T') ? t : t.replace(' ', 'T') + 'Z')
-  if (isNaN(dt.getTime())) return String(t)
-  return `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
 }
 
 async function refresh() {

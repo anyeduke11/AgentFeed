@@ -1,5 +1,7 @@
 import path from 'path'
 import fs from 'fs/promises'
+import { createReadStream } from 'fs'
+import readline from 'readline'
 import { fileURLToPath } from 'url'
 import { getDb } from './db.js'
 
@@ -333,6 +335,33 @@ export function checkGateSample(fp: string, size: number, head: string, cfg: Gat
     if (text < cfg.minChars) return { pass: false, reason: `正文过短（${text} 字符 < ${cfg.minChars}，抽样头部）`, ruleId: 'minChars', metric: text }
   }
   return { pass: true }
+}
+
+/**
+ * 大文件代码占比流式统计（P1-⑤ 修复）：逐行围栏状态机，O(1) 内存得到全文件精确占比，
+ * 与 checkGate 的围栏剥离口径对齐——按 ``` 子串逐次翻转进出围栏态，行处理完所有 ``` 后
+ * 仍处于围栏内则该行计入代码行（等价于 checkGate 正则删掉 ```…``` 跨度内的换行）。
+ * 解决「头部像散文、体内全是代码」的 >512KB 文件凭 64KB 抽样绕过 codeRatio 的结构缺口
+ * （抽样占比不可靠，但占比本就只需行级状态机，无需把文件读进内存）。
+ * 读取失败返回 null，调用方按放行处理（与头部门禁分支口径一致）。
+ */
+export async function streamCodeRatioStats(fp: string): Promise<{ ratio: number; codeLines: number; totalLines: number } | null> {
+  let totalLines = 0
+  let codeLines = 0
+  let inFence = false
+  try {
+    const rl = readline.createInterface({ input: createReadStream(fp), crlfDelay: Infinity })
+    for await (const line of rl) {
+      const marks = (line.match(/```/g) || []).length
+      if (marks % 2 === 1) inFence = !inFence
+      totalLines++
+      if (inFence) codeLines++
+    }
+    await rl.close()
+  } catch {
+    return null
+  }
+  return { ratio: totalLines > 0 ? codeLines / totalLines : 0, codeLines, totalLines }
 }
 
 /** Gate 1 存量清洗：对已入库但命中排除规则的记录墓碑化（知识资产保留，规则调整后可复活）。

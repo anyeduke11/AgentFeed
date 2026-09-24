@@ -193,7 +193,8 @@ test('chunkEntryMd：代码围栏内的 # 不切块（WHY：md 正文常见代�
 test('降级：嵌入未配置时 ensureChunksIndexed 不抛错且 reason 可查（WHY：本地优先不绑厂商，向量路必须可缺席）', async () => {
   await seedWikiEntry({ title: '降级样例', md: '# 降级样例\n\n内容\n' })
   const db = await getDb()
-  // 默认 ai.embedding.enabled=false（seedDefaults 初始态），未注入 embedFn 时应直接短路
+  // 向量化已默认开启（本地 Ollama），降级路径需显式关闭才能触达 embedding_not_configured
+  await setConfig('ai.embedding', JSON.stringify({ enabled: false, provider: 'ollama', model: '' }))
   const status = await ensureChunksIndexed(db)
   assert.equal(status.reason, 'embedding_not_configured')
   assert.equal(status.vectorEnabled, true)

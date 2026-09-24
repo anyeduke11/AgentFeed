@@ -64,11 +64,15 @@ export async function buildProfileSignalBundle(
     GROUP BY f.domain_id
   `)).all([`-${windowDays} days`]) as any[]
 
-  // 域内 agent 消费密度（mcp_call_logs 按工具触达词条所属域聚合；args 无结构不解析，按调用计）
+  // 域内 agent 消费密度：read_entry 按 args.id 精确归域（JSON 解析 → 词条 → 源文件）；
+  // search_knowledge 的 args 只有 query 文本无词条指针，不猜域归属（v1 保守只计 read_entry）。
+  // GROUP BY file_id 既去重占位符（防 IN 超 SQLite 变量上限）又保留调用次数口径
   const agentAgg = await (await db.prepare(`
-    SELECT w.file_id AS file_id
-    FROM mcp_call_logs m JOIN wiki_entries_meta w ON w.id = w.id
-    WHERE m.tool IN ('search_knowledge', 'read_entry') AND m.created_at >= datetime('now', ?)
+    SELECT w.file_id AS file_id, COUNT(*) AS calls
+    FROM mcp_call_logs m
+    JOIN wiki_entries_meta w ON w.id = CAST(json_extract(m.args, '$.id') AS INTEGER)
+    WHERE m.tool = 'read_entry' AND m.created_at >= datetime('now', ?)
+    GROUP BY w.file_id
   `)).all([`-${windowDays} days`]) as any[]
   const fileIdToDomain = new Map<number, number>()
   if (agentAgg.length > 0) {
@@ -80,7 +84,7 @@ export async function buildProfileSignalBundle(
   const agentByDomain = new Map<number, number>()
   for (const r of agentAgg) {
     const d = fileIdToDomain.get(Number(r.file_id))
-    if (d != null) agentByDomain.set(d, (agentByDomain.get(d) || 0) + 1)
+    if (d != null) agentByDomain.set(d, (agentByDomain.get(d) || 0) + Number(r.calls || 1))
   }
 
   // 域内标签权重：该域被读文件的 file_tags（三态加权），按出现计权
@@ -117,8 +121,9 @@ export async function buildProfileSignalBundle(
     if (r.status === 'done') e.done += Number(r.n)
   }
 
-  // 会话信号（I1 上线前 chat_messages 表可能不存在——先建空表占位，聚合不缺路且与 J1 表结构同批落地）
-  await db.exec('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+  // 会话信号（I1 上线前 chat_messages 表可能不存在——先建空表占位，聚合不缺路且与 J1 表结构同批落地；
+  // refs 列与 routes/chat.ts ensureChatTable DDL 同步，旧库由 chat 路由 ensureColumns 幂等补列）
+  await db.exec('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, refs TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
   const chatRows = await (await db.prepare('SELECT COUNT(*) AS n FROM chat_messages')).all() as any[]
   const totalChat = Number(chatRows[0]?.n || 0)
 

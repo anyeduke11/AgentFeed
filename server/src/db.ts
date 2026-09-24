@@ -74,6 +74,12 @@ export async function getDb(): Promise<SqliteDatabase> {
     await ensureColumns(db, 'entry_chunks', [
       { name: 'content_hash', ddl: 'content_hash TEXT' }
     ])
+    // 既有库列迁移（P1 向量覆盖状态化：文件级向量化终态——NULL 未尝试/'done'/'failed'；
+    // 重试耗尽不再静默，收敛由 embed sweeper 周期补齐；embedding_disabled 为配置级缺失不落文件态）
+    await ensureColumns(db, 'files', [
+      { name: 'embed_state', ddl: 'embed_state TEXT' }
+    ])
+    // 「有向量行 = done」存量对账随 file_embeddings DROP（方案 B）移除；embed_state 列保留兼容存量库
     // exec_queue v2 迁移：间隔重复需要同文件多轮复习（多行），去掉 file_id UNIQUE（幂等：仅旧库触发）
     const qIdx = await (await db.prepare('PRAGMA index_list(exec_queue)')).all() as any[]
     if (qIdx.some(i => Number(i.unique) === 1 && i.origin === 'u')) {
@@ -113,6 +119,19 @@ export async function getDb(): Promise<SqliteDatabase> {
     await ensureColumns(db, 'read_history', [
       { name: 'rating', ddl: 'rating INTEGER CHECK(rating BETWEEN 1 AND 5)' },
       { name: 'feedback', ddl: 'feedback TEXT' }
+    ])
+    // 批次②：Web 检索埋点（source='search' 时 query 记搜索词）——E1 漏斗诊断的人侧半边数据源。
+    // 埋点 source 集合相应扩展：preview / pool / exec / daily / reader / search
+    await ensureColumns(db, 'read_history', [
+      { name: 'query', ddl: 'query TEXT' }
+    ])
+    // 版本链激活：同 path 内容变更（md5 迭代）时记录旧 md5——file_versions 曾是无写入方的休眠表
+    await ensureColumns(db, 'file_versions', [
+      { name: 'old_md5', ddl: 'old_md5 TEXT' }
+    ])
+    // 配套修复③（2026-09-22 残留 12%）：落网关 finish_reason 原文，失败分桶区分截断/拒答形态
+    await ensureColumns(db, 'llm_call_logs', [
+      { name: 'stop_reason', ddl: 'stop_reason TEXT' }
     ])
     await seedDefaults(db)
     await migrateTagLevels(db)
@@ -396,13 +415,8 @@ function initTables(db: SqliteDatabase) {
       done_at DATETIME
     );
 
-    CREATE TABLE IF NOT EXISTS file_embeddings (
-      file_id INTEGER PRIMARY KEY REFERENCES files(id),
-      model TEXT NOT NULL,
-      dim INTEGER NOT NULL,
-      vector TEXT NOT NULL,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+    -- file_embeddings 表随方案 B（2026-09-24 向量冗余收敛）移除：file 级向量链路整体下线，
+    -- 检索主路唯一为词条分块向量（entry_chunks + P2 内存索引）。存量库由运维脚本 DROP + VACUUM。
 
     CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
     CREATE INDEX IF NOT EXISTS idx_files_md5 ON files(md5);
@@ -415,6 +429,10 @@ function initTables(db: SqliteDatabase) {
     CREATE INDEX IF NOT EXISTS idx_file_tags_file ON file_tags(file_id);
     CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
     CREATE INDEX IF NOT EXISTS idx_llm_logs_file ON llm_call_logs(file_id);
+    -- L1 延迟治理：时间窗口查询（logs 页/趋势/funnel）原为 129k 行全表 SCAN，EXPLAIN 实锤
+    CREATE INDEX IF NOT EXISTS idx_llm_logs_time ON llm_call_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_gate_records_status ON gate_records(status);
+    CREATE INDEX IF NOT EXISTS idx_mcp_logs_time ON mcp_call_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_scan_jobs_time ON scan_jobs(started_at);
 
     CREATE TABLE IF NOT EXISTS tag_proposals (
@@ -455,12 +473,12 @@ function initTables(db: SqliteDatabase) {
   `)
 }
 
-/** 既有库的列迁移：缺失则 ALTER ADD（幂等） */
-async function ensureColumns(db: SqliteDatabase, table: string, columns: Array<{ name: string; ddl: string }>) {
+/** 既有库的列迁移：缺失则 ALTER ADD（幂等）。导出供 chat_messages 等惰性建表的路由复用同一迁移模式 */
+export async function ensureColumns(db: SqliteDatabase, table: string, columns: Array<{ name: string; ddl: string }>) {
   const rows = (await (await db.prepare(`PRAGMA table_info(${table})`)).all()) as any[]
   const has = (n: string) => rows.some(r => r.name === n)
   for (const c of columns) {
-    if (!has(c.name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c.ddl}`)
+    if (!has(c.name)) await db.exec(`ALTER TABLE ${table} ADD COLUMN ${c.ddl}`)
   }
 }
 
@@ -526,10 +544,14 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'gate.blacklist', value: '[]', type: 'json', description: '文件黑名单（*.tmp.md 通配 / .log 扩展名 / /正则/ / 纯文本，命中即拦截可恢复）' },
     { key: 'ai.ollama.enabledModels', value: '[]', type: 'json', description: 'Ollama 启用的模型列表' },
     { key: 'ai.ollama.modelTypes', value: '{}', type: 'json', description: 'Ollama 模型用途映射（chat/embedding）' },
-    { key: 'ai.embedding', value: JSON.stringify({ enabled: false, provider: 'ollama', model: '' }), type: 'json', description: '蒸馏向量化配置' },
+    { key: 'ai.embedding', value: JSON.stringify({ enabled: true, provider: 'ollama', model: 'qwen3-embedding:4b' }), type: 'json', description: '蒸馏向量化配置（默认本地 Ollama 开启：蒸馏成功即自动向量化，模型由 service.sh 随服务拉起）' },
     { key: 'search.vectorEnabled', value: 'true', type: 'boolean', description: '检索向量路总开关（分块嵌入回填，provider 可用时才生效）' },
+    { key: 'search.hybridEnabled', value: 'true', type: 'boolean', description: '混合检索总开关（false 时完全回退旧单路 LIKE，等价逃生舱）' },
+    { key: 'search.rerankEndpoint', value: '', type: 'string', description: '外部 rerank 端点（OpenAI 兼容 /rerank；空=关。3s 超时失败自动降级 RRF 序）' },
+    { key: 'search.aliases', value: '{}', type: 'json', description: '查询别名表（查询时改写，如 {"gh":"tag:github"}）；支持 title:/tag:/短语/-排除 迷你语法' },
     { key: 'ai.pricing', value: '{}', type: 'json', description: 'LLM 单价表（元/百万 token），key=provider/model，如 {"ollama/qwen3":{"input":0,"output":0}}' },
-    { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' }
+    { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' },
+    { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' }
   ]
 
   await db.transactionalize(async () => {

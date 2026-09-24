@@ -73,6 +73,8 @@ test('status 默认空库：pending/chunks 计数与运行态全部归零（WHY�
 })
 
 test('start 默认未配置拒绝且不置 running（WHY：配置缺失是最常见入口错误，误置 running 会让前端按钮永久卡在停止态）', async () => {
+  // 向量化已默认开启（本地 Ollama），拒绝路径需显式禁用模拟「未配置」
+  await setConfig('ai.embedding', JSON.stringify({ enabled: false, provider: 'ollama', model: '' }))
   const json = await call('POST', '/chunks/backfill/start')
   assert.equal(json.success, false)
   assert.equal(json.message, '请先开启蒸馏向量化并选择向量模型')

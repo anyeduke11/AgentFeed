@@ -1,7 +1,7 @@
 <template>
   <!-- 过滤门禁 -->
   <div class="sect">
-    <div class="sect-head"><span class="sq"></span><h2 class="stitle">过滤门禁</h2><div class="sright"><span class="cap">入库前过滤 · 拦截可恢复</span></div></div>
+    <div class="sect-head"><span class="sq"></span><h2 class="stitle">过滤门禁</h2><span class="sect-en">Gate Rules</span><div class="sright"><span class="cap">入库前过滤 · 拦截可恢复</span></div></div>
     <p class="cap" style="margin:8px 0 2px">提示：被扫描的内容可能经蒸馏 / 嵌入等环节送往你配置的 LLM 服务商（详见 README「数据与隐私边界」）；不希望外发的目录请在下方「排除目录」中配置。</p>
     <div class="setrow">
       <span class="sr-k">门禁开关</span>

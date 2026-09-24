@@ -1,7 +1,7 @@
 <template>
   <!-- 日志管理 -->
   <div class="sect">
-        <div class="sect-head"><span class="sq"></span><h2 class="stitle">日志管理</h2><div class="sright" style="display:flex;gap:8px;align-items:center">
+        <div class="sect-head"><span class="sq"></span><h2 class="stitle">日志管理</h2><span class="sect-en">Logs</span><div class="sright" style="display:flex;gap:8px;align-items:center">
           <input class="inp" style="max-width:240px" v-model="logKw" placeholder="搜索：模型 / 状态 / 错误 / 工具…" aria-label="搜索日志" @keyup.enter="loadLogs(true)" />
           <select v-if="logView === 'llm'" class="inp" style="max-width:110px" v-model="logStatus" aria-label="状态过滤" @change="loadLogs(true)">
             <option value="">全部状态</option>
@@ -71,15 +71,15 @@
                 <span class="dn" style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center">
                   <span class="mono" style="font-size:11.5px">{{ l.created_at }}</span>
                   <span class="stb">{{ providerLabel(l.provider) }} · {{ l.model }}</span>
-                  <span :class="'stb ' + (l.status === 'success' ? '' : 'bad')" :style="l.status === 'success' ? '' : 'color:#B3402A'">{{ statusLabel(l.status) }}</span>
-                  <span style="font-size:12px;color:var(--text-1);font-weight:600;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="l.file_name || ''">{{ l.file_name || `#${l.file_id ?? '-'}` }}</span>
+                  <span :class="'stb ' + (l.status === 'success' ? '' : 'bad')" :style="l.status === 'success' ? '' : 'color:var(--fail)'">{{ statusLabel(l.status) }}</span>
+                  <span style="font-size:12px;color:var(--ink);font-weight:600;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="l.file_name || ''">{{ l.file_name || `#${l.file_id ?? '-'}` }}</span>
                   <span class="cap mono">#{{ l.file_id ?? '-' }} · {{ fmtLogDur(l.duration_ms) }}</span>
-                  <span v-if="l.error" class="cap mono" style="color:#B3402A;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ errHeadline(l.error) }}</span>
+                  <span v-if="l.error" class="cap mono" style="color:var(--fail);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ errHeadline(l.error) }}</span>
                 </span>
                 <Icon :name="expandedLog === l.id ? 'chevronDown' : 'chevronDown'" :size="13" style="transform:rotate(-90deg);flex-shrink:0" :style="expandedLog === l.id ? 'transform:rotate(0deg)' : ''" />
               </div>
               <!-- 展开明细：完整错误 + token 细分 + 耗时 -->
-              <div v-if="expandedLog === l.id" class="delrow" style="display:block;background:var(--bg-2, #F7F6F2);border-bottom:1px solid var(--border)">
+              <div v-if="expandedLog === l.id" class="delrow" style="display:block;background:var(--bg-2);border-bottom:1px solid var(--border)">
                 <div style="display:flex;flex-wrap:wrap;gap:8px 18px;padding:2px 0 8px;font-size:12px">
                   <span class="cap mono">文件 #{{ l.file_id ?? '-' }}{{ l.file_name ? ' · ' + l.file_name : '' }}</span>
                   <span class="cap mono">提示 {{ l.prompt_tokens ?? '-' }} tok</span>
@@ -88,27 +88,27 @@
                   <span class="cap mono">耗时 {{ l.duration_ms != null ? fmtLogDur(l.duration_ms) + ` (${l.duration_ms}ms)` : '-' }}</span>
                   <span class="cap mono">调用 ID #{{ l.id }}</span>
                 </div>
-                <div v-if="l.error" style="padding:8px 10px;margin-bottom:8px;border:1px solid #E6CBC5;background:#FBF1EF;border-radius:3px">
-                  <div class="cap" style="color:#B3402A;font-weight:600;margin-bottom:6px">错误详情</div>
+                <div v-if="l.error" style="padding:8px 10px;margin-bottom:8px;border:1px solid var(--danger-border);background:var(--danger-soft);border-radius:var(--r)">
+                  <div class="cap" style="color:var(--fail);font-weight:600;margin-bottom:6px">错误详情</div>
                   <!-- 结构化信封（新行）：错误码 / HTTP 状态 / 说明 / 服务端消息 / 原始响应 分行展示 -->
                   <template v-if="parseLlmError(l.error)">
                     <div style="display:grid;grid-template-columns:92px 1fr;gap:5px 10px;font-size:12px;align-items:baseline">
-                      <span class="cap">错误码</span><code class="mono" style="color:#8C3220">{{ parseLlmError(l.error).code }}</code>
+                      <span class="cap">错误码</span><code class="mono" style="color:var(--fail-ink)">{{ parseLlmError(l.error).code }}</code>
                       <template v-if="parseLlmError(l.error).status">
-                        <span class="cap">HTTP 状态</span><code class="mono" style="color:#8C3220">{{ parseLlmError(l.error).status }}</code>
+                        <span class="cap">HTTP 状态</span><code class="mono" style="color:var(--fail-ink)">{{ parseLlmError(l.error).status }}</code>
                       </template>
-                      <span class="cap">说明</span><span style="color:#8C3220">{{ parseLlmError(l.error).hint || '—' }}</span>
+                      <span class="cap">说明</span><span style="color:var(--fail-ink)">{{ parseLlmError(l.error).hint || '—' }}</span>
                       <template v-if="parseLlmError(l.error).message">
-                        <span class="cap">服务端消息</span><span class="mono" style="color:#8C3220;word-break:break-all">{{ parseLlmError(l.error).message }}</span>
+                        <span class="cap">服务端消息</span><span class="mono" style="color:var(--fail-ink);word-break:break-all">{{ parseLlmError(l.error).message }}</span>
                       </template>
                     </div>
                     <details v-if="parseLlmError(l.error).raw" style="margin-top:6px">
                       <summary class="cap" style="cursor:pointer;user-select:none">原始响应</summary>
-                      <pre class="mono" style="margin:4px 0 0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;color:#8C3220;max-height:200px;overflow:auto">{{ parseLlmError(l.error).raw }}</pre>
+                      <pre class="mono" style="margin:4px 0 0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;color:var(--fail-ink);max-height:200px;overflow:auto">{{ parseLlmError(l.error).raw }}</pre>
                     </details>
                   </template>
                   <!-- 旧格式纯文本（含网络错误原文等）回退原展示 -->
-                  <pre v-else class="mono" style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;color:#8C3220;max-height:200px;overflow:auto">{{ l.error }}</pre>
+                  <pre v-else class="mono" style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:11.5px;color:var(--fail-ink);max-height:200px;overflow:auto">{{ l.error }}</pre>
                 </div>
                 <div v-else class="cap" style="padding-bottom:8px">本次调用成功，无错误信息。</div>
               </div>
@@ -168,7 +168,7 @@
         <template v-else-if="logView === 'service'">
           <template v-if="svcLogs.length">
             <div style="padding:10px 14px 14px">
-              <div v-for="(l, i) in svcLogs" :key="i" class="mono" :style="isErrLine(l) ? 'font-size:11.5px;line-height:1.7;color:#B3402A;word-break:break-all' : 'font-size:11.5px;line-height:1.7;color:#555;word-break:break-all'">{{ l }}</div>
+              <div v-for="(l, i) in svcLogs" :key="i" class="mono" :style="isErrLine(l) ? 'font-size:11.5px;line-height:1.7;color:var(--fail);word-break:break-all' : 'font-size:11.5px;line-height:1.7;color:var(--text-2);word-break:break-all'">{{ l }}</div>
             </div>
           </template>
           <template v-else>

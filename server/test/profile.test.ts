@@ -158,18 +158,21 @@ test('聚合统计包：agent 消费与 exec_queue 完成率计入；窗口外�
     `INSERT INTO files (path, name, ext, domain_id) VALUES ('/pf/ag.md', 'ag', 'md', ?)`
   )).run([d])).lastID)
   // 词条挂文件（agent 消费经 wiki_entries_meta.file_id 归域）
-  await (await db.prepare(
+  const w = Number((await (await db.prepare(
     `INSERT INTO wiki_entries_meta (file_id, entry_path, title) VALUES (?, '/pf/wiki-ag.md', 'AG词条')`
-  )).run([f])
+  )).run([f])).lastID)
+  // search_knowledge 的 args 只有 query 文本——无词条指针，不猜域归属（v1 保守）
   await (await db.prepare(`INSERT INTO mcp_call_logs (tool, created_at) VALUES ('search_knowledge', datetime('now'))`)).run()
-  await (await db.prepare(`INSERT INTO mcp_call_logs (tool, created_at) VALUES ('read_entry', datetime('now', '-90 days'))`)).run()  // 窗口外
+  // 窗口内 read_entry：args.id 精确归域，计 1 次
+  await (await db.prepare(`INSERT INTO mcp_call_logs (tool, args, created_at) VALUES ('read_entry', ?, datetime('now'))`)).run([JSON.stringify({ id: w })])
+  await (await db.prepare(`INSERT INTO mcp_call_logs (tool, args, created_at) VALUES ('read_entry', ?, datetime('now', '-90 days'))`)).run([JSON.stringify({ id: w })])  // 窗口外
   await (await db.prepare(`INSERT INTO exec_queue (file_id, due_at, status) VALUES (?, datetime('now'), 'done')`)).run([f])
   await (await db.prepare(`INSERT INTO exec_queue (file_id, due_at, status) VALUES (?, datetime('now'), 'pending')`)).run([f])
 
   const bundle = await buildProfileSignalBundle(db, { windowDays: 30 })
   const ag = bundle.domains.find(x => x.domainName === 'pf-agent域')
   assert.ok(ag)
-  assert.equal(ag.agentCalls, 1, '窗口外的 mcp 调用不计')
+  assert.equal(ag.agentCalls, 1, '窗口外的 mcp 调用不计；search_knowledge 不猜域')
   assert.equal(ag.quizPassRate, 0.5)
   // 权重分档常量在案（改档位需同步 PRD J1 表述）
   assert.equal(MIN_DOMAIN_SIGNALS, 5)

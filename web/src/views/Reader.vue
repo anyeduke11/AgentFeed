@@ -4,7 +4,7 @@
       <button class="btn ghost sm" @click="goBack">← 返回</button>
       <button v-if="toc.length >= 3" class="btn ghost sm" @click="showToc = !showToc">{{ showToc ? '隐藏目录' : '目录' }}</button>
       <span class="reader-title">{{ title || '站内阅读' }}</span>
-      <span v-if="truncated" class="cap" style="color:#B4651A">内容超过 2MB，站内仅展示前 2MB · <a href="javascript:void(0)" style="color:inherit;text-decoration:underline" @click="openExternal">外部打开看全文</a></span>
+      <span v-if="truncated" class="cap" style="color:var(--warn)">内容超过 2MB，站内仅展示前 2MB · <a href="javascript:void(0)" style="color:inherit;text-decoration:underline" @click="openExternal">外部打开看全文</a></span>
       <span class="reader-right">
         <span v-if="pct > 0" class="cap mono">已读 {{ pct }}%</span>
         <button class="btn ghost sm" :disabled="fontPx <= 13" @click="changeFont(-1)">A−</button>
@@ -328,8 +328,8 @@ function goBack() {
 .reader-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
 .reader-main { flex: 1; display: flex; overflow: hidden; }
 .reader-toc { width: 220px; flex: none; overflow: auto; border-right: 1px solid var(--border); padding: 12px 8px; }
-.toc-item { font-size: 12.5px; line-height: 1.5; padding: 4px 8px; border-radius: 4px; cursor: pointer; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.toc-item:hover { background: var(--hover, rgba(0,0,0,0.05)); color: var(--fg); }
+.toc-item { font-size: 12.5px; line-height: 1.5; padding: 4px 8px; border-radius: var(--r); cursor: pointer; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toc-item:hover { background: var(--hover); color: var(--ink); }
 .reader-frame { flex: 1; width: 100%; border: 0; background: #FAF9F6; }
 .reader-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
 /* 相关阅读侧栏（I2） */
@@ -344,7 +344,7 @@ function goBack() {
 .reader-quiz { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px dashed var(--border); flex-wrap: wrap; }
 .rate-stars { display: flex; gap: 2px; }
 .rate-star { background: none; border: 0; padding: 0 1px; font-size: 17px; line-height: 1; color: var(--border); cursor: pointer; transition: color .1s; }
-.rate-star.on { color: #E8A33D; }
+.rate-star.on { color: var(--accent); }
 .rate-input { flex: 1; max-width: 420px; font-size: 12.5px; padding: 5px 9px; border: 1px solid var(--border); background: var(--card); color: var(--ink); border-radius: var(--r); }
 .rate-input:focus { outline: none; border-color: var(--ink); }
 </style>

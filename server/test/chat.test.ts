@@ -261,6 +261,58 @@ test('会话端点：sessions 列表聚合预览；sessions/:id 回放全量消�
   assert.equal(detailRes.json.messages[0].role, 'user')
 })
 
+test('回放引用持久化：assistant 落库带 refs JSON，回放返回与 meta.refs 一致（历史会话引用 chips 可还原）', async () => {
+  const out = await sseCall({ message: '混合检索怎么工作' })
+  const meta = out.events.find(e => e.type === 'meta')
+  const done = out.events[out.events.length - 1]
+  const row = await (await db0.prepare(
+    "SELECT refs FROM chat_messages WHERE session_id = ? AND role = 'assistant' ORDER BY id DESC LIMIT 1"
+  )).get([done.sessionId]) as any
+  assert.ok(row.refs && row.refs.startsWith('['), 'assistant 落库必须带 refs JSON（否则回放引用丢失）')
+
+  const detailRes: any = {}
+  await handlerOf('get', '/sessions/:id')(reqOf(undefined, { id: done.sessionId }), mockJsonRes(detailRes))
+  const a = detailRes.json.messages.find((m: any) => m.role === 'assistant')
+  assert.deepEqual(a.refs, meta.refs, '回放 refs 必须与实时 meta.refs 同构')
+})
+
+test('存量回填：refs NULL 的旧 assistant 消息按提问重跑检索、按 [n] 重建引用并写回缓存', async () => {
+  const db = await getDb()
+  const sid = 'legacy-refs-1'
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'user', '混合检索怎么工作'])
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'assistant', '依据 [1] 的说明，三路 RRF 融合召回……'])
+
+  const detailRes: any = {}
+  await handlerOf('get', '/sessions/:id')(reqOf(undefined, { id: sid }), mockJsonRes(detailRes))
+  const a = detailRes.json.messages.find((m: any) => m.role === 'assistant')
+  assert.ok(Array.isArray(a.refs) && a.refs.length === 1 && a.refs[0].id === fHit, '旧消息引用按回答 [n] 重建为检索命中词条')
+  assert.equal(a.refs[0].title, '混合检索怎么工作原理详解')
+
+  const row = await (await db0.prepare(
+    "SELECT refs FROM chat_messages WHERE session_id = ? AND role = 'assistant'"
+  )).get([sid]) as any
+  assert.ok(row.refs != null, '重建结果必须写回该行（下次回放不再重跑检索）')
+})
+
+test('存量回填边界：超界 [n] 忽略、无标记落 []、[复盘] 前缀不触发回填', async () => {
+  const db = await getDb()
+  const sid = 'legacy-refs-2'
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'user', '混合检索怎么工作'])
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'assistant', '见 [99]（超界编号）与普通叙述'])
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sid, 'assistant', '[复盘] 要点……'])
+
+  const detailRes: any = {}
+  await handlerOf('get', '/sessions/:id')(reqOf(undefined, { id: sid }), mockJsonRes(detailRes))
+  const msgs = detailRes.json.messages.filter((m: any) => m.role === 'assistant')
+  assert.deepEqual(msgs[0].refs, [], '超界编号不得伪造引用')
+  assert.deepEqual(msgs[1].refs, [], '复盘摘要无引用语义，保持空数组')
+
+  const recap = await (await db0.prepare(
+    "SELECT refs FROM chat_messages WHERE session_id = ? AND content LIKE '[复盘]%'"
+  )).get([sid]) as any
+  assert.equal(recap.refs, null, '复盘行保持 NULL（语义即无引用，不写缓存）')
+})
+
 test('对话只读红线：全程跑完后 files / wiki_entries_meta 行数与内容指纹不变', async () => {
   assert.equal(await readonlyFingerprint(), FINGERPRINT_BEFORE, '对话不得写库内知识表（只允许 chat_messages/llm_call_logs）')
 })

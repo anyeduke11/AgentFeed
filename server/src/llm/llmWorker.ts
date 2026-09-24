@@ -3,9 +3,8 @@ import path from 'path'
 import crypto from 'crypto'
 import { getDb } from '../db.js'
 import { getProviders, getDefaultModel, saveCallLog, updateFileLlmState, type LlmProvider } from './llmClient.js'
-import { getModelsInstance, callLlm, supportsVision, enqueueEmbed, type LlmImage } from './index.js'
+import { getModelsInstance, callLlm, supportsVision, type LlmImage } from './index.js'
 import { failoverChain, reportNodeResult } from './distillNodes.js'
-import { embedFileById, getEmbeddingConfig, type EmbeddingConfig } from './embeddings.js'
 import { ensureTag } from './tagGovernance.js'
 import { processProfileJob } from '../profile/distill.js'
 import { syncWikiFts } from '../search/ftsIndex.js'
@@ -14,7 +13,6 @@ import type { LlmJob } from './llmQueue.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const WIKI_DIR = path.join(DATA_DIR, 'wiki', 'entries')
-const MAX_FILE_SIZE = 100 * 1024
 
 async function md5(filePath: string): Promise<string> {
   const hash = crypto.createHash('md5')
@@ -57,6 +55,109 @@ function summarizeContent(content: string, maxChars = 4000): string {
   const cleaned = content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
   if (cleaned.length <= maxChars) return cleaned
   return cleaned.slice(0, maxChars) + '...'
+}
+
+/* ---------- 方案 A：结构感知压缩（2026-09-22 残留 12% 分析：51-102KB 超长文件 prompt 超限救赎） ---------- */
+
+/** 中英混合保守估算：中文 ≈1.5-2 字/token、英文 ≈4-5 字符/token，取 2.2 chars/token 偏保守（宁早压缩不爆上下文） */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 2.2)
+}
+
+/** 压缩产物字符上限（32K+ 大窗口模型的兜底上限；8K 窗口实际由 compressMaxChars 按预算收紧） */
+const COMPRESS_TARGET_CHARS = 12 * 1024
+
+/** 保守默认上下文窗口（tokens）：与 index.ts ensureModelDef 的 contextWindow: 8192 对齐（单一事实源）。
+ *  旧值 32768 是失配根源——sensenova/agnes flash 级网关实测 8K，压缩触发线被高估 4 倍，
+ *  8K~34K chars 文件裸送超窗被 1-token 拒答（存量 4018 篇 failed 主因）；config ai.modelContextTokens 可覆盖 */
+const DEFAULT_CONTEXT_WINDOW = 8192
+
+/** 蒸馏输入 token 预算 = 上下文窗口 − 输出 maxTokens(2048，蒸馏产物 ≈1500 + 余量) − 指令+领域名单(≈600) − 安全余量(1024) */
+export async function distillInputBudgetTokens(): Promise<number> {
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT value FROM config WHERE key = 'ai.modelContextTokens'")).get() as any
+  const ctx = row && Number(row.value) > 0 ? Number(row.value) : DEFAULT_CONTEXT_WINDOW
+  return ctx - 2048 - 600 - 1024
+}
+
+/** 压缩产物字符预算 = 输入 token 预算 × 2.2（estimateTokens 的反向换算），上限 COMPRESS_TARGET_CHARS。
+ *  旧恒 12K chars ≈ 5.5K tokens 的产物在 8K 窗口 − 2048 输出下装不下——产物本身即超窗源之一，
+ *  必须随窗口动态 sizing。下限 2000 防极端小预算把采样切碎。 */
+export function compressMaxChars(inputBudgetTokens: number): number {
+  return Math.min(COMPRESS_TARGET_CHARS, Math.max(2000, Math.floor(inputBudgetTokens * 2.2)))
+}
+
+interface Section { heading: string; body: string }
+
+/** 按标题行切节：md `#`~`######` 与 html `<h1>`~`<h6>`（含属性、跨行内文），首标题前的引导段落自成节 */
+function splitSections(body: string): Section[] {
+  const re = /^(#{1,6}[ \t]+.+|<h[1-6](?:\s[^>]*)?>[\s\S]*?<\/h[1-6]>)\s*$/gim
+  const marks: Array<{ start: number; end: number; heading: string }> = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(body)) !== null) marks.push({ start: m.index, end: m.index + m[0].length, heading: m[0].trim() })
+  if (marks.length === 0) return [{ heading: '', body }]
+  const sections: Section[] = []
+  if (marks[0].start > 0) sections.push({ heading: '', body: body.slice(0, marks[0].start) })
+  for (let i = 0; i < marks.length; i++) {
+    const bodyEnd = i + 1 < marks.length ? marks[i + 1].start : body.length
+    sections.push({ heading: marks[i].heading, body: body.slice(marks[i].end, bodyEnd) })
+  }
+  return sections
+}
+
+/** 分节采样：首段承论点、末段承总结（教案/PRD 结构保真），HTML 标签剥除省字符 */
+function sampleSectionBody(body: string, budget: number): string {
+  if (budget <= 0) return ''
+  const paras = body.split(/\n{2,}/)
+    .map(p => p.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  if (paras.length === 0) return ''
+  if (budget < 300) return paras[0].slice(0, budget)
+  // 首段取段首（论点）、末段取段尾（总结在段尾，末节的段尾即全文终点）；单段同取头尾不整段偏食
+  // （活体验证 file 3427 末节 966 字单段曾因只取段首丢掉全文思考题结论）
+  const first = paras[0].slice(0, Math.floor(budget * 0.65))
+  const last = paras[paras.length - 1].slice(-(budget - first.length))
+  return first === last ? first : first + '\n' + last
+}
+
+/**
+ * 结构感知压缩：51-102KB 教案/PRD 全量进 prompt（≈2.5-5 万 tokens）超多数网关上下文，
+ * flash 与 pro 均 1-token 拒答（归因报告 §7 形态 B）。旧 summarizeContent 头部截断丢中后部结论；
+ * 此法保全部标题骨架 + 每节首末段采样，无标题退化均匀滑窗（覆盖首/中/尾），输出恒 ≤ maxChars。
+ */
+export function compressForDistill(content: string, maxChars = COMPRESS_TARGET_CHARS): string {
+  const fm = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/)
+  const frontmatter = fm ? fm[0].slice(0, 1000) : ''
+  const body = fm ? content.slice(fm[0].length) : content
+
+  let parts: string[]
+  const sections = splitSections(body)
+  if (sections.length === 1 && !sections[0].heading) {
+    // 无标题退化：全篇均匀滑窗采样（不做头部截断，中后部结论不丢）
+    const text = sections[0].body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    const winCount = Math.max(1, Math.floor((maxChars - frontmatter.length - 400) / 350))
+    const step = Math.max(1, Math.floor(text.length / winCount))
+    parts = []
+    for (let i = 0; i < winCount; i++) {
+      // 末窗锚定文尾：滑窗若按步进走到头会停在倒数第二窗，结论段（文末）恰好落在窗外
+      const start = i === winCount - 1 ? Math.max(0, text.length - 300) : i * step
+      if (start >= text.length) break
+      parts.push(`[片段${i + 1}] ${text.slice(start, start + 300)}`)
+    }
+  } else {
+    // 骨架全保留，剩余预算按节数均摊（单节上限 450 字，防标题稀疏的长节独占）
+    const headsChars = sections.reduce((s, x) => s + x.heading.length + 1, 0)
+    const perSection = Math.min(450, Math.max(0, Math.floor((maxChars - frontmatter.length - headsChars) / sections.length)))
+    parts = sections.map(s => {
+      const sampled = sampleSectionBody(s.body, perSection)
+      if (s.heading) return sampled ? `${s.heading}\n${sampled}` : s.heading
+      return sampled
+    }).filter(Boolean)
+  }
+  const compressed = (frontmatter ? frontmatter + '\n\n' : '') + parts.join('\n\n')
+  const note = '（原文超长，以下为结构化采样压缩：保留全部标题骨架，每节取首末段要点）\n\n'
+  // 末道防线：极端标题数量下骨架本身可能超预算，硬截断保上限
+  return note + (compressed.length > maxChars ? compressed.slice(0, maxChars) : compressed)
 }
 
 /* ---------- 视觉蒸馏：提取文档内嵌本地图片随消息发送（OCR/视觉模型专用） ---------- */
@@ -114,10 +215,15 @@ export async function loadImagesForPrompt(content: string, baseDir: string, allo
   return images
 }
 
-async function buildPrompt(filePath: string, content: string, domainNames: string[]): Promise<string> {
+async function buildPrompt(filePath: string, content: string, domainNames: string[], inputBudgetTokens: number, forceCompress = false): Promise<string> {
   const stat = await fs.stat(filePath).catch(() => null)
   const size = stat?.size ?? content.length
-  const effective = size > MAX_FILE_SIZE ? summarizeContent(content) : content
+  // 方案 A（2026-09-22 残留 12%）：旧字节阈值(>100KB 才压)放走了 51-102KB 档——全量进 prompt
+  // ≈2.5-5 万 tokens 超多数网关上下文被 1-token 拒答。改为 token 预算判定：预估超预算 60%
+  // 即结构化压缩，产物按 compressMaxChars 随窗口动态 sizing（8K 窗口下 ≈3.4K tokens 安全区）。
+  // forceCompress：content_too_long 自愈重试用——同一内容已实测超窗，无判定必要直接压。
+  const maxChars = compressMaxChars(inputBudgetTokens)
+  const effective = forceCompress || estimateTokens(content) > inputBudgetTokens * 0.6 ? compressForDistill(content, maxChars) : content
   const fileName = path.basename(filePath)
   const domainHint = domainNames.length > 0 ? `\n可选领域（从中选一个最匹配的，都没有合适则留空）：${domainNames.join('、')}` : ''
   // 输出预算（H1 修法②，2026-09-22）：长输入是截断失败的主形态（归因报告 §6-A）——大文档要求大 JSON
@@ -230,7 +336,6 @@ export async function processJob(job: LlmJob): Promise<void> {
   if (type === 'assess') return processAssess(job)
   if (type === 'curate') return processCurate(job)
   if (type === 'backfill') return processBackfill(job)
-  if (type === 'embed') return processEmbed(job)
   if (type === 'profile') return processProfileJob(job)
   return processDistill(job)
 }
@@ -249,6 +354,8 @@ async function processDistill(job: LlmJob): Promise<void> {
   // 实际使用的节点（轮换后可能与 job 首选不同），落库用
   let usedProvider = job.provider
   let usedModel = job.model
+  // 网关 finish_reason 原文（配套修复③）：失败分桶区分截断/拒答形态
+  let stopReason: string | undefined
 
   try {
     const providers = await getProviders()
@@ -271,27 +378,41 @@ async function processDistill(job: LlmJob): Promise<void> {
     const rootRows = await (await db.prepare('SELECT path FROM scan_roots WHERE enabled = 1')).all() as any[]
     const scanRoots = rootRows.map(r => String(r.path)).filter(Boolean)
     const images = supportsVision(modelId) ? await loadImagesForPrompt(content, path.dirname(filePath), scanRoots) : []
-    const prompt = await buildPrompt(filePath, sanitized, domainNames)
+    const inputBudget = await distillInputBudgetTokens()
+    const prompt = await buildPrompt(filePath, sanitized, domainNames, inputBudget)
       + (images.length ? `\n（附件：该文件内嵌图片 ${images.length} 张，请结合图片内容一并蒸馏）` : '')
 
-    const llmResult = await callLlmWithFallback(provider, modelId, prompt, images)
+    // 调用 + 解析自愈循环（P2 精炼失败根治）：content_too_long_for_model 是确定性失败
+    // （实测 prompt 8944 tokens / completion 1 / stop_reason=length——模型把预算耗在输入上，
+    // 输出 1 token 即被掐断），同 prompt 重试物理上必然复现，存量 4018 篇 failed 即此死积压。
+    // 自愈 = 换输入：强制结构化压缩重建 prompt 重试一次；压缩后仍败则落终态（换模型/调窗口是用户侧动作）。
+    let llmResult: Awaited<ReturnType<typeof callLlmWithFallback>> | undefined
+    let wiki: ReturnType<typeof safeParseWikiJson> | undefined
+    for (let pass = 0; pass < 2 && !wiki; pass++) {
+      const r = pass === 0
+        ? await callLlmWithFallback(provider, modelId, prompt, images)
+        : await callLlmWithFallback(provider, modelId, await buildPrompt(filePath, sanitized, domainNames, inputBudget, true)
+          + (images.length ? `\n（附件：该文件内嵌图片 ${images.length} 张，请结合图片内容一并蒸馏）` : ''), images)
+      const w = safeParseWikiJson(r.text)
+      if (w.title || w.summary || w.points.length > 0) {
+        llmResult = r
+        wiki = w
+        break
+      }
+      // H1 修法①（2026-09-22 归因 §6-B）：flash 级模型对超长 prompt 常回 1-token 短拒答——
+      // 内容性失败报 content_too_long（非 not_json）；仅它值得换输入自愈，not_json 属非确定性失败走既有重试机制
+      const short = (r.completionTokens ?? r.text.length) < 200
+      if (pass > 0 || !short) throw new Error(short ? 'content_too_long_for_model' : 'llm_output_not_json')
+    }
+    if (!llmResult || !wiki) throw new Error('llm_output_not_json')
     usedProvider = llmResult.usedProvider
     usedModel = llmResult.usedModel
+    stopReason = llmResult.stopReason
 
     promptTokens = llmResult.promptTokens
     completionTokens = llmResult.completionTokens
     totalTokens = (promptTokens || 0) + (completionTokens || 0)
 
-    const wiki = safeParseWikiJson(llmResult.text)
-    // 解析结果全空 = 模型没按 JSON 输出：按失败处理（落失败泳道可重试），避免假 done（无标题/摘要/领域/标签）
-    if (!wiki.title && !wiki.summary && wiki.points.length === 0) {
-      // H1 修法①（2026-09-22 归因 §6-B）：flash 级模型对超长 prompt 常回一句「内容过长」类短文本
-      // （completion 1-49 tokens 桶 10,223 次实测）——这是内容性拒答，重试同 prompt 必然再拒，
-      // 74% file 因此死循环烧 token。报 content_too_long（非 not_json）供上游跳过；llm_queue
-      // 的既有重试机制不识别它为可重试类（错误语义即「换样本才有救」）。
-      const short = (llmResult.completionTokens ?? llmResult.text.length) < 200
-      throw new Error(short ? 'content_too_long_for_model' : 'llm_output_not_json')
-    }
     const entryDir = path.join(WIKI_DIR, String(job.fileId))
     await fs.mkdir(entryDir, { recursive: true })
 
@@ -367,7 +488,8 @@ async function processDistill(job: LlmJob): Promise<void> {
       total_tokens: totalTokens,
       duration_ms: durationMs,
       status,
-      error
+      error,
+      stop_reason: stopReason ?? null
     })
     await updateFileLlmState(db, job.fileId, status === 'success' ? 'done' : 'failed')
     // triage 批次熔断统计：只统计带 origin='triage' 标记的 job，普通 push 蒸馏的成败不进计数。
@@ -377,10 +499,11 @@ async function processDistill(job: LlmJob): Promise<void> {
     if (job.options?.origin === 'triage' && error !== 'content_too_long_for_model') {
       recordTriageResult(status === 'success')
     }
-    // 蒸馏成功后自动向量化：投独立 embed 队列（失败自动重试、串行不打架），不占蒸馏并发、不阻塞下一个蒸馏任务
-    if (status === 'success') {
-      enqueueEmbed(job.fileId)
-    }
+    // 方案 A（向量冗余收敛第一步，2026-09-24）：file 级向量停写——蒸馏成功已在上方 indexWikiChunks
+    // 自动生成 chunk 向量（检索主路），file 级 title+summary 向量 93.4% 与之语义重叠且不服务任何
+    // 真实检索路径（唯一消费方是设置页验证小工具，已切 chunk 主路）。存量 36.5k 行冻结只读，
+    // 彻底收敛（DROP + 口径迁移）待 P2 内存索引定型后执行。
+    // if (status === 'success') { enqueueEmbed(job.fileId) }
   }
 }
 
@@ -395,7 +518,7 @@ function isFailoverableError(msg: string): boolean {
  * - 池未启用任何节点时退化为仅首选（行为与单模型一致）
  * - 返回实际使用的 provider/model（落库与展示用，可能与 job 首选不同）
  */
-async function callLlmWithFallback(provider: LlmProvider, modelId: string, prompt: string, images?: LlmImage[]): Promise<{ text: string; promptTokens?: number; completionTokens?: number; usedProvider: string; usedModel: string }> {
+async function callLlmWithFallback(provider: LlmProvider, modelId: string, prompt: string, images?: LlmImage[]): Promise<{ text: string; promptTokens?: number; completionTokens?: number; stopReason?: string; usedProvider: string; usedModel: string }> {
   const providers = await getProviders()
   const chain = failoverChain(provider.name, modelId)
     .map(n => ({ p: providers.find(x => x.name === n.provider), model: n.model }))
@@ -408,7 +531,7 @@ async function callLlmWithFallback(provider: LlmProvider, modelId: string, promp
       const text = await callLlm(step.p!.name, step.model, prompt, step.p!.apiKey, images)
       reportNodeResult(step.p!.name, step.model, true)
       const usage = (text as any).usage as { input?: number; output?: number } | undefined
-      return { text: text.text, promptTokens: usage?.input, completionTokens: usage?.output, usedProvider: step.p!.name, usedModel: step.model }
+      return { text: text.text, promptTokens: usage?.input, completionTokens: usage?.output, stopReason: text.stopReason, usedProvider: step.p!.name, usedModel: step.model }
     } catch (e: any) {
       const msg = String(e?.message || e)
       lastErr = e
@@ -630,30 +753,5 @@ async function processBackfill(job: LlmJob): Promise<void> {
   }
 }
 
-/** embed：向量补齐——对单篇生成/更新向量（不动 files.llm_state；失败记调用日志） */
-async function processEmbed(job: LlmJob): Promise<void> {
-  const db = await getDb()
-  const started = Date.now()
-  let status: 'success' | 'failed' = 'failed'
-  let error: string | undefined
-  let cfg: EmbeddingConfig | undefined
-  try {
-    cfg = await getEmbeddingConfig()
-    if (!cfg.enabled || !cfg.model) throw new Error('embedding_disabled')
-    await embedFileById(db, job.fileId, cfg)
-    status = 'success'
-  } catch (e: any) {
-    error = String(e?.message || e)
-    // 上抛给 embed 队列执行器走自动重试（调用日志已在 finally 落库）
-    throw e
-  } finally {
-    await saveCallLog({
-      file_id: job.fileId,
-      provider: cfg?.provider || 'ollama',
-      model: cfg?.model || '',
-      duration_ms: Date.now() - started,
-      status,
-      error
-    })
-  }
-}
+// processEmbed（file 级向量补齐）随方案 B 移除：file_embeddings 已 DROP，向量主路 = 词条分块
+// （蒸馏成功 indexWikiChunks + wiki 面板补嵌），见 llm/index.ts 方案 B 注释。

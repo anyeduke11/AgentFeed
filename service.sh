@@ -17,8 +17,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_DIR="$ROOT/server"
 WEB_DIR="$ROOT/web"
 LOG_FILE="$ROOT/.service.log"
+OLLAMA_LOG="$ROOT/.ollama.log"
 PORT=5188
 HEALTH="http://127.0.0.1:$PORT/api/health"
+# 本地向量模型：蒸馏成功即自动向量化（ai.embedding 默认开启），Ollama 随后端一并拉起
+EMBED_MODEL="${AGENTFEED_EMBED_MODEL:-qwen3-embedding:4b}"
+OLLAMA_URL="http://127.0.0.1:11434"
 
 info()  { printf '\033[32m[服务]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[33m[服务]\033[0m %s\n' "$*"; }
@@ -36,6 +40,63 @@ ensure_build() {
 }
 
 health_ok() { curl -sf "$HEALTH" >/dev/null 2>&1; }
+ollama_ok() { curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1; }
+
+# 向量模型预热：后台发一次真实 embed 请求把模型加载进内存（冷加载实测 ~50s，2.5GB 模型），
+# 完成/失败落日志留痕；不阻塞启动、失败不告警——首个向量请求仅变慢，功能不受影响
+warmup_embed_model() {
+  (
+    if curl -sf --max-time 300 "$OLLAMA_URL/api/embed" -d "{\"model\":\"$EMBED_MODEL\",\"input\":\"warmup\"}" >/dev/null 2>&1; then
+      echo "[$(date '+%F %T')] [预热] $EMBED_MODEL 已加载进内存，首个向量请求零冷加载" >> "$OLLAMA_LOG"
+    else
+      echo "[$(date '+%F %T')] [预热] $EMBED_MODEL 预热未完成（冷加载超时或服务不可达），首个向量请求可能变慢" >> "$OLLAMA_LOG"
+    fi
+  ) >/dev/null 2>&1 &
+  disown
+}
+
+# Ollama 本地向量服务托管：确保服务在跑 + 向量模型可用（蒸馏后自动向量化依赖它在线）。
+# 全程 best-effort：未安装/启动失败只警告不阻塞后端启动，向量任务由 embed 重试与 sweeper 兜底。
+ensure_ollama() {
+  if ! command -v ollama >/dev/null 2>&1; then
+    warn "未安装 ollama，本地向量化不可用（安装后重新 start 自动接管）"
+    return 0
+  fi
+  if ollama_ok; then
+    info "Ollama 已在运行 (11434)"
+  else
+    info "启动 Ollama 服务 (11434)…"
+    nohup ollama serve >>"$OLLAMA_LOG" 2>&1 &
+    disown
+    local ready=0
+    for _ in $(seq 1 20); do
+      if ollama_ok; then ready=1; break; fi
+      sleep 0.5
+    done
+    if [ "$ready" = 1 ]; then
+      info "Ollama 启动成功"
+    else
+      warn "Ollama 10 秒内未就绪（日志: ${OLLAMA_LOG}），向量任务将由重试机制兜底"
+      return 0
+    fi
+  fi
+  # 向量模型缺席则后台拉取（2.5GB 级，不阻塞后端启动；完成后 sweeper 自动收敛积压）
+  if ollama list 2>/dev/null | awk 'NR>0{print $1}' | grep -qx "$EMBED_MODEL"; then
+    info "向量模型 $EMBED_MODEL 就绪，后台预热中（完成见 ${OLLAMA_LOG}）"
+    warmup_embed_model
+  else
+    warn "向量模型 $EMBED_MODEL 未安装，后台拉取中（首次数分钟，进度见 ${OLLAMA_LOG}）…"
+    (
+      if ollama pull "$EMBED_MODEL" >>"$OLLAMA_LOG" 2>&1; then
+        echo "[$(date '+%F %T')] [预热] 拉取完成，开始预热 $EMBED_MODEL" >> "$OLLAMA_LOG"
+        warmup_embed_model
+      else
+        echo "[$(date '+%F %T')] [预热] 拉取失败，可手动执行: ollama pull $EMBED_MODEL" >> "$OLLAMA_LOG"
+      fi
+    ) >/dev/null 2>&1 &
+    disown
+  fi
+}
 
 start() {
   local busy; busy="$(port_pids)"
@@ -49,6 +110,7 @@ start() {
     exit 1
   fi
   ensure_build
+  ensure_ollama
   info "启动服务 (端口 $PORT)…"
   # exec 让 node 直接替换子 shell 进程（PID 即监听进程）；disown 移出 job 表，
   # 避免同实例内 stop/restart 时 bash 打印 "Terminated" 通知
