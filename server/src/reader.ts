@@ -47,7 +47,8 @@ function rewriteAssetPaths(html: string, fileId: number): string {
   $('img').each((_, el) => {
     const src = String($(el).attr('src') || '').trim()
     if (!src || /^https?:\/\//i.test(src) || /^data:/i.test(src) || src.startsWith('/api/')) return
-    const rel = src.replace(/^\.?\//, '')
+    let rel = src.replace(/^\.?\//, '')
+    try { rel = decodeURIComponent(rel) } catch { /* 非转义 % 字面量，保持原样 */ }
     $(el).attr('src', `/api/files/${fileId}/asset?rel=${encodeURIComponent(rel)}`)
     $(el).attr('loading', 'lazy')
   })

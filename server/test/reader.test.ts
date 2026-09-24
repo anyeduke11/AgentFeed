@@ -45,4 +45,11 @@ describe('阅读器清洗管线安全', () => {
     assert.equal(toc[0].text, 't')
     assert.ok(doc.includes(`id="${toc[0].id}"`))
   })
+
+  it('buildReaderDoc CJK 资产路径单重编码：md 渲染先编码 src，改写时必须 decode 再 encode，否则代理双重解码后磁盘 miss 404', () => {
+    const { html: doc } = buildReaderDoc('![图](assets/中文标题/img-0.png)', '.md', 9, '标题')
+    const m = doc.match(/src="\/api\/files\/9\/asset\?rel=([^"]+)"/)
+    assert.ok(m, '应生成资产代理地址')
+    assert.equal(decodeURIComponent(m![1]), 'assets/中文标题/img-0.png')
+  })
 })
