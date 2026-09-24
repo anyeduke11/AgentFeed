@@ -74,6 +74,7 @@ export const api = {
     related: (id: number, limit = 12) => getJSON<any[]>(`${base}/tags/related?id=${id}&limit=${limit}`),
     proposals: (status = 'pending', kind?: string) => getJSON<any[]>(`${base}/tags/proposals?status=${status}${kind ? '&kind=' + kind : ''}`),
     proposalAccept: (id: number) => post(`${base}/tags/proposals/${id}/accept`),
+    proposalAcceptBatch: () => post(`${base}/tags/proposals/accept-batch`, { kind: 'semantic' }),
     proposalReject: (id: number) => post(`${base}/tags/proposals/${id}/reject`),
     scanNormalize: () => post(`${base}/tags/scan/normalize`),
     scanSemantic: (batchSize = 400) => post(`${base}/tags/scan/semantic`, { batchSize }),
@@ -207,6 +208,7 @@ export const api = {
     exportPreview: (id: string, refined = false, dir = '') => getJSON<{ success: boolean; markdown: string; dir: string; fileName: string; refined: boolean; message?: string }>(`${base}/chat/sessions/${encodeURIComponent(id)}/export/preview?${new URLSearchParams({ ...(refined ? { refined: '1' } : {}), ...(dir ? { dir } : {}) })}`),
     exportSave: (id: string, payload: { markdown: string; dir?: string }) => post(`${base}/chat/sessions/${encodeURIComponent(id)}/export`, payload),
     distill: (id: string, payload: { markdown: string; dir?: string }) => post(`${base}/chat/sessions/${encodeURIComponent(id)}/distill`, payload),
+    exportLogs: () => getJSON<{ success: boolean; total: number; logs: Array<{ id: number; kind: string; sessionId: string; title: string; path: string; match: string | null; entryId: number | null; chars: number; createdAt: string }> }>(`${base}/chat/export-logs`),
     recap: (sessionId: string) => post(`${base}/chat/recap`, { sessionId })
   },
 

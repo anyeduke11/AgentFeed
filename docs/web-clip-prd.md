@@ -172,3 +172,4 @@ HTML 文件 `<head>` 注入锚点注释：`<!-- AgentFeed webclip: 20260924-1530
 ## 变更日志
 
 - 2026-09-24 v1.0：初稿定稿。MD+HTML 双文件全量入库（均蒸馏+向量化），磁盘同名对 + frontmatter/锚点注释 + webclip_records 双 file_id 三层关联。
+- 2026-09-24 v1.1：M1 交付合入 main（f7d8ceb，e2e 10/10）；M2 范围定稿见 `docs/superpowers/plans/2026-09-24-web-clip-m2.md`（retry/失败分类/限额可配 + 终审 follow-up 收拢；埋点 source 集合显式扩容 +webclip，CLAUDE.md 红线 5 随 M2-T9 同步）。

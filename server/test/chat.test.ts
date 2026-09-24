@@ -523,6 +523,50 @@ test('AI 蒸馏预览：distillLlmFn 注入 fake 生成结构化词条；失败�
   assert.ok(sink2.json.markdown.includes('# 蒸馏预览用会话LKJHGs'), '回退产物 = 对话体')
 })
 
+test('产物留痕：export/distill 成功各落一行 chat_export_logs，列表端点可查且字段完整', async () => {
+  const db = await getDb()
+  const logsBefore = await countOf('SELECT COUNT(*) AS n FROM chat_export_logs')
+  // 纯导出一次
+  const exportLayer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.post && l.route.path === '/sessions/:id/export')
+  const mdExport = '# 留痕导出词条QAZWS\n\n正文'
+  const r1: any = {}
+  await exportLayer.route.stack[0].handle(reqOf({ markdown: mdExport }, { id: 'log-session' }), mockJsonRes(r1))
+  assert.equal(r1.json.success, true, r1.json.message)
+  // 蒸馏入库一次
+  const distillLayer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.post && l.route.path === '/sessions/:id/distill')
+  const mdDistill = '# 留痕入库词条EDCRF\n\n**来源**: chat/log-session\n\n入库验证正文。\n\n最后更新：2026-09-24'
+  const r2: any = {}
+  await distillLayer.route.stack[0].handle(reqOf({ markdown: mdDistill }, { id: 'log-session' }), mockJsonRes(r2))
+  assert.equal(r2.json.success, true, r2.json.message)
+
+  const logsAfter = await countOf('SELECT COUNT(*) AS n FROM chat_export_logs')
+  assert.equal(logsAfter - logsBefore, 2, '两次成功操作各留一行')
+
+  const exportRow = await (await db.prepare(
+    "SELECT kind, match, entry_id, chars FROM chat_export_logs WHERE title = '留痕导出词条QAZWS'"
+  )).get() as any
+  assert.equal(exportRow.kind, 'export')
+  assert.equal(exportRow.match, null, '纯导出无 match')
+  assert.equal(exportRow.entry_id, null, '纯导出无词条 id')
+  assert.equal(Number(exportRow.chars), mdExport.length)
+
+  const distillRow = await (await db.prepare(
+    "SELECT kind, match, entry_id FROM chat_export_logs WHERE title = '留痕入库词条EDCRF'"
+  )).get() as any
+  assert.equal(distillRow.kind, 'distill')
+  assert.equal(distillRow.match, r2.json.match)
+  assert.equal(Number(distillRow.entry_id), r2.json.entryId, '入库行须带词条 id（阅读器跳转用）')
+
+  // 列表端点
+  const listLayer = (chatRouter as any).stack.find((l: any) => l.route?.methods?.get && l.route.path === '/export-logs')
+  const r3: any = {}
+  await listLayer.route.stack[0].handle(reqOf(undefined), mockJsonRes(r3))
+  assert.equal(r3.json.success, true)
+  assert.ok(r3.json.total >= 2)
+  const hit = r3.json.logs.find((l: any) => l.title === '留痕入库词条EDCRF')
+  assert.ok(hit && hit.entryId === r2.json.entryId && hit.kind === 'distill', '列表项字段完整（camelCase）')
+})
+
 test('对话只读红线：files 分毫不动；wiki_entries_meta 仅蒸馏入库设计内新增（imported），既有行内容分毫不动', async () => {
   const db = await getDb()
   assert.equal((await readonlyFingerprint()).split(';')[0], FINGERPRINT_BEFORE.split(';')[0], 'files 表任何 chat 路径都不得写（行数 + 内容指纹）')
