@@ -24,6 +24,7 @@ import { profileRouter } from './routes/profile.js'
 import { chatRouter } from './routes/chat.js'
 import { rsiRouter } from './routes/rsi.js'
 import { searchRouter } from './routes/search.js'
+import { webclipRouter } from './routes/webclip.js'
 import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
@@ -61,6 +62,7 @@ app.use('/api/reports', reportsRouter)
 app.use('/api/profile', profileRouter)
 app.use('/api/chat', chatRouter)
 app.use('/api/rsi', rsiRouter)
+app.use('/api/webclip', webclipRouter)
 
 app.get('/api/health', (req, res) => res.json({ ok: true }))
 
