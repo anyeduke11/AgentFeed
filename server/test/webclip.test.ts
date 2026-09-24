@@ -6,6 +6,7 @@ import os from 'os'
 import path from 'path'
 import { isPrivateIp, checkUrlSyntax, assertPublicUrl } from '../src/webclip/ssrf.js'
 import { slugify, buildDocBase, reserveBase } from '../src/webclip/naming.js'
+import { htmlToMarkdown, rewriteSnapshot } from '../src/webclip/convert.js'
 
 // 隔离方式：AGENTFEED_DATA_DIR 指向临时目录（同 domainDedupGate.test.ts 模式），绝不误伤生产 server/data/app.db。
 const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-'))
@@ -73,4 +74,38 @@ test('webclip/naming: reserveBase 磁盘冲突加序号', () => {
   assert.equal(reserveBase(dir, '20260924-153012-a'), '20260924-153012-a-2')
   fs.writeFileSync(path.join(dir, '20260924-153012-a-2.md'), 'x')
   assert.equal(reserveBase(dir, '20260924-153012-a'), '20260924-153012-a-3')
+})
+
+const FIXTURE = `<!doctype html><html><head><title>测试页</title></head><body>
+<nav>导航噪声</nav><article><h1>标题一</h1><p>段落 <strong>重点</strong> 与 <a href="/rel">链接</a>。</p>
+<img src="/img/a.png" alt="图A"><img src="data:image/png;base64,xxx" alt="内嵌图">
+<pre><code>const x = 1</code></pre><blockquote>引用文本</blockquote></article>
+<footer>页脚噪声</footer></body></html>`
+
+test('webclip/convert: 正文提取为 md，噪声剔除，图片收占位符', () => {
+  const { title, markdown, images } = htmlToMarkdown(FIXTURE, 'https://example.com/post/')
+  assert.equal(title, '测试页')
+  assert.ok(markdown.includes('# 标题一'))
+  assert.ok(markdown.includes('**重点**'))
+  assert.ok(markdown.includes('[链接](https://example.com/rel)'))
+  assert.ok(markdown.includes('![图A](__WEBCLIP_IMG_0__)'))
+  assert.ok(markdown.includes('```'))
+  assert.ok(markdown.includes('> 引用文本'))
+  assert.ok(!markdown.includes('导航噪声'))
+  assert.ok(!markdown.includes('页脚噪声'))
+  // data: 协议不是 http(s) 资源，不收集
+  assert.equal(images.length, 1)
+  assert.equal(images[0].absUrl, 'https://example.com/img/a.png')
+})
+
+test('webclip/convert: 空正文兜底不抛错', () => {
+  const { markdown } = htmlToMarkdown('<html><body><div></div></body></html>', 'https://a.com/')
+  assert.ok(markdown.includes('未能从页面提取正文'))
+})
+
+test('webclip/convert: rewriteSnapshot 已下载图改相对路径，未下载图移除保 alt', () => {
+  const out = rewriteSnapshot(FIXTURE, 'https://example.com/post/', new Map([['https://example.com/img/a.png', 'assets/b/img-0.png']]))
+  assert.ok(out.includes('src="assets/b/img-0.png"'))
+  assert.ok(!out.includes('data:image'))
+  assert.ok(out.includes('[内嵌图]'))
 })
