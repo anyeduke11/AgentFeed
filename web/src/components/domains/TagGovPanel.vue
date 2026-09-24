@@ -238,10 +238,16 @@ const tagTotal = ref(0)
 const kw = ref('')
 const chip = ref<'primary' | 'secondary' | 'normal' | 'all' | 'retired'>('primary')
 const loading = ref(false)
-const LIMIT = 200
+const LIMIT = 5000 // 一次拉全量（服务端 cap 5000）：拼音排序必须是全局序，分页内排序会跨页失真
 
-// 墙上渲染列表：挂靠父级选拔中只显示可作父级的一级标签
-const wallTags = computed(() => pickingParent.value ? tags.value.filter((t: any) => t.level === 'primary') : tags.value)
+// 墙上渲染列表：挂靠父级选拔中只显示可作父级的一级标签；分级分组（一级→二级→普通→…），组内按中文拼音（ICU zh）升序
+const zhColl = new Intl.Collator('zh')
+const LEVEL_ORDER: Record<string, number> = { primary: 0, secondary: 1, normal: 2 }
+const wallTags = computed(() => {
+  const list = pickingParent.value ? tags.value.filter((t: any) => t.level === 'primary') : tags.value
+  return [...list].sort((a: any, b: any) =>
+    ((LEVEL_ORDER[a.level] ?? 9) - (LEVEL_ORDER[b.level] ?? 9)) || zhColl.compare(String(a.name), String(b.name)))
+})
 
 function chipParams(): Record<string, string> {
   if (chip.value === 'retired') return { status: 'retired' }
