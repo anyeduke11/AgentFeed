@@ -14,6 +14,7 @@ const DATA_TMP = await fsp.mkdtemp(path.join(os.tmpdir(), 'agentfeed-webclip-db-
 process.env.AGENTFEED_DATA_DIR = DATA_TMP
 
 const { getDb, closeDb } = await import('../src/db.js')
+const { convertCore, retryRecord, WebclipError } = await import('../src/routes/webclip.js')
 
 after(async () => {
   try { await closeDb() } catch { /* 临时库句柄未全部 finalize，进程退出自然释放 */ }
@@ -130,4 +131,56 @@ test('webclip/ssrf: IPv6 十六进制映射与 fe80::/10 全段（M2 加固）',
   for (const ip of ['::ffff:8.8.8.8', '2001:db8::1', 'fec0::1']) {
     assert.ok(!isPrivateIp(ip), `${ip} 应判公网`)
   }
+})
+
+// 测试辅助：落一条 failed 记录并返回行 id（retry「原行复用」验证的基座）
+async function createFailedRecord(url: string, code: string, msg: string): Promise<number> {
+  const db = await getDb()
+  const esc = (s: string) => s.replace(/'/g, "''")
+  await db.exec(`INSERT INTO webclip_records (url, status, snapshot, error) VALUES ('${esc(url)}', 'failed', 0, '${esc(`[${code}] ${msg}`)}')`)
+  const row = await (await db.prepare('SELECT last_insert_rowid() AS id')).get() as any
+  return Number(row.id)
+}
+
+// runScan 假体：模拟扫描器把剪藏根下落盘的 md/html 登记进 files 表——convertCore「await 扫描后回填 file_id」契约的测试替身
+async function fakeScanIntoFiles(root: string) {
+  const db = await getDb()
+  for (const name of fs.readdirSync(root)) {
+    if (!/\.(md|html)$/.test(name)) continue
+    const p = path.join(root, name).replace(/'/g, "''")
+    await db.exec(`INSERT OR IGNORE INTO files (path, name, ext, source_agent) VALUES ('${p}', '${name.replace(/'/g, "''")}', '${name.split('.').pop()}', 'webclip')`)
+  }
+}
+
+test('webclip/core: convertCore 走注入 fetcher，dup/force 语义正确', async () => {
+  const db = await getDb()
+  const root = path.join(DATA_TMP, 'clip-root'); await fsp.mkdir(root, { recursive: true })
+  await db.exec(`INSERT OR IGNORE INTO scan_roots (path, agent) VALUES ('${root.replace(/'/g, "''")}', 'webclip')`)
+  // storageRoot 键已被 seedDefaults 预置为空串，INSERT OR IGNORE 会跳过——用 upsert 真正写入
+  await db.exec(`INSERT INTO config (key, value, type) VALUES ('webclip.storageRoot', '${root.replace(/'/g, "''")}', 'string')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+  const fake = async () => ({ html: '<html><head><title>核心页</title></head><body><article><h1>核心页</h1><p>正文</p></article></body></html>', finalUrl: 'https://core.example/' })
+  const deps = { renderPage: fake, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} } // fetcher/scan/SSRF 全注入，「不触网」
+  const r1 = await convertCore('https://core.example/a', { snapshot: true }, deps)
+  assert.equal(r1.success, true); assert.ok(r1.mdFileId); assert.ok(r1.htmlFileId); assert.ok(r1.title)
+  // dup 语义：成功记录在路由层写入（convertCore 不写库），此处手动落一条成功行再验证拒绝
+  await db.exec(`INSERT INTO webclip_records (url, title, slug_ts, md_path, status, snapshot) VALUES ('https://core.example/a', '核心页', 'x', 'x', 'success', 1)`)
+  await assert.rejects(() => convertCore('https://core.example/a', {}), (e: any) => e instanceof WebclipError && e.code === 'dup')
+  const r2 = await convertCore('https://core.example/a', { force: true }, deps)
+  assert.equal(r2.success, true)
+  // 磁盘两对文档（force 新时间戳基名），不覆盖
+  const filesOnDisk = fs.readdirSync(root).filter((f: string) => f.endsWith('.md'))
+  assert.equal(filesOnDisk.length, 2)
+})
+
+test('webclip/retry: retryRecord 把 failed 记录更新为 success（原行复用）', async () => {
+  const db = await getDb()
+  const fake = async () => ({ html: '<html><head><title>重试页</title></head><body><article><p>正文</p></article></body></html>', finalUrl: 'https://core.example/' })
+  const rootRow = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.storageRoot'")).get() as any
+  const root = String(rootRow.value)
+  const id = await createFailedRecord('https://core.example/retry', 'fetch', '模拟失败')
+  const r = await retryRecord(id, { renderPage: fake, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} })
+  assert.equal(r.success, true)
+  const row = await (await db.prepare('SELECT status, md_file_id, error FROM webclip_records WHERE id = ?')).get(id) as any
+  assert.equal(row.status, 'success'); assert.ok(row.md_file_id); assert.equal(row.error, null)
 })

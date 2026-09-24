@@ -35,6 +35,7 @@ export const api = {
     getConfig: () => getJSON<any>(`${base}/webclip/config`),
     putConfig: (storageRoot: string) => put(`${base}/webclip/config`, { storageRoot }),
     convert: (payload: { url: string; snapshot?: boolean; force?: boolean }) => post(`${base}/webclip/convert`, payload),
+    retry: (id: number) => post(`${base}/webclip/records/${id}/retry`),
     records: (params?: Record<string, string>) => {
       const qs = params ? new URLSearchParams(params).toString() : ''
       return getJSON<any>(`${base}/webclip/records${qs ? '?' + qs : ''}`)

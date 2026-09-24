@@ -51,7 +51,7 @@
                 <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id)">md</button>
                 <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id)">html</button>
               </template>
-              <span v-else class="c-dim">—</span>
+              <button v-else-if="r.status === 'failed'" class="btn xs" :disabled="submitting" @click="retryOne(r)">重试</button>
             </td>
             <td style="text-align:right"><span class="c-dim cap mono">{{ r.error ? r.error.slice(0, 60) : '' }}</span></td>
           </tr>
@@ -119,6 +119,23 @@ async function submit() {
     lastResult.value = { ok: false, msg: `请求失败：${e?.message || e}` }
   } finally {
     submitting.value = false
+  }
+}
+
+async function retryOne(r: any) {
+  if (submitting.value) return
+  submitting.value = true
+  lastResult.value = null
+  try {
+    const res = await api.webclip.retry(r.id)
+    lastResult.value = res.success
+      ? { ok: true, msg: `重试成功（${res.durationMs ? (res.durationMs / 1000).toFixed(1) : '?'}s），已进入蒸馏队列` }
+      : { ok: false, msg: res.message || '重试失败' }
+  } catch (e: any) {
+    lastResult.value = { ok: false, msg: `重试请求失败：${e?.message || e}` }
+  } finally {
+    submitting.value = false
+    await loadRecords(page.value)
   }
 }
 
