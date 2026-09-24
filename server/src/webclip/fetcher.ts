@@ -10,8 +10,11 @@ let launching: Promise<any> | null = null
 let idleTimer: NodeJS.Timeout | null = null
 const IDLE_MS = 60 * 1000
 
-export function isReady(): Promise<boolean> {
-  return import('playwright').then(() => true).catch(() => false)
+export async function isReady(): Promise<boolean> {
+  try {
+    const mod: any = await import('playwright')
+    return typeof mod.chromium.executablePath === 'function' && !!mod.chromium.executablePath()
+  } catch { return false }
 }
 
 async function getBrowser(): Promise<any> {

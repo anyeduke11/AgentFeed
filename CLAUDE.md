@@ -32,7 +32,7 @@ npm workspaces（server + web），SQLite 单文件（19 表），端口 5188。
 2. **阅读器零脚本执行**：站内渲染内容的安全承诺 = 服务端白名单清洗（reader.ts）+ iframe sandbox 不含 allow-scripts，双保险缺一不可；改清洗管线必跑 `server/test/reader.test.ts`（6 个安全用例钉死 script/on*/危险协议/危险标签）
 3. **SQLite 迁移**：只用 `ensureColumns(db, table, columns)` 幂等加列（PRAGMA 检查后 ALTER ADD），不写破坏性迁移
 4. **API 约定**：响应统一 `{ success: boolean, ... }`；前端 `api.ts` 是**命名导出** `{ api }`（不是默认导出，曾踩坑）
-5. **埋点 source 集合**：`preview / pool / exec / daily / reader`——新增打开出口先对齐这个集合，read_history 按 source 区分渠道
+5. **埋点 source 集合**：`preview / pool / exec / daily / reader / webclip`——新增打开出口先对齐这个集合，read_history 按 source 区分渠道
 
 ## 已知债务与陷阱
 
