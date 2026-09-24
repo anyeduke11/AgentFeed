@@ -9,6 +9,12 @@
       </div>
     </div>
 
+    <div class="chips" style="margin-bottom:14px">
+      <button class="chip" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件清单</button>
+      <button class="chip" :class="{ on: tab === 'clip' }" @click="tab = 'clip'">网页剪藏</button>
+    </div>
+
+    <template v-if="tab === 'files'">
     <!-- 筛选器 -->
     <div class="filterbox">
       <div class="frow1">
@@ -120,6 +126,8 @@
       <button class="btn xs" :disabled="files.page >= pageCount" @click="pageTo(files.page + 1)">下一页</button>
     </div>
     </template>
+    </template>
+    <WebclipPanel v-else />
   </div>
 </template>
 
@@ -127,6 +135,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
+import WebclipPanel from '../components/WebclipPanel.vue'
 import { useFilesStore } from '../stores/useFilesStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
 import { useUiStore } from '../stores/useUiStore'
@@ -138,6 +147,8 @@ const files = useFilesStore()
 const domains = useDomainsStore()
 const ui = useUiStore()
 const router = useRouter()
+
+const tab = ref<'files' | 'clip'>('files')
 
 const EXT_F = [{ v: '全部', t: '全部' }, { v: '.html', t: 'HTML' }, { v: '.md', t: 'Markdown' }]
 const STATUS_F = ['全部', '已蒸馏', '编目中', '待处理', '失败', '已跳过', '已删除']

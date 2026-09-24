@@ -13,6 +13,7 @@
       <!-- 功能区一行 Tab -->
       <div class="tabs">
         <button class="tab" :class="{ on: settingsTab === 'roots' }" @click="settingsTab = 'roots'">扫描根</button>
+        <button class="tab" :class="{ on: settingsTab === 'webclip' }" @click="settingsTab = 'webclip'">网页剪藏</button>
         <button class="tab" :class="{ on: settingsTab === 'ai' }" @click="settingsTab = 'ai'">AI 设置与队列</button>
         <button class="tab" :class="{ on: settingsTab === 'search' }" @click="settingsTab = 'search'">检索</button>
         <button class="tab" :class="{ on: settingsTab === 'gate' }" @click="settingsTab = 'gate'">过滤门禁</button>
@@ -37,6 +38,7 @@ import Icon from '../components/Icon.vue'
 
 // 七个 tab 各自的子组件（chunk 按需加载，首次切入才拉取）
 const SettingsRoots = defineAsyncComponent(() => import('../components/settings/SettingsRoots.vue'))
+const SettingsWebclip = defineAsyncComponent(() => import('../components/settings/SettingsWebclip.vue'))
 const SettingsAi = defineAsyncComponent(() => import('../components/settings/SettingsAi.vue'))
 const SettingsSearch = defineAsyncComponent(() => import('../components/settings/SettingsSearch.vue'))
 const SettingsGate = defineAsyncComponent(() => import('../components/settings/SettingsGate.vue'))
@@ -46,11 +48,12 @@ const SettingsLan = defineAsyncComponent(() => import('../components/settings/Se
 const SettingsLogs = defineAsyncComponent(() => import('../components/settings/SettingsLogs.vue'))
 const SettingsProfile = defineAsyncComponent(() => import('../components/settings/SettingsProfile.vue'))
 
-const settingsTab = ref<'roots' | 'ai' | 'search' | 'gate' | 'records' | 'deleted' | 'security' | 'profile' | 'logs'>('roots')
+const settingsTab = ref<'roots' | 'webclip' | 'ai' | 'search' | 'gate' | 'records' | 'deleted' | 'security' | 'profile' | 'logs'>('roots')
 
 // tab id → 异步子组件映射
 const tabMap = {
   roots: SettingsRoots,
+  webclip: SettingsWebclip,
   ai: SettingsAi,
   search: SettingsSearch,
   gate: SettingsGate,
