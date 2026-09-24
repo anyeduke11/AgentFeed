@@ -165,34 +165,58 @@ wikiRouter.post('/import', async (req, res) => {
     let imported = 0, linked = 0
     for (const e of entries) {
       if (e.match === 'already') continue
-      // 幂等刷新：同路径 imported 行先删后插（重复导入会刷新摘要/标签等解析结果）。
-      // 删 meta 会换 entry_id，旧 id 的 entry_chunks 必须同步清（P2 顺手修复：原实现留孤儿块）
-      const old = await (await db.prepare(`SELECT id FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).get([e.file]) as any
-      if (old) {
-        await (await db.prepare(`DELETE FROM entry_chunks WHERE entry_id = ?`)).run([old.id])
-        invalidateEntry(Number(old.id))
-      }
-      await (await db.prepare(`DELETE FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).run([e.file])
-      const distilledAt = /^\d{4}-\d{2}-\d{2}$/.test(e.updated) ? `${e.updated} 00:00:00` : new Date().toISOString()
-      await (await db.prepare(
-        `INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, source_type, title, summary, tags, confidence)
-         VALUES (?, ?, 0, ?, 'imported', ?, ?, ?, ?)`
-      )).run([e.matchedFileId ?? null, e.file, distilledAt, e.title || path.basename(e.file, '.md'), e.summary, JSON.stringify(e.tags), e.confidence || null])
-      // Wave 1 挂点：导入写入后同步 FTS 关键词索引（刚插的行按 entry_path 取回 id；分块向量由设置页手动补嵌覆盖）
-      const metaRow = await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE entry_path = ?')).get([e.file]) as any
-      if (metaRow) await syncWikiFts(db, Number(metaRow.id))
+      await mountExtEntry(db, e)
       imported++
-      if (e.match === 'matched' && e.matchedFileId) {
-        // 源文件已被外部词条覆盖，标记 imported 从蒸馏队列剔除（AI 评估链路待 PDF/docx 入库后启用）
-        await (await db.prepare(`UPDATE files SET llm_state = 'imported' WHERE id = ?`)).run(e.matchedFileId)
-        linked++
-      }
+      if (e.match === 'matched' && e.matchedFileId) linked++
     }
     res.json({ success: true, imported, linked, skipped: entries.filter(e => e.match === 'already').length, stats: extStats(entries) })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e?.message || e) })
   }
 })
+
+/**
+ * 单词条挂载内核（/import 与 chat 会话蒸馏入库 importMarkdownFile 共用，防两份逻辑漂移）：
+ * 幂等刷新——同路径 imported 行先删后插，删 meta 换 entry_id 时 entry_chunks 同步清（防孤儿块）；
+ * 写入后同步 FTS 关键词索引；matched 源文件标记 imported 从蒸馏队列剔除。
+ */
+async function mountExtEntry(db: Awaited<ReturnType<typeof getDb>>, e: ExtEntry): Promise<void> {
+  const old = await (await db.prepare(`SELECT id FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).get([e.file]) as any
+  if (old) {
+    await (await db.prepare(`DELETE FROM entry_chunks WHERE entry_id = ?`)).run([old.id])
+    invalidateEntry(Number(old.id))
+  }
+  await (await db.prepare(`DELETE FROM wiki_entries_meta WHERE entry_path = ? AND file_id IS NULL`)).run([e.file])
+  const distilledAt = /^\d{4}-\d{2}-\d{2}$/.test(e.updated) ? `${e.updated} 00:00:00` : new Date().toISOString()
+  await (await db.prepare(
+    `INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, source_type, title, summary, tags, confidence)
+     VALUES (?, ?, 0, ?, 'imported', ?, ?, ?, ?)`
+  )).run([e.matchedFileId ?? null, e.file, distilledAt, e.title || path.basename(e.file, '.md'), e.summary, JSON.stringify(e.tags), e.confidence || null])
+  // 导入写入后同步 FTS 关键词索引（刚插的行按 entry_path 取回 id；分块向量由设置页手动补嵌覆盖）
+  const metaRow = await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE entry_path = ?')).get([e.file]) as any
+  if (metaRow) await syncWikiFts(db, Number(metaRow.id))
+  if (e.match === 'matched' && e.matchedFileId) {
+    await (await db.prepare(`UPDATE files SET llm_state = 'imported' WHERE id = ?`)).run(e.matchedFileId)
+  }
+}
+
+/**
+ * 会话蒸馏入库（批次 B）：单 md 文件挂载——解析 → 与库内文件比对 → 复用 mountExtEntry 同一内核。
+ * 返回 match（standalone/matched/already）与 wiki_entries_meta.id；已挂载过（already）不重复建行。
+ */
+export async function importMarkdownFile(
+  db: Awaited<ReturnType<typeof getDb>>, fp: string
+): Promise<{ ok: boolean, match: string, entryId: number | null }> {
+  const raw = await fs.readFile(fp, 'utf8').catch(() => '')
+  if (!raw.trim()) return { ok: false, match: 'unreadable', entryId: null }
+  const entries = [parseExtEntry(fp, raw)]
+  await matchExtEntries(entries)
+  const e = entries[0]
+  if (e.match === 'already') return { ok: true, match: 'already', entryId: null }
+  await mountExtEntry(db, e)
+  const row = await (await db.prepare('SELECT id FROM wiki_entries_meta WHERE entry_path = ?')).get([e.file]) as any
+  return { ok: true, match: e.match, entryId: row ? Number(row.id) : null }
+}
 
 /* ---------------- 分块向量手动补嵌（parent-child 检索路） ----------------
  * 启动期全量补嵌已移除（本地 GPU compute-bound：54 万块串行 ~53h，不适合常驻满载）。

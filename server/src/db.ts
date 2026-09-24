@@ -569,7 +569,8 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'ai.pricing', value: '{}', type: 'json', description: 'LLM 单价表（元/百万 token），key=provider/model，如 {"ollama/qwen3":{"input":0,"output":0}}' },
     { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' },
     { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' },
-    { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' }
+    { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' },
+    { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' }
   ]
 
   await db.transactionalize(async () => {

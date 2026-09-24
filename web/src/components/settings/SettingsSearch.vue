@@ -36,6 +36,15 @@
       <span class="sr-a"></span>
     </div>
 
+    <div class="setrow">
+      <span class="sr-k">会话导出目录</span>
+      <span class="sr-v" style="display:flex;gap:8px;flex-wrap:wrap">
+        <input class="inp" v-model="exportDir" style="max-width:420px" placeholder="留空 = 首个扫描根下 conversations/" @keyup.enter="saveExportDir" />
+        <button class="btn sm" :disabled="busy" @click="saveExportDir">保存</button>
+      </span>
+      <span class="sr-a"></span>
+    </div>
+
     <!-- 健康自检（doctor） -->
     <div class="sec-list" style="border-top:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:10px;padding:6px 0 2px">
@@ -67,6 +76,8 @@ const ui = useUiStore()
 const busy = ref(false)
 const hybrid = ref(true)
 const rerank = ref('')
+// 会话导出目录（chat.exportDir）：会话导出/蒸馏入库的落盘位置（须在已启用扫描根内，导出时后端 fail-closed 校验）
+const exportDir = ref('')
 
 // ---- 别名表：行编辑模型（{k,v}[]），进入时从 config JSON 反解，保存时正解回 JSON ----
 const aliasRows = ref<{ k: string; v: string }[]>([])
@@ -79,6 +90,7 @@ async function loadAll() {
     const cfg = await api.config.get()
     hybrid.value = String(cfg?.['search.hybridEnabled']?.value ?? 'true') !== 'false'
     rerank.value = String(cfg?.['search.rerankEndpoint']?.value ?? '')
+    exportDir.value = String(cfg?.['chat.exportDir']?.value ?? '')
     aliasRows.value = parseAliasRows(cfg?.['search.aliases']?.value)
     aliasSnapshot.value = JSON.stringify(aliasRows.value.map(r => [r.k, r.v]))
     aliasError.value = ''
@@ -117,6 +129,19 @@ async function saveRerank() {
   try {
     await api.config.set({ 'search.rerankEndpoint': { value: rerank.value.trim() } })
     ui.toast(rerank.value.trim() ? 'Rerank 端点已保存 · 3s 超时自动降级 RRF' : 'Rerank 已关闭')
+  } catch {
+    ui.toast('保存失败，请重试')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function saveExportDir() {
+  if (busy.value) return
+  busy.value = true
+  try {
+    await api.config.set({ 'chat.exportDir': { value: exportDir.value.trim() } })
+    ui.toast(exportDir.value.trim() ? '导出目录已保存（须在已启用扫描根内，导出时校验）' : '已恢复默认：首个扫描根下 conversations/')
   } catch {
     ui.toast('保存失败，请重试')
   } finally {
