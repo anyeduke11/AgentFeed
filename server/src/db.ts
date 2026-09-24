@@ -470,6 +470,23 @@ function initTables(db: SqliteDatabase) {
       UNIQUE(entry_id, chunk_index)
     );
     CREATE INDEX IF NOT EXISTS idx_entry_chunks_entry ON entry_chunks(entry_id);
+
+    -- webclip（M1）：网页剪藏记录——md/html 文档对落盘路径与 files 表经 md_file_id/html_file_id 关联
+    CREATE TABLE IF NOT EXISTS webclip_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      url TEXT NOT NULL,
+      title TEXT,
+      slug_ts TEXT,
+      md_path TEXT,
+      html_path TEXT,
+      md_file_id INTEGER,
+      html_file_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      snapshot INTEGER DEFAULT 0,
+      error TEXT,
+      duration_ms INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `)
 }
 
@@ -551,7 +568,8 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'search.aliases', value: '{}', type: 'json', description: '查询别名表（查询时改写，如 {"gh":"tag:github"}）；支持 title:/tag:/短语/-排除 迷你语法' },
     { key: 'ai.pricing', value: '{}', type: 'json', description: 'LLM 单价表（元/百万 token），key=provider/model，如 {"ollama/qwen3":{"input":0,"output":0}}' },
     { key: 'llm.dailyBudgetCost', value: '', type: 'number', description: 'LLM 日预算（元/日）：当日成功调用成本超限则暂停蒸馏队列，次日自动恢复；空/0=无闸' },
-    { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' }
+    { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' },
+    { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' }
   ]
 
   await db.transactionalize(async () => {
