@@ -1,6 +1,6 @@
-# AgentFeed
+<div align="center">
 
-> 抓取本地 AI Agent 的工作产物，汇总、分拣为热知识缓存，按需蒸馏后供任意 Agent 消费。
+<img src="assets/readme/hero.svg" alt="AgentFeed：本地 AI Agent 工作产物的热知识库。管线：Agent 数据目录（ClaudeCode 等 20+）→ 双通道采集 → 内容门禁 → SQLite 库 → LLM 蒸馏 → Web 看板与 MCP 双出口" width="100%"/>
 
 ![Vue 3](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
@@ -8,6 +8,11 @@
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-8A2BE2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Tests](https://img.shields.io/badge/tests-400%2B_passing-3FB950)
+
+</div>
+
+**AgentFeed** 抓取本地 AI Agent 的工作产物，汇总、分拣为热知识缓存，按需蒸馏后供任意 Agent 消费。
 
 AgentFeed 把散落在各个 AI Agent 数据目录（Claude Code、Trae、Qoder、Coze、Workbuddy……）里的
 Markdown / HTML 产物统一采集入库为**热知识缓存**：经**门禁过滤 → 领域分拣**完成分拣入库，**LLM 蒸馏**按队列增量补充摘要/标签等增强信息，Wiki 词条支持导入挂载，
@@ -30,6 +35,31 @@ AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经�
 - **📚 阅读推荐闭环** — 规则分 + LLM 质量分双排序推荐池，每日精选零成本轮转；阅读进度手动挡 + 滚动自动记录，续读自动回位；两维打分入执行队列，周目标环与薄弱领域/停滞提示复盘
 - **📖 站内阅读器** — md/html 沙箱渲染（双保险：服务端白名单清洗 + iframe 禁脚本，内容零脚本执行），目录侧栏、字号与夜间主题，图片资源经扫描根边界代理
 - **🔗 MCP Server** — stdio 方式暴露 `search_knowledge` / `read_entry` / `stats` / `getContext` / `get_user_context` 等 9 个工具，Trae / Claude Desktop / Cursor 直接挂载
+
+## 🚀 快速开始
+
+环境要求：**Node.js ≥ 20**、macOS（依赖 `lsof` 管理端口）。
+
+```bash
+# 1. 安装依赖（npm workspaces：server + web）
+npm install
+
+# 2. 一键启动（缺构建产物时自动构建前后端）
+./service.sh start
+
+# 3. 打开看板
+open http://127.0.0.1:5188
+```
+
+常用命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `./service.sh start` | 启动服务（自动构建缺失产物） |
+| `./service.sh restart` | 重建前后端并重启 |
+| `./service.sh status` / `logs` | 查看状态 / 跟踪日志 |
+| `./service.sh build` | 强制重新构建 |
+| `npm test -w server` | 运行后端测试 |
 
 ## 🏗 架构
 
@@ -61,31 +91,6 @@ flowchart LR
     API --> WEB
     DB --> MCP
 ```
-
-## 🚀 快速开始
-
-环境要求：**Node.js ≥ 20**、macOS（依赖 `lsof` 管理端口）。
-
-```bash
-# 1. 安装依赖（npm workspaces：server + web）
-npm install
-
-# 2. 一键启动（缺构建产物时自动构建前后端）
-./service.sh start
-
-# 3. 打开看板
-open http://127.0.0.1:5188
-```
-
-常用命令：
-
-| 命令 | 说明 |
-| --- | --- |
-| `./service.sh start` | 启动服务（自动构建缺失产物） |
-| `./service.sh restart` | 重建前后端并重启 |
-| `./service.sh status` / `logs` | 查看状态 / 跟踪日志 |
-| `./service.sh build` | 强制重新构建 |
-| `npm test -w server` | 运行后端测试 |
 
 ## 📖 阅读闭环
 
