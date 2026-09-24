@@ -24,7 +24,14 @@ async function getBrowser(): Promise<any> {
       return mod.chromium.launch({ headless: true })
     })()
   }
-  browser = await launching
+  try {
+    browser = await launching
+  } catch (e) {
+    // 启动失败（如 chromium 缺失）时重置缓存，下次调用可重试，避免死等同一个 rejected promise
+    launching = null
+    browser = null
+    throw e
+  }
   return browser
 }
 
