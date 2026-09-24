@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-label="AgentFeed：本地 AI Agent 工作产物的热知识库。管线：Agent 数据目录采集，经实时监听与周期扫描，过门禁入库 SQLite，蒸馏后经 Web 看板与 MCP 双出口消费">
+  <title>AgentFeed：本地 AI Agent 工作产物的热知识库</title>
+  <defs>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1C2C3E"/>
+    </pattern>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#29C5D6"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="360" fill="#0C1420"/>
+  <rect width="1200" height="360" fill="url(#dots)"/>
+  <rect x="0" y="0" width="1200" height="4" fill="#29C5D6"/>
+
+  <!-- 标题区 -->
+  <text x="48" y="102" font-family="-apple-system,'PingFang SC','Segoe UI',sans-serif" font-size="74" font-weight="800" fill="#E8F0F7">AgentFeed</text>
+  <text x="50" y="146" font-family="-apple-system,'PingFang SC','Segoe UI',sans-serif" font-size="26" fill="#29C5D6">本地 AI Agent 工作产物的热知识库</text>
+  <text x="50" y="182" font-family="ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#6B7E93">采集 → 门禁 → 蒸馏 → Web 看板 / MCP 双出口</text>
+
+  <!-- 右上数据芯片 -->
+  <g font-family="ui-monospace,'SF Mono',Menlo,monospace" font-size="17">
+    <rect x="700" y="64" width="150" height="36" rx="18" fill="#14202E" stroke="#2A3B50"/>
+    <text x="775" y="88" text-anchor="middle" fill="#8FA6BC">20+ Agent 目录</text>
+    <rect x="862" y="64" width="130" height="36" rx="18" fill="#14202E" stroke="#2A3B50"/>
+    <text x="927" y="88" text-anchor="middle" fill="#8FA6BC">19 表 SQLite</text>
+    <rect x="1004" y="64" width="148" height="36" rx="18" fill="#14202E" stroke="#2A3B50"/>
+    <text x="1078" y="88" text-anchor="middle" fill="#8FA6BC">9 个 MCP 工具</text>
+    <rect x="700" y="110" width="150" height="36" rx="18" fill="#14202E" stroke="#2A3B50"/>
+    <text x="775" y="134" text-anchor="middle" fill="#8FA6BC">400+ 用例测试</text>
+    <rect x="862" y="110" width="150" height="36" rx="18" fill="#14202E" stroke="#2A3B50"/>
+    <text x="937" y="134" text-anchor="middle" fill="#8FA6BC">本地优先 · MIT</text>
+  </g>
+
+  <!-- 管线带 -->
+  <g font-family="-apple-system,'PingFang SC','Segoe UI',sans-serif">
+    <rect x="40" y="238" width="164" height="84" rx="12" fill="#14202E" stroke="#2A3B50" stroke-width="1.5"/>
+    <text x="122" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#E8F0F7">Agent 目录</text>
+    <text x="122" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">ClaudeCode 等 20+</text>
+    <line x1="204" y1="280" x2="232" y2="280" stroke="#29C5D6" stroke-width="2" marker-end="url(#arr)"/>
+
+    <rect x="236" y="238" width="164" height="84" rx="12" fill="#14202E" stroke="#2A3B50" stroke-width="1.5"/>
+    <text x="318" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#E8F0F7">双通道采集</text>
+    <text x="318" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">实时 + 周期兜底</text>
+    <line x1="400" y1="280" x2="428" y2="280" stroke="#29C5D6" stroke-width="2" marker-end="url(#arr)"/>
+
+    <rect x="432" y="238" width="164" height="84" rx="12" fill="#14202E" stroke="#29C5D6" stroke-width="1.5" stroke-dasharray="6 4"/>
+    <text x="514" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#29C5D6">内容门禁</text>
+    <text x="514" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">规则过滤 · 纯本地</text>
+    <line x1="596" y1="280" x2="624" y2="280" stroke="#29C5D6" stroke-width="2" marker-end="url(#arr)"/>
+
+    <rect x="628" y="238" width="164" height="84" rx="12" fill="#14202E" stroke="#2A3B50" stroke-width="1.5"/>
+    <text x="710" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#E8F0F7">SQLite 库</text>
+    <text x="710" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">单文件 · 19 表</text>
+    <line x1="792" y1="280" x2="820" y2="280" stroke="#D6418C" stroke-width="2" marker-end="url(#arr)"/>
+
+    <rect x="824" y="238" width="164" height="84" rx="12" fill="#14202E" stroke="#D6418C" stroke-width="1.5"/>
+    <text x="906" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#E86FAE">LLM 蒸馏</text>
+    <text x="906" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">摘要 · 标签 · 向量</text>
+    <line x1="988" y1="280" x2="1016" y2="280" stroke="#29C5D6" stroke-width="2" marker-end="url(#arr)"/>
+
+    <rect x="1020" y="238" width="140" height="84" rx="12" fill="#14202E" stroke="#29C5D6" stroke-width="1.5"/>
+    <text x="1090" y="274" text-anchor="middle" font-size="20" font-weight="700" fill="#29C5D6">双出口</text>
+    <text x="1090" y="302" text-anchor="middle" font-size="16" fill="#6B7E93">Web · MCP</text>
+  </g>
+</svg>
