@@ -15,6 +15,9 @@ function patch(url: string, data: any) {
 function del(url: string) {
   return fetch(url, { method: 'DELETE' }).then(r => r.json())
 }
+function put(url: string, data: any) {
+  return fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(r => r.json())
+}
 
 export const api = {
   // Web 混合检索（三路 RRF：files LIKE + wiki FTS5 + 分块向量）——与 MCP search_knowledge 同内核
@@ -26,6 +29,16 @@ export const api = {
     doctor: () => getJSON<{ success: boolean; checks: { key: string; ok: boolean; detail: string }[] }>(`${base}/search/doctor`),
     // 点击归因：搜索结果被点击时落 read_history(file_id, source=search, query)——Web 漏斗 level1
     click: (fileId: number, query: string) => post(`${base}/search/click`, { fileId, query }),
+  },
+  // 网页剪藏（收件坪 tab）：URL → Playwright 抓取 → md/html 双文件落盘 → 既有管线蒸馏/向量化
+  webclip: {
+    getConfig: () => getJSON<any>(`${base}/webclip/config`),
+    putConfig: (storageRoot: string) => put(`${base}/webclip/config`, { storageRoot }),
+    convert: (payload: { url: string; snapshot?: boolean; force?: boolean }) => post(`${base}/webclip/convert`, payload),
+    records: (params?: Record<string, string>) => {
+      const qs = params ? new URLSearchParams(params).toString() : ''
+      return getJSON<any>(`${base}/webclip/records${qs ? '?' + qs : ''}`)
+    },
   },
   files: {
     list: (params?: Record<string, string>) => {
