@@ -17,6 +17,7 @@
           <button class="tab" :class="{ on: logView === 'mcp' }" @click="switchLogView('mcp')">MCP 调用（{{ mcpLogsTotal }}）</button>
           <button class="tab" :class="{ on: logView === 'scan' }" @click="switchLogView('scan')">扫描日志（{{ settings.scanJobsTotal }}）</button>
           <button class="tab" :class="{ on: logView === 'service' }" @click="switchLogView('service')">服务日志（{{ svcTotal }}）</button>
+          <button class="tab" :class="{ on: logView === 'export' }" @click="switchLogView('export')">会话产物（{{ exportLogsTotal }}）</button>
         </div>
         <!-- LLM 调用日志（细化排错：文件名 / tokens 细分 / 点击展开完整错误与耗时明细） -->
         <template v-if="logView === 'llm'">
@@ -179,6 +180,27 @@
             </div></div>
           </template>
         </template>
+        <!-- 会话产物日志（批次 B 复利留痕）：导出/蒸馏入库的文件台账 -->
+        <template v-else-if="logView === 'export'">
+          <template v-if="exportLogs.length">
+            <div v-for="l in exportLogs" :key="l.id" class="jobrow" :title="l.path">
+              <span class="rc mono">{{ fmtJobTime(l.createdAt) }}</span>
+              <span class="stb jobsrc" :style="l.kind === 'distill' ? '' : 'opacity:.65'">{{ l.kind === 'distill' ? '入库' : '导出' }}</span>
+              <span class="rc" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ l.title }}</span>
+              <span class="rc mono">{{ l.chars }} 字</span>
+              <span v-if="l.match" class="rc mono" :title="l.match === 'already' ? '该文件此前已入库（幂等跳过）' : '检索立即可命中'">{{ l.match === 'already' ? '已入库·跳过' : '已入库' }}</span>
+              <a v-if="l.entryId" class="rc" :href="'/reader/' + l.entryId" style="color:var(--ink)">阅读 →</a>
+            </div>
+            <div class="cap" style="display:block;padding:8px 14px">仅显示最近 {{ exportLogs.length }} 条{{ exportLogs.length < exportLogsTotal ? '（共 ' + exportLogsTotal + ' 条）' : '' }}。</div>
+          </template>
+          <template v-else>
+            <div style="padding:4px 0 0"><div class="empty" style="padding:22px">
+              <span class="e-ic"><Icon name="search" :size="26" /></span>
+              <div class="e-t">暂无会话产物</div>
+              <div class="e-s">对话页会话「出」→ 导出文件 / 蒸馏入库后，产物台账会显示在这里；入库词条可一键回阅读器。</div>
+            </div></div>
+          </template>
+        </template>
       </div>
 </template>
 
@@ -193,7 +215,7 @@ const props = defineProps<{ refreshSeq?: number }>()
 
 const settings = useSettingsStore()
 
-const logView = ref<'llm' | 'mcp' | 'scan' | 'service'>('llm')
+const logView = ref<'llm' | 'mcp' | 'scan' | 'service' | 'export'>('llm')
 const logKw = ref('')
 const logStatus = ref('')
 const llmLogs = ref<any[]>([])
@@ -202,6 +224,9 @@ const llmLogPage = ref(1)
 const mcpLogs = ref<any[]>([])
 const mcpLogsTotal = ref(0)
 const svcLogs = ref<string[]>([])
+// 会话产物台账（chat_export_logs：导出/蒸馏入库留痕）
+const exportLogs = ref<Array<{ id: number; kind: string; title: string; path: string; match: string | null; entryId: number | null; chars: number; createdAt: string }>>([])
+const exportLogsTotal = ref(0)
 /** G1 LLM 用量/成本统计（api.stats.llm：byDay/byModel 含 cost，顶层 totalCost/unknownPricing） */
 const llmStats = ref<any>(null)
 
@@ -264,6 +289,10 @@ async function loadLogs(fresh = false) {
       const out = await api.llm.mcpLogs(kw)
       mcpLogs.value = out.items || []
       mcpLogsTotal.value = out.total || 0
+    } else if (logView.value === 'export') {
+      const out = await api.chat.exportLogs()
+      exportLogs.value = out.logs || []
+      exportLogsTotal.value = out.total || 0
     } else {
       const out = await api.llm.serviceLogs(kw)
       svcLogs.value = out.items || []
@@ -274,15 +303,16 @@ async function loadLogs(fresh = false) {
   }
 }
 
-/** 进入日志管理即并行刷新四类徽标（不等懒加载出 0），当前视图列表照常拉取 */
+/** 进入日志管理即并行刷新五类徽标（不等懒加载出 0），当前视图列表照常拉取 */
 function refreshLogBadges() {
   settings.fetchScanJobs()
   api.llm.mcpLogs().then(out => { mcpLogsTotal.value = out.total || 0 }).catch(() => {})
   api.llm.serviceLogs().then(out => { svcTotal.value = out.total || 0 }).catch(() => {})
+  api.chat.exportLogs().then(out => { exportLogsTotal.value = out.total || 0 }).catch(() => {})
   api.stats.llm().then(s => { llmStats.value = s }).catch(() => {})
 }
 
-function switchLogView(v: 'llm' | 'mcp' | 'scan' | 'service') {
+function switchLogView(v: 'llm' | 'mcp' | 'scan' | 'service' | 'export') {
   logView.value = v
   if (v === 'scan') settings.fetchScanJobs()
   else loadLogs(true)

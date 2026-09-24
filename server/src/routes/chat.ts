@@ -91,6 +91,13 @@ async function ensureChatTable(db: SqliteDatabase) {
     session_id TEXT, preview TEXT, msg_count INTEGER,
     deleted_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`)
+  // 导出/蒸馏产物留痕（日志页「会话产物」tab 数据源）：kind=export/distill；入库词条经 entry_id 可跳阅读器
+  await db.exec(`CREATE TABLE IF NOT EXISTS chat_export_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT, session_id TEXT, title TEXT, file_path TEXT,
+    match TEXT, entry_id INTEGER, chars INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`)
 }
 
 /**
@@ -836,11 +843,24 @@ async function writeSessionExport(db: SqliteDatabase, sessionId: string, markdow
   return filePath
 }
 
+/** 产物留痕（日志页「会话产物」tab）：export/distill 成功落盘后记一行；fail-soft 不阻塞主流程 */
+async function logExport(db: SqliteDatabase, kind: string, sessionId: string, title: string, filePath: string, meta: { match?: string | null, entryId?: number | null, chars: number }) {
+  try {
+    await (await db.prepare('INSERT INTO chat_export_logs (kind, session_id, title, file_path, match, entry_id, chars) VALUES (?, ?, ?, ?, ?, ?, ?)'))
+      .run([kind, sessionId, title.slice(0, 120), filePath, meta.match ?? null, meta.entryId ?? null, meta.chars])
+  } catch (e) {
+    console.error('chat export log failed (non-fatal)', e)
+  }
+}
+
 /** POST /sessions/:id/export——纯导出：markdown（可经前端编辑）落盘到导出目录，不入库 */
 chatRouter.post('/sessions/:id/export', async (req, res) => {
   try {
     const db = await getDb()
-    const filePath = await writeSessionExport(db, String(req.params.id || '').trim(), String(req.body?.markdown ?? ''), req.body?.dir)
+    const sessionId = String(req.params.id || '').trim()
+    const markdown = String(req.body?.markdown ?? '')
+    const filePath = await writeSessionExport(db, sessionId, markdown, req.body?.dir)
+    await logExport(db, 'export', sessionId, markdownTitle(markdown, sessionId), filePath, { chars: markdown.length })
     res.json({ success: true, path: filePath })
   } catch (e: any) {
     res.status(400).json({ success: false, message: String(e?.message || e) })
@@ -855,10 +875,42 @@ chatRouter.post('/sessions/:id/distill', async (req, res) => {
   try {
     const db = await getDb()
     const markdown = String(req.body?.markdown ?? '')
-    const filePath = await writeSessionExport(db, String(req.params.id || '').trim(), markdown, req.body?.dir)
+    const sessionId = String(req.params.id || '').trim()
+    const filePath = await writeSessionExport(db, sessionId, markdown, req.body?.dir)
     const mount = await importMarkdownFile(db, filePath)
+    await logExport(db, 'distill', sessionId, markdownTitle(markdown, sessionId), filePath, { match: mount.match, entryId: mount.entryId, chars: markdown.length })
     res.json({ success: mount.ok, path: filePath, match: mount.match, entryId: mount.entryId })
   } catch (e: any) {
     res.status(400).json({ success: false, message: String(e?.message || e) })
+  }
+})
+
+/** GET /export-logs——产物留痕列表（近 50 条）+ 总数（日志页「会话产物」tab） */
+chatRouter.get('/export-logs', async (_req, res) => {
+  try {
+    const db = await getDb()
+    await ensureChatTable(db)
+    const total = await (await db.prepare('SELECT COUNT(*) AS n FROM chat_export_logs')).get() as any
+    const rows = await (await db.prepare(
+      'SELECT id, kind, session_id, title, file_path, match, entry_id, chars, created_at FROM chat_export_logs ORDER BY id DESC LIMIT 50'
+    )).all() as any[]
+    res.json({
+      success: true,
+      total: Number(total.n),
+      logs: rows.map(r => ({
+        id: Number(r.id),
+        kind: String(r.kind ?? ''),
+        sessionId: String(r.session_id ?? ''),
+        title: String(r.title ?? ''),
+        path: String(r.file_path ?? ''),
+        match: r.match == null ? null : String(r.match),
+        entryId: r.entry_id == null ? null : Number(r.entry_id),
+        chars: Number(r.chars ?? 0),
+        createdAt: r.created_at,
+      })),
+    })
+  } catch (e: any) {
+    console.error('chat export logs failed', e)
+    res.status(500).json({ success: false, message: String(e) })
   }
 })

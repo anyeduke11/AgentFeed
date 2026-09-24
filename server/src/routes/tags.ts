@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { getDb, normalizeKey } from '../db.js'
 import {
   mergeTagsInto, runNormalizeScan, startSemanticScan, startLevelScan,
-  scanState, relatedTags, tagStats, exportTags, importTags
+  scanState, relatedTags, tagStats, exportTags, importTags, acceptSemanticProposal
 } from '../llm/tagGovernance.js'
 
 export const tagsRouter = Router()
@@ -220,23 +220,15 @@ tagsRouter.post('/proposals/:id/accept', wrap(async (req, res) => {
   const db = await getDb()
   const p = await (await db.prepare("SELECT * FROM tag_proposals WHERE id = ? AND status = 'pending'")).get(parseInt(req.params.id)) as any
   if (!p) return res.status(404).json({ success: false, message: '建议不存在或已处理' })
-  const members: string[] = JSON.parse(p.members || '[]')
   if (p.kind === 'semantic') {
-    const canonical = await (await db.prepare("SELECT id FROM tags WHERE name = ? AND status = 'active'")).get(p.canonical) as any
-    if (!canonical) return res.json({ success: false, message: `规范名「${p.canonical}」不存在或不可用，请手动处理` })
-    let moved = 0
-    const memberIds: number[] = []
-    for (const name of members) {
-      if (name === p.canonical) continue
-      const row = await (await db.prepare('SELECT id FROM tags WHERE name = ?')).get(name) as any
-      if (row) memberIds.push(row.id)
-    }
-    moved = await mergeTagsInto(db, canonical.id, memberIds, 'accept_semantic')
-    await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
-    return res.json({ success: true, merged: memberIds.length, moved })
+    // 单条人工接受：保持历史行为（不限制成员 level）
+    const r = await acceptSemanticProposal(db, p, false)
+    if (!r.ok) return res.json({ success: false, message: r.message })
+    return res.json({ success: true, merged: r.merged, moved: r.moved })
   }
   // level：按名字批量降为次要（软挂：不指父，落「未挂靠」组，由前端补挂；已被合并/停用的自动跳过）。
   // 领域锚点保护：与领域同名（归一比对）的标签是「领域 ≡ 一级标签」的锚，降级会让领域失锚且同名阻塞重建——跳过并计数
+  const members: string[] = JSON.parse(p.members || '[]')
   const domainKeys = new Set(((await (await db.prepare('SELECT name FROM domains')).all()) as any[]).map(r => normalizeKey(r.name)))
   let downgraded = 0
   let skippedPrimary = 0
@@ -258,6 +250,23 @@ tagsRouter.post('/proposals/:id/reject', wrap(async (req, res) => {
   if (!p) return res.status(404).json({ success: false, message: '建议不存在或已处理' })
   await db.exec(`UPDATE tag_proposals SET status = 'rejected' WHERE id = ${id}`)
   res.json({ success: true })
+}))
+
+/** 批量接受语义归组建议（长尾大规模收敛）：比单条更严的守卫——仅合并 normal 成员（一级/二级归属人工处理），
+ * 规范名失效的整条跳过并保持 pending 留待人工。无上限逐条执行，前端 confirm 后调用 */
+tagsRouter.post('/proposals/accept-batch', wrap(async (req, res) => {
+  const db = await getDb()
+  if ((req.body?.kind || 'semantic') !== 'semantic') return res.status(400).json({ success: false, message: '批量接受仅支持 kind=semantic' })
+  const pending = await (await db.prepare("SELECT * FROM tag_proposals WHERE status = 'pending' AND kind = 'semantic' ORDER BY id")).all() as any[]
+  let accepted = 0
+  let skipped = 0
+  let moved = 0
+  for (const p of pending) {
+    const r = await acceptSemanticProposal(db, p, true)
+    if (r.ok) { accepted++; moved += r.moved } else { skipped++ }
+  }
+  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('accept_semantic_batch', '{"accepted":${accepted},"skipped":${skipped},"moved":${moved}}')`)
+  res.json({ success: true, accepted, skipped, moved })
 }))
 
 // ---- 收敛扫描 ----

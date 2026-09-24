@@ -48,10 +48,29 @@ export async function mergeTagsInto(db: any, canonicalId: number, memberIds: num
   return moved
 }
 
+/** 执行语义归组提案：把 members 的挂载转移给 canonical 并落审计。
+ * normalOnly=true 时只合并普通标签（批量无人值守守卫，防误伤一级锚点/二级树）；false 保持单条人工接受的历史行为（任意 active 成员） */
+export async function acceptSemanticProposal(db: any, p: any, normalOnly: boolean): Promise<{ ok: boolean; message?: string; merged: number; moved: number }> {
+  const members: string[] = JSON.parse(p.members || '[]')
+  const canonical = await (await db.prepare("SELECT id FROM tags WHERE name = ? AND status = 'active'")).get(p.canonical) as any
+  if (!canonical) return { ok: false, message: `规范名「${p.canonical}」不存在或不可用，请手动处理`, merged: 0, moved: 0 }
+  const memberIds: number[] = []
+  for (const name of members) {
+    if (name === p.canonical) continue
+    const row = await (await db.prepare('SELECT id, level FROM tags WHERE name = ?')).get(name) as any
+    if (!row) continue
+    if (normalOnly && row.level !== 'normal') continue
+    memberIds.push(row.id)
+  }
+  const moved = await mergeTagsInto(db, canonical.id, memberIds, 'accept_semantic')
+  await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${Number(p.id)}`)
+  return { ok: true, merged: memberIds.length, moved }
+}
+
 // ---- 扫描任务状态（内存态；server 单进程，重启即清零，proposals 落库不受影响） ----
 
 export const scanState = {
-  running: '' as '' | 'semantic' | 'level',
+    running: '' as '' | 'semantic' | 'level',
   total: 0,
   done: 0,
   message: '',
@@ -146,6 +165,17 @@ async function semanticScanJob(batchSize: number) {
   const db = await getDb()
   try {
     const tags = await loadActiveTags()
+    // 名字邻接排序：同词根/大小写/单复数变体在字典序上相邻，分批后落入同批的概率最大化（挂载量排序会把变体拆散到不同批）
+    tags.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    // 锚点词表：全库挂载最高的标签（不分批，注入每个 prompt）——长尾变体可直接归并到批外高频词，
+    // 否则「RAG 落地技巧」与高频词「RAG」永不同批，语义归组对长尾收敛失效
+    const anchorRows = await (await db.prepare(`
+      SELECT t.name FROM tags t
+      LEFT JOIN file_tags ft ON ft.tag_id = t.id
+      WHERE t.status = 'active'
+      GROUP BY t.id ORDER BY COUNT(ft.file_id) DESC LIMIT 150`)).all() as any[]
+    const anchorSet = new Set(anchorRows.map(r => String(r.name)))
+    const anchorList = anchorRows.map(r => `${r.name}`).join('、') || '（暂无）'
     const batches: Array<typeof tags> = []
     for (let i = 0; i < tags.length; i += batchSize) batches.push(tags.slice(i, i + batchSize))
     scanState.total = batches.length
@@ -157,9 +187,12 @@ async function semanticScanJob(batchSize: number) {
       const nameSet = new Set(batch.map(t => t.name))
       const prompt = `你是内容管理系统的标签治理助手。下面是一批标签（JSON 数组，n 为名字，c 为使用次数）。
 找出其中语义相同或高度相近的重复标签组：中英文空格差异、单复数、别名、同义翻译、简写全称等变体应合并；仅仅主题相关或互相包含的不要合并。
-每组规范名 canonical 必须从该组成员中选出（优先使用次数最高、表达最通用的写法），members 为全部组成员名字。
-输出 json：{"groups":[{"canonical":"规范名","members":["成员1","成员2"],"reason":"简短理由"}]}
+每组规范名 canonical 优先从该组成员中选出（优先使用次数最高、表达最通用的写法）；但若整组成员本质上都是下方锚点词表中某个词的同义/变体/从属表达，canonical 必须直接用该锚点名（此时 members 只含批内成员）。
+members 为全部组成员名字。输出 json：{"groups":[{"canonical":"规范名","members":["成员1","成员2"],"reason":"简短理由"}]}
 没有可合并的组时输出 {"groups":[]}
+
+高频锚点词表（全库挂载量最高，可作为合并目标）：
+${anchorList}
 
 标签列表：
 ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
@@ -169,7 +202,10 @@ ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
         for (const g of groups) {
           const members: string[] = (Array.isArray(g?.members) ? g.members : []).map(String).filter((m: string) => nameSet.has(m))
           const canonical = String(g?.canonical || '')
-          if (members.length < 2 || !nameSet.has(canonical) || !members.includes(canonical)) continue
+          if (members.length < 2 || !canonical) continue
+          // canonical 允许来自锚点词表（批外高频词）；在批内时仍必须是组成员
+          if (!nameSet.has(canonical) && !anchorSet.has(canonical)) continue
+          if (nameSet.has(canonical) && !members.includes(canonical)) continue
           const key = JSON.stringify([...members].sort())
           if (await proposalExists(db, 'semantic', canonical, members)) continue
           await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, reason)

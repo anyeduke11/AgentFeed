@@ -165,6 +165,11 @@
         <details>
           <summary>待审建议（{{ proposals.length }}）—— 语义归组合并 / 二级领域选拔</summary>
           <div>
+            <div class="trow" v-if="semanticPending">
+              <span class="cap">语义归组建议 {{ semanticPending }} 条。批量接受仅自动合并普通标签；规范名已失效的建议跳过并保留，待人工处理。</span>
+              <span style="flex:1"></span>
+              <button class="btn sm primary" :disabled="batchAccepting" @click="acceptAllSemantic"><Icon name="check" :size="12" /> {{ batchAccepting ? '执行中…' : '全部接受语义归组' }}</button>
+            </div>
             <div v-if="!proposals.length" class="cap">暂无待审建议。运行 AI 语义归组 / 二级选拔后，结果会在这里逐条确认。</div>
             <div v-for="p in proposals" :key="p.id" class="pcard">
               <div class="trow">
@@ -504,6 +509,23 @@ async function acceptProposal(p: any) {
   proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
   loadTags(true)
   loadGov()
+}
+
+const semanticPending = computed(() => proposals.value.filter((p: any) => p.kind === 'semantic').length)
+const batchAccepting = ref(false)
+
+async function acceptAllSemantic() {
+  if (!confirm(`确认批量接受全部 ${semanticPending.value} 条语义归组建议？将自动合并普通标签（一级/二级不动），建议先抽查几条。`)) return
+  batchAccepting.value = true
+  try {
+    const r: any = await api.tags.proposalAcceptBatch()
+    if (r.success === false) return ui.toast(r.message || '批量接受失败')
+    ui.toast(`批量接受完成：合并 ${r.accepted} 条，转移 ${r.moved} 处挂载${r.skipped ? `，${r.skipped} 条待人工` : ''}`)
+    loadTags(true)
+    loadGov()
+  } finally {
+    batchAccepting.value = false
+  }
 }
 
 async function rejectProposal(p: any) {
