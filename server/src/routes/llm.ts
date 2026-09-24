@@ -2,11 +2,12 @@ import { Router } from 'express'
 import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from '../db.js'
-import { llmQueue, embedQueue, enqueueEmbed, queueCapacity, recommendedConcurrency, refreshDistillNodes, updateDistillNode, checkNode } from '../llm/index.js'
+import { llmQueue, queueCapacity, recommendedConcurrency, refreshDistillNodes, updateDistillNode, checkNode } from '../llm/index.js'
 import { nodesCacheSync, getHealth, pruneNodeOverrides } from '../llm/distillNodes.js'
 import { getProviders, getDefaultModel, getDefaultProvider, mergeProvidersWithPresets } from '../llm/llmClient.js'
 import { resetModelsInstance } from '../llm/index.js'
-import { probeOllamaModels, getOllamaEnabledModels, getOllamaModelTypes, getEmbeddingConfig, callEmbedding, searchEmbeddings, countEmbeddings, guessModelType } from '../llm/embeddings.js'
+import { probeOllamaModels, getOllamaEnabledModels, getOllamaModelTypes, getEmbeddingConfig, callEmbedding, guessModelType } from '../llm/embeddings.js'
+import { vectorSearchWiki } from '../search/chunkEmbed.js'
 import { readFileHead, getTriageBreakerState, resetTriageBreaker } from '../llm/llmWorker.js'
 
 export const llmRouter = Router()
@@ -133,6 +134,27 @@ llmRouter.post('/queue/retry-all', async (req, res) => {
   const rows = await (await db.prepare("SELECT id FROM files WHERE llm_state IN ('failed', 'skipped') AND status = 'active'")).all() as any[]
   const queued = await requeueFiles(db, rows.map(r => r.id))
   res.json({ success: true, queued })
+})
+
+/** M4 资产一致性修复（链路分析 P1-1）：done 但无 wiki_entries_meta 的文件有界重排为 pending 重新蒸馏。
+ *  WHY：done ≠ 可消费——状态与资产脱钩的文件检索/MCP 都取不到词条，静默虚高「已完成」。
+ *  有界（默认 500/批）：存量缺口数千级时避免一次性全量重排冲击 LLM 预算；doctor 的 consistency 项持续监控收敛。 */
+llmRouter.post('/queue/reconsile-done', async (req, res) => {
+  try {
+    const db = await getDb()
+    const cap = Math.max(1, Math.min(5000, parseInt(String(req.body?.cap)) || 500))
+    const rows = await (await db.prepare(`
+      SELECT f.id FROM files f
+      WHERE f.llm_state = 'done' AND f.status = 'active'
+        AND NOT EXISTS (SELECT 1 FROM wiki_entries_meta w WHERE w.file_id = f.id)
+      ORDER BY f.updated_at DESC LIMIT ${cap}`)).all() as any[]
+    if (!rows.length) return res.json({ success: true, queued: 0, message: '无可修复项（done 均有词条资产）' })
+    const queued = await requeueFiles(db, rows.map(r => r.id))
+    res.json({ success: true, queued, remainingHint: '修复后 doctor 的 consistency 项应逐步转绿' })
+  } catch (e: any) {
+    console.error('reconsile-done failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
 })
 
 llmRouter.post('/manual-tag', async (req, res) => {
@@ -447,53 +469,38 @@ llmRouter.post('/ollama/config', async (req, res) => {
   }
 })
 
-/** 向量补齐硬上限（与质量分补齐同口径：≤200 篇一次性封顶） */
-const EMBEDDINGS_BACKFILL_CAP = 200
-
-/** 手动触发向量补齐一批：已入库（有标题或摘要）但缺向量的文件，入 embed 任务 */
+/** 手动触发向量补齐一批（方案 B 收敛）：file 级向量链路已整体移除，端点保留形状返回指引——
+ *  检索主路是词条分块向量（蒸馏自动生成 + 词条页「补嵌一批」手动补齐）。 */
 llmRouter.post('/embeddings/backfill', async (req, res) => {
-  try {
-    const db = await getDb()
-    const cfg = await getEmbeddingConfig()
-    if (!cfg.enabled || !cfg.model) return res.json({ success: false, message: '请先开启向量化并选择向量模型' })
-    const candidates = await (await db.prepare(`
-      SELECT f.id FROM files f
-      LEFT JOIN file_embeddings e ON e.file_id = f.id
-      WHERE f.status = 'active' AND e.file_id IS NULL
-        AND (COALESCE(f.title, '') != '' OR COALESCE(f.summary, '') != '')
-      ORDER BY f.updated_at DESC LIMIT ${EMBEDDINGS_BACKFILL_CAP}`)).all() as any[]
-    let enqueued = 0
-    for (const c of candidates) {
-      // enqueueEmbed 内部按文件去重（正在蒸馏/已排队向量化的跳过），投独立 embed 队列不占蒸馏并发
-      if (enqueueEmbed(c.id)) enqueued++
-    }
-    if (!enqueued) return res.json({ success: true, total: 0, message: '没有待向量化的文件' })
-    res.json({ success: true, total: enqueued })
-  } catch (e: any) {
-    console.error('embeddings backfill trigger failed', e)
-    res.status(500).json({ success: false, message: String(e) })
-  }
+  res.json({ success: false, total: 0, message: 'file 级向量化已下线（2026-09-24 向量冗余收敛）：检索主路为词条分块向量，请用词条页「补嵌一批」' })
 })
 
-/** 向量库状态：已向量化数 + 活跃文件中仍缺向量的数量 */
+/** 向量库状态（方案 B 口径迁移）：file_embeddings 已 DROP，覆盖口径切词条分块——
+ *  entries = 词条总数 · covered = 有分块向量的词条 · chunks = 分块总数 · pending = 待嵌词条
+ *  （与词条页 chunkBackfillStatus 同源语义）。全表级聚合维持 60s TTL 缓存。 */
+let embedStatusCache: { at: number; data: any } | null = null
 llmRouter.get('/embeddings/status', async (req, res) => {
   try {
-    const db = await getDb()
-    const embedded = await countEmbeddings()
-    const row = await (await db.prepare(`
-      SELECT COUNT(*) AS n FROM files f
-      LEFT JOIN file_embeddings e ON e.file_id = f.id
-      WHERE f.status = 'active' AND e.file_id IS NULL
-        AND (COALESCE(f.title, '') != '' OR COALESCE(f.summary, '') != '')`)).get() as any
-    const cfg = await getEmbeddingConfig()
-    res.json({ embedded, remaining: Number(row?.n || 0), enabled: cfg.enabled, model: cfg.model, queuePending: embedQueue.pending, queueActive: embedQueue.active })
+    if (!embedStatusCache || Date.now() - embedStatusCache.at > 60_000) {
+      const db = await getDb()
+      const row = await (await db.prepare(`
+        SELECT (SELECT COUNT(*) FROM wiki_entries_meta) AS entries,
+               (SELECT COUNT(DISTINCT entry_id) FROM entry_chunks WHERE embedding IS NOT NULL) AS covered,
+               (SELECT COUNT(*) FROM entry_chunks WHERE embedding IS NOT NULL) AS chunks,
+               (SELECT COUNT(*) FROM wiki_entries_meta m WHERE NOT EXISTS (
+                  SELECT 1 FROM entry_chunks c WHERE c.entry_id = m.id)) AS pending`)).get() as any
+      const cfg = await getEmbeddingConfig()
+      embedStatusCache = { at: Date.now(), data: { entries: Number(row?.entries || 0), covered: Number(row?.covered || 0), chunks: Number(row?.chunks || 0), pending: Number(row?.pending || 0), enabled: cfg.enabled, model: cfg.model } }
+    }
+    res.json(embedStatusCache.data)
   } catch (e: any) {
     console.error('embeddings status failed', e)
     res.status(500).json({ success: false, message: String(e) })
   }
 })
 
-/** 语义检索验证：query 向量化 → 全量余弦 → Top N */
+/** 语义检索验证（方案 A 切主路）：query 向量化 → 词条分块向量余弦（与 /api/search 向量路同一条）。
+ *  返回形状对齐旧 EmbeddingHit（file_id 换 entry_id 语义，前端验证工具同步适配）。 */
 llmRouter.post('/embeddings/search', async (req, res) => {
   try {
     const { query, topK } = req.body as { query?: string; topK?: number }
@@ -502,8 +509,9 @@ llmRouter.post('/embeddings/search', async (req, res) => {
     const cfg = await getEmbeddingConfig()
     if (!cfg.enabled || !cfg.model) return res.json({ success: false, message: '请先开启向量化并选择向量模型' })
     const vector = await callEmbedding(q, cfg)
-    const hits = await searchEmbeddings(vector, Math.max(1, Math.min(20, parseInt(String(topK)) || 5)))
-    res.json({ success: true, hits })
+    const db = await getDb()
+    const hits = await vectorSearchWiki(db, vector, Math.max(1, Math.min(20, parseInt(String(topK)) || 5)))
+    res.json({ success: true, route: 'chunks', hits })
   } catch (e: any) {
     console.error('embeddings search failed', e)
     res.json({ success: false, message: String(e?.message || e) })

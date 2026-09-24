@@ -12,7 +12,7 @@
     <div class="chat-grid">
       <!-- 左栏：会话列表 -->
       <aside class="sect chat-side">
-        <div class="sect-head"><span class="sq"></span><h2 class="stitle">会话</h2><div class="sright"><span class="cap mono">{{ sessions.length }}</span></div></div>
+        <div class="sect-head"><span class="sq"></span><h2 class="stitle">会话</h2><span class="sect-en">Sessions</span><div class="sright"><span class="cap mono">{{ sessions.length }}</span></div></div>
         <div class="chat-sessions">
           <button v-for="s in sessions" :key="s.sessionId" class="chat-sitem" :class="{ on: s.sessionId === sessionId }" @click="openSession(s)">
             <span class="chat-sprev">{{ s.preview || '（空会话）' }}</span>
@@ -100,6 +100,7 @@ import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { useUiStore } from '../stores/useUiStore'
+import { fmtTime } from '../utils/format'
 import Icon from '../components/Icon.vue'
 
 const route = useRoute()
@@ -133,11 +134,6 @@ const skillFileId = computed(() => {
   return Number.isFinite(q) ? q : undefined
 })
 
-function fmtTime(t?: string) {
-  if (!t) return ''
-  return String(t).slice(5, 16).replace('T', ' ')
-}
-
 function scrollBottom() {
   nextTick(() => { if (msgsEl.value) msgsEl.value.scrollTop = msgsEl.value.scrollHeight })
 }
@@ -170,11 +166,17 @@ function newChat() {
   input.value = ''
 }
 
-/** 回放消息映射：assistant 且 content 带 `[复盘] ` 前缀 → 剥前缀 + recap 标记（不同样式显示） */
-function mapMessages(messages: Array<{ role: string, content: string }>): Msg[] {
+/** 回放消息映射：assistant 且 content 带 `[复盘] ` 前缀 → 剥前缀 + recap 标记（不同样式显示）；
+ * refs 透传（新消息落库还原，存量消息由后端回放时回填），user 消息无引用 */
+function mapMessages(messages: Array<{ role: string, content: string, refs?: RefItem[] }>): Msg[] {
   return (messages || []).map(m => {
     const recap = m.role !== 'user' && m.content.startsWith('[复盘]')
-    return { role: m.role === 'user' ? 'user' : 'assistant', content: recap ? m.content.replace(/^\[复盘\]\s*/, '') : m.content, recap }
+    return {
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: recap ? m.content.replace(/^\[复盘\]\s*/, '') : m.content,
+      recap,
+      refs: m.role !== 'user' ? (m.refs || []) : undefined
+    }
   })
 }
 
@@ -324,8 +326,9 @@ onMounted(() => {
 .chat-bubble { max-width: 78%; padding: 9px 12px; font-size: 13px; line-height: 1.65; border-radius: var(--r); }
 .chat-bubble.user { background: var(--ink); color: var(--on-ink); white-space: pre-wrap; }
 .chat-bubble.assistant { background: var(--bg-2); border: 1px solid var(--border); }
-.chat-bubble.assistant.recap { border-style: dashed; border-color: #B48A3C; background: rgba(232, 163, 61, 0.06); }
-.chat-recap-tag { display: inline-block; font-size: 11px; font-weight: 700; color: #B48A3C; border: 1px solid #B48A3C; border-radius: var(--r); padding: 0 5px; margin-bottom: 4px; }
+/* 复盘气泡：warn 系虚线边 + 极淡 warn 底（与全局提醒语义同源） */
+.chat-bubble.assistant.recap { border-style: dashed; border-color: var(--warn); background: rgba(180, 101, 26, 0.06); }
+.chat-recap-tag { display: inline-block; font-size: 11px; font-weight: 700; color: var(--warn); border: 1px solid var(--warn); border-radius: var(--r); padding: 0 5px; margin-bottom: 4px; }
 .chat-whitespace-pre { white-space: pre-wrap; }
 .chat-caret { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; background: var(--ink); animation: chat-blink 1s steps(2) infinite; }
 @keyframes chat-blink { 50% { opacity: 0; } }

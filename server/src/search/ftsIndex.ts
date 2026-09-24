@@ -188,6 +188,19 @@ export async function rebuildWikiFts(db: SqliteDatabase): Promise<number> {
 }
 
 /**
+ * 孤儿清理（批次④收尾）：删除 wiki_fts 中 entry_id 已不在主表的索引行——
+ * 词条删除路径漏清索引的历史残留会稀释 FTS 命中并让 doctor 覆盖率虚高。
+ * 纯 DB 操作秒级完成（rebuildFts 全量重建需逐条读 entry.md，对孤儿清理过重）。
+ * 返回删除行数，供维护端点与 doctor 展示。
+ */
+export async function pruneOrphanFts(db: SqliteDatabase): Promise<number> {
+  if (!ftsTokenizer) await ensureFtsTable(db)
+  if (!ftsTokenizer) return 0
+  const r = await (await db.prepare(`DELETE FROM ${FTS_TABLE} WHERE entry_id NOT IN (SELECT id FROM wiki_entries_meta)`)).run()
+  return Number(r.changes || 0)
+}
+
+/**
  * FTS 关键词检索（id 列表口径）：trigram MATCH 路按 bm25 相关度降序返回命中的 wiki_entries_meta.id；
  * LIKE 回退路径（短 CJK query / unicode61 库）无 bm25 可用，按 title > summary > content 命中优先级近似排序。
  * 空 query / FTS5 完全不可用返回空数组，不抛错。

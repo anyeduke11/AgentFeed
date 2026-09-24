@@ -14,6 +14,7 @@
       <div class="tabs">
         <button class="tab" :class="{ on: settingsTab === 'roots' }" @click="settingsTab = 'roots'">扫描根</button>
         <button class="tab" :class="{ on: settingsTab === 'ai' }" @click="settingsTab = 'ai'">AI 设置与队列</button>
+        <button class="tab" :class="{ on: settingsTab === 'search' }" @click="settingsTab = 'search'">检索</button>
         <button class="tab" :class="{ on: settingsTab === 'gate' }" @click="settingsTab = 'gate'">过滤门禁</button>
         <button class="tab" :class="{ on: settingsTab === 'records' }" @click="settingsTab = 'records'">过滤记录</button>
         <button class="tab" :class="{ on: settingsTab === 'deleted' }" @click="settingsTab = 'deleted'">已删除文件</button>
@@ -37,6 +38,7 @@ import Icon from '../components/Icon.vue'
 // 七个 tab 各自的子组件（chunk 按需加载，首次切入才拉取）
 const SettingsRoots = defineAsyncComponent(() => import('../components/settings/SettingsRoots.vue'))
 const SettingsAi = defineAsyncComponent(() => import('../components/settings/SettingsAi.vue'))
+const SettingsSearch = defineAsyncComponent(() => import('../components/settings/SettingsSearch.vue'))
 const SettingsGate = defineAsyncComponent(() => import('../components/settings/SettingsGate.vue'))
 const SettingsGateRecords = defineAsyncComponent(() => import('../components/settings/SettingsGateRecords.vue'))
 const SettingsTrash = defineAsyncComponent(() => import('../components/settings/SettingsTrash.vue'))
@@ -44,12 +46,13 @@ const SettingsLan = defineAsyncComponent(() => import('../components/settings/Se
 const SettingsLogs = defineAsyncComponent(() => import('../components/settings/SettingsLogs.vue'))
 const SettingsProfile = defineAsyncComponent(() => import('../components/settings/SettingsProfile.vue'))
 
-const settingsTab = ref<'roots' | 'ai' | 'gate' | 'records' | 'deleted' | 'security' | 'profile' | 'logs'>('roots')
+const settingsTab = ref<'roots' | 'ai' | 'search' | 'gate' | 'records' | 'deleted' | 'security' | 'profile' | 'logs'>('roots')
 
 // tab id → 异步子组件映射
 const tabMap = {
   roots: SettingsRoots,
   ai: SettingsAi,
+  search: SettingsSearch,
   gate: SettingsGate,
   records: SettingsGateRecords,
   deleted: SettingsTrash,

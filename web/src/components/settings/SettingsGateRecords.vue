@@ -1,7 +1,7 @@
 <template>
   <!-- 过滤记录 -->
   <div class="sect">
-    <div class="sect-head"><span class="sq"></span><h2 class="stitle">过滤记录</h2><div class="sright" style="display:flex;gap:8px;align-items:center">
+    <div class="sect-head"><span class="sq"></span><h2 class="stitle">过滤记录</h2><span class="sect-en">Gate Records</span><div class="sright" style="display:flex;gap:8px;align-items:center">
       <span class="cap">误杀文件可手动恢复{{ gateView === 'skipped' && gateTotal > gateRecords.length ? ' · 仅显示最近 ' + gateRecords.length + ' 条' : '' }}</span>
       <button class="btn xs" :disabled="!gateTotal" @click="archiveAll"><Icon name="folder" :size="12" /> 全部存档</button>
     </div></div>
@@ -73,6 +73,7 @@ import Icon from '../Icon.vue'
 import { useSettingsStore } from '../../stores/useSettingsStore'
 import { useUiStore } from '../../stores/useUiStore'
 import { api } from '../../api'
+import { fmtSize } from '../../utils/format'
 
 const props = defineProps<{ refreshSeq?: number }>()
 
@@ -113,10 +114,6 @@ async function loadRecords() {
   } catch {
     archives.value = []
   }
-}
-
-function fmtSize(n: number) {
-  return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'
 }
 
 function openCsv(url: string) {

@@ -7,7 +7,8 @@
 // 完整回答一次性拿到后切块推送，块间不 sleep（本地回环无网络抖动，人为延迟只拖慢首屏）。
 //
 // SSE 事件协议（本端点为事件流约定，不走 { success } JSON 信封；其余端点仍守 { success } 约定）：
-//   {type:'meta',     refs:[{id,title}]}               引用清单（id = files.id，前端跳 /reader/<id>）
+//   {type:'meta',     refs:[{id,title}]}               引用清单（id = files.id，前端跳 /reader/<id>；随 assistant 消息落库，
+//                                                      存量旧消息由 GET /sessions/:id 回放时检索回填）
 //   {type:'delta',    text}                            回答分块（约 40 字符/块，顺序拼接即完整回答）
 //   {type:'done',     sessionId}                       正常结束（sessionId 供续会话）
 //   {type:'fallback', results:[{id,title,summary}]}    LLM 失败降级：返回检索列表保可用，不落 assistant 消息
@@ -18,7 +19,7 @@
 import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
 import type { SqliteDatabase } from '@homeofthings/sqlite3'
-import { getDb } from '../db.js'
+import { getDb, ensureColumns } from '../db.js'
 import { searchKnowledgeCore } from '../knowledge.js'
 import { aggregateDomainContext, type DomainContext } from '../context.js'
 import { cleanTitle, cleanSummary } from '../formatter.js'
@@ -56,9 +57,12 @@ export type Skill = typeof SKILLS[number]
 // 自然语言回答需约定 JSON 信封再解包；非 JSON 原文按兜底原文返回（宽容解析，见 extractAnswer）。
 const ENVELOPE_RULE = '输出格式：只输出一个 JSON 对象 {"answer":"给用户看的完整回答（可含换行）"}，不要代码围栏，不要多余解释。'
 
-/** chat_messages 为 J1 批占位表（profile/aggregate.ts 运行时 IF NOT EXISTS 兜底建）；同 DDL 幂等确保，零迁移 */
+/** chat_messages 为 J1 批占位表（profile/aggregate.ts 运行时 IF NOT EXISTS 兜底建，DDL 两处同步）；同 DDL 幂等确保 + ensureColumns 幂等补列（红线 3，零破坏性迁移） */
 async function ensureChatTable(db: SqliteDatabase) {
-  await db.exec('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+  await db.exec('CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, refs TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)')
+  // refs：JSON 数组 [{id,title}] 与 SSE meta.refs 同构。NULL 只属于存量旧消息 = 待回填标记（回放时重建并写回）；'[]' = 确认无引用
+  // ddl 为完整「列名 类型」串（对齐 db.ts 内 ensureColumns 调用惯例，曾误传裸 'TEXT' 建出同名垃圾列）
+  await ensureColumns(db, 'chat_messages', [{ name: 'refs', ddl: 'refs TEXT' }])
 }
 
 /**
@@ -224,6 +228,14 @@ function toRef(id: any, title: any): { id: number, title: string } {
   return { id: Number(id), title: cleanTitle(String(title ?? '')) }
 }
 
+/** 检索 + 零命中放宽：POST 实时问答与回放回填共用，保证回答中 [n] 编号与引用清单口径一致。
+ * zeroHit = 主检索零命中（放宽前判定），供 prompt 如实声明「库内无直接相关内容」 */
+async function searchWithRelax(db: SqliteDatabase, query: string): Promise<{ rows: any[], zeroHit: boolean }> {
+  const rows = await searchKnowledgeCore(db, { query, limit: SEARCH_TOP })
+  const zeroHit = rows.length === 0
+  return { rows: zeroHit ? await relaxedSearch(db, query) : rows, zeroHit }
+}
+
 /**
  * POST / —— SSE 流式问答。body: { message, domain?, sessionId?, skill?, fileId? }
  * skill: explain（解释这篇，fileId 可选）/ connect（串联近 10 条阅读）/ quiz（领域自测题）/ overview（领域速览）
@@ -305,7 +317,7 @@ chatRouter.post('/', async (req, res) => {
       if (!domainCtx) {
         const hint = '请先在上方选择一个领域，再点「领域速览」——速览基于该领域的库内词条生成。'
         await insertChatMessage(db, sessionId, 'user', message)
-        await insertChatMessage(db, sessionId, 'assistant', hint)
+        await insertChatMessage(db, sessionId, 'assistant', hint, '[]')
         send({ type: 'meta', refs: [] })
         for (let i = 0; i < hint.length; i += DELTA_CHUNK) send({ type: 'delta', text: hint.slice(i, i + DELTA_CHUNK) })
         send({ type: 'done', sessionId })
@@ -316,11 +328,10 @@ chatRouter.post('/', async (req, res) => {
       refs = domainCtx.topEntries.filter(e => e.fileId != null).slice(0, SEARCH_TOP)
         .map(e => toRef(e.fileId, e.title))
     } else {
-      searchRows = await searchKnowledgeCore(db, { query: message, domain, limit: SEARCH_TOP })
-      let zeroHit = searchRows.length === 0
-      if (zeroHit) searchRows = await relaxedSearch(db, message)
+      const sr = await searchWithRelax(db, message)
+      searchRows = sr.rows
       refs = searchRows.map(r => toRef(r.id, r.title))
-      userPrompt = buildUserPrompt(message, searchRows, zeroHit)
+      userPrompt = buildUserPrompt(message, searchRows, sr.zeroHit)
     }
 
     // 3) user 消息先行落库（用户问了什么永远留痕），引用清单先推（UI 尽早可点）
@@ -359,9 +370,9 @@ chatRouter.post('/', async (req, res) => {
       return
     }
 
-    // 5) 流式推送 + assistant 落库 + done（落库先于 done：客户端刷新会话列表时数据已就绪）
+    // 5) 流式推送 + assistant 落库（含引用清单，回放可还原 chips）+ done（落库先于 done：客户端刷新会话列表时数据已就绪）
     for (let i = 0; i < answer.length; i += DELTA_CHUNK) send({ type: 'delta', text: answer.slice(i, i + DELTA_CHUNK) })
-    await insertChatMessage(db, sessionId, 'assistant', answer)
+    await insertChatMessage(db, sessionId, 'assistant', answer, JSON.stringify(refs))
     send({ type: 'done', sessionId })
     res.end()
   } catch (e: any) {
@@ -371,8 +382,9 @@ chatRouter.post('/', async (req, res) => {
   }
 })
 
-async function insertChatMessage(db: SqliteDatabase, sessionId: string, role: string, content: string) {
-  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)')).run([sessionId, role, content])
+/** refsJson：引用清单 JSON 串（assistant 回答必传，'[]' = 确认无引用）；user 消息与复盘摘要等缺省 NULL */
+async function insertChatMessage(db: SqliteDatabase, sessionId: string, role: string, content: string, refsJson: string | null = null) {
+  await (await db.prepare('INSERT INTO chat_messages (session_id, role, content, refs) VALUES (?, ?, ?, ?)')).run([sessionId, role, content, refsJson])
 }
 
 /** 最近 20 个会话：session_id 聚合、首条 user 消息预览、最后活跃时间 */
@@ -405,17 +417,45 @@ chatRouter.get('/sessions', async (_req, res) => {
   }
 })
 
-/** 会话完整消息（时间正序），供前端回放 */
+/**
+ * 会话完整消息（时间正序），供前端回放。含存量引用回填：
+ * refs IS NULL 的 assistant 消息（复盘除外）= 未落引用清单的旧消息——取其前最近一条 user 提问
+ * 重跑检索（与实时管线同一 searchWithRelax，[n] 编号口径一致），按回答中 [n] 标记映射重建引用，
+ * 结果写回该行（只重建一次，不重复烧检索/embeddings 外呼成本）。检索异常 fail-soft 跳过不阻塞回放。
+ */
 chatRouter.get('/sessions/:id', async (req, res) => {
   try {
     const db = await getDb()
     await ensureChatTable(db)
     const rows = await (await db.prepare(
-      'SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY id'
+      'SELECT id, role, content, refs, created_at FROM chat_messages WHERE session_id = ? ORDER BY id'
     )).all([String(req.params.id)]) as any[]
+
+    let lastUser = ''
+    for (const r of rows) {
+      if (r.role === 'user') { lastUser = String(r.content ?? ''); continue }
+      if (r.refs != null || String(r.content ?? '').startsWith('[复盘]') || !lastUser.trim()) continue
+      try {
+        const { rows: hits } = await searchWithRelax(db, lastUser)
+        // 只映射回答实际引用的编号：超界忽略（LLM 幻觉编号）、无 [n] 标记 → []（不再重试）
+        const cited = new Set([...String(r.content ?? '').matchAll(/\[(\d+)\]/g)].map(m => Number(m[1])))
+        const rebuilt = hits
+          .map((h, i) => ({ n: i + 1, ref: toRef(h.id, h.title) }))
+          .filter(x => cited.has(x.n))
+          .map(x => x.ref)
+        const refsJson = JSON.stringify(rebuilt)
+        await (await db.prepare('UPDATE chat_messages SET refs = ? WHERE id = ?')).run([refsJson, Number(r.id)])
+        r.refs = refsJson
+      } catch { /* 检索失败保持 NULL，fail-soft 不阻塞回放 */ }
+    }
+
     res.json({
       success: true,
-      messages: rows.map(r => ({ id: Number(r.id), role: String(r.role), content: String(r.content ?? ''), createdAt: r.created_at })),
+      messages: rows.map(r => {
+        let refs: Array<{ id: number, title: string }> = []
+        try { refs = r.refs ? JSON.parse(String(r.refs)) : [] } catch { refs = [] }
+        return { id: Number(r.id), role: String(r.role), content: String(r.content ?? ''), createdAt: r.created_at, refs }
+      }),
     })
   } catch (e: any) {
     console.error('chat session detail failed', e)
@@ -475,7 +515,7 @@ chatRouter.post('/recap', async (req, res) => {
       })
       return res.json({ success: false, message: '复盘生成失败：' + String(e?.message || e) })
     }
-    await insertChatMessage(db, sessionId, 'assistant', `[复盘] ${summary}`)
+    await insertChatMessage(db, sessionId, 'assistant', `[复盘] ${summary}`, '[]')
     res.json({ success: true, summary })
   } catch (e: any) {
     console.error('chat recap failed', e)

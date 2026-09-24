@@ -68,7 +68,9 @@ readingRouter.post('/progress', async (req, res) => {
   }
 })
 
-/** 执行队列：到期优先（逾期置顶），附带统计 */
+/** 执行队列：到期优先（逾期置顶），附带统计。
+ *  只出「已到期」的 pending：完成后按间隔重排的下一轮（due_at 在未来）不占队列，
+ *  否则点「完成」的瞬间新轮立即顶回列表，用户视角=没出队（2026-09-22 用户反馈）。 */
 readingRouter.get('/exec', async (req, res) => {
   try {
     const db = await getDb()
@@ -79,13 +81,14 @@ readingRouter.get('/exec', async (req, res) => {
       FROM exec_queue e
       JOIN files f ON f.id = e.file_id
       LEFT JOIN domains d ON f.domain_id = d.id
-      WHERE e.status = 'pending'
+      WHERE e.status = 'pending' AND e.due_at <= datetime('now')
       ORDER BY e.due_at ASC
       LIMIT ${EXEC_QUEUE_CAP}`)).all() as any[]
     const now = Date.now()
     // 逾期判定留 1 小时宽限：「立即试」刚入队即到期属正常可执行，不应立刻标红
     for (const r of rows) r.overdue = new Date(String(r.due_at).includes('T') ? r.due_at : r.due_at.replace(' ', 'T') + 'Z').getTime() < now - 3600_000
-    const doneToday = await (await db.prepare("SELECT COUNT(*) AS n FROM exec_queue WHERE status = 'done' AND done_at >= datetime('now', 'start of day')")).get() as any
+    // 今日完成按文档去重：同文档当天多轮「立即试→完成」是重复操作不是新完成（用户口径）
+    const doneToday = await (await db.prepare("SELECT COUNT(DISTINCT file_id) AS n FROM exec_queue WHERE status = 'done' AND done_at >= datetime('now', 'start of day')")).get() as any
     res.json({ items: rows, counts: { pending: rows.length, overdue: rows.filter((r: any) => r.overdue).length, doneToday: doneToday.n } })
   } catch (e: any) {
     console.error('reading exec list failed', e)

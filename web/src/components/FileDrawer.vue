@@ -25,7 +25,7 @@
           <span class="k">蒸馏状态</span>
           <span>
             <span class="stb" :class="{ 'stb-del': file.status === 'deleted' }">
-              <span class="dot" :style="{ background: file.status === 'deleted' ? '#C2402A' : stColor(file.llm_state) }"></span>
+              <span class="dot" :style="{ background: file.status === 'deleted' ? 'var(--fail)' : stColor(file.llm_state) }"></span>
               {{ file.status === 'deleted' ? '已删除' : stLabel(file.llm_state) }}
             </span>
             <span class="mono dim3" style="font-size:11px;margin-left:6px">llm_state: {{ file.llm_state }}</span>
@@ -64,7 +64,7 @@
             <div class="vnode" :class="{ cur: i === 0 }">
               <div class="vh">
                 <span class="vtag">{{ file.ext }}</span>
-                <span v-if="i === 0" class="stb" style="font-size:10.5px;padding:0 6px"><span class="dot" :style="{ background: file.status === 'deleted' ? '#C2402A' : '#1E8E5A' }"></span>{{ file.status === 'deleted' ? '已软删' : '当前版本' }}</span>
+                <span v-if="i === 0" class="stb" style="font-size:10.5px;padding:0 6px"><span class="dot" :style="{ background: file.status === 'deleted' ? 'var(--fail)' : 'var(--ok)' }"></span>{{ file.status === 'deleted' ? '已软删' : '当前版本' }}</span>
                 <span v-else class="cap">已归档 · 已被当前版本取代</span>
                 <span class="cap mono" style="margin-left:auto">{{ timeLabel(v.related_mtime) }}</span>
               </div>
@@ -86,6 +86,8 @@ import Icon from './Icon.vue'
 import { useUiStore } from '../stores/useUiStore'
 import { useFilesStore } from '../stores/useFilesStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
+import { fmtSize } from '../utils/format'
+import { useCopyToClipboard, llmStateText, llmStateColor } from '../composables/ui'
 
 const ui = useUiStore()
 const files = useFilesStore()
@@ -115,25 +117,22 @@ watch(() => ui.drawerFileId, async (id) => {
 })
 
 function domColor(name?: string) {
-  if (!name) return '#5C6663'
+  if (!name) return 'var(--text-2)'
   for (const d of domains.tree) {
     if (d.name === name) return d.color
     for (const c of d.children || []) if (c.name === name) return c.color
   }
-  return '#5C6663'
+  return 'var(--text-2)'
 }
 
 function stLabel(s: string) {
-  return ({ done: '已蒸馏', running: '编目中', pending: '待处理', failed: '失败', skipped: '已跳过' } as Record<string, string>)[s] || s
+  return llmStateText(s)
 }
 function stColor(s: string) {
-  return ({ done: '#1E8E5A', running: '#2456A6', pending: '#97A29E', failed: '#C2402A', skipped: '#B9C2BE' } as Record<string, string>)[s] || '#97A29E'
+  return llmStateColor(s)
 }
 function sizeLabel(n?: number) {
-  if (!n && n !== 0) return '-'
-  if (n < 1024) return `${n}B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`
-  return `${(n / 1024 / 1024).toFixed(1)}MB`
+  return fmtSize(n) === '—' ? '-' : fmtSize(n).replace(/ /g, '')
 }
 function timeLabel(t?: string) {
   if (!t) return '-'
@@ -143,14 +142,8 @@ function md5Short(v: any) {
   return (v.md5 || '').slice(0, 10) || '-'
 }
 
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    ui.toast('已复制到剪贴板')
-  } catch {
-    ui.toast('复制受限，请手动选择文本')
-  }
-}
+const { copy } = useCopyToClipboard()
+
 async function openDoc() {
   const r = await files.openFile(file.value.id)
   ui.toast(r?.success === false ? (r.message || '打开失败') : '已在默认应用中打开')

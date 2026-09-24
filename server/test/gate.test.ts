@@ -334,3 +334,37 @@ test('抽样门禁：文件名白名单直通且通过时不带 ruleId', () => {
   assert.deepEqual(checkGateSample('/x/AGENTS.md', 10, '短', cfg({})), { pass: true })
   assert.deepEqual(checkGateSample('/x/big.md', 600000, LONG, cfg({})), { pass: true })
 })
+
+// ---- 大文件流式 codeRatio（P1-⑤ 修复）：scanner 在抽样放行后用 streamCodeRatioStats 补判 ----
+
+test('流式占比与 checkGate 整读口径一致：开栏行计码、闭栏行不计、内联成对围栏不计', async () => {
+  // WHY: P1-⑤ 的修法承诺是「流式结果 = 整读结果」——状态机语义若与正则剥离口径漂移
+  // （如把闭栏行也计码、或把内联 `a ``` b ``` c` 整行计码），大文件与小文件的门禁
+  // 判罚就会不一致，占比阈值附近的文件出现口径性误杀/误放。
+  const { streamCodeRatioStats } = await import('../src/gate.js')
+  const { writeFileSync, mkdtempSync, rmSync } = await import('fs')
+  const os = await import('os')
+  const pathMod = await import('path')
+  const tmp = mkdtempSync(pathMod.join(os.tmpdir(), 'gate-stream-ratio-'))
+  try {
+    const raw = [
+      '散文段落一', '```js', 'code1', 'code2', '```',
+      '内联 a ``` b ``` c 一行', '散文段落二', '```py', 'code3', '```'
+    ].join('\n')
+    const fp = pathMod.join(tmp, 'mix.md')
+    writeFileSync(fp, raw)
+    const stats = await streamCodeRatioStats(fp)
+    // 手工对账：总 10 行；代码行 = 开栏行(```js/```py)2 + 栏内 code1..3 3 行；闭栏/内联/散文不计
+    assert.equal(stats!.totalLines, 10)
+    assert.equal(stats!.codeLines, 5)
+    // 与 checkGate 整读口径交叉验证（同内容、同 codeLines）
+    const noFence = raw.replace(/```[\s\S]*?```/g, '')
+    const checkGateCodeLines = raw.split('\n').length - noFence.split('\n').length
+    assert.equal(stats!.codeLines, checkGateCodeLines, '流式与整读的代码行数必须相等')
+
+    const fp2 = pathMod.join(tmp, 'missing.md')
+    assert.equal(await streamCodeRatioStats(fp2), null, '读取失败返回 null，调用方按放行处理')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
+})

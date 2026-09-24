@@ -9,7 +9,7 @@ export function guessModelType(name: string): ModelType {
 }
 
 /** 余弦相似度（零向量返回 0） */
-export function cosine(a: number[], b: number[]): number {
+export function cosine(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (!a.length || a.length !== b.length) return 0
   let dot = 0
   let na = 0
@@ -76,7 +76,9 @@ export interface EmbeddingConfig {
 export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
   const db = await getDb()
   const row = await (await db.prepare("SELECT value FROM config WHERE key = 'ai.embedding'")).get() as any
-  const fallback: EmbeddingConfig = { enabled: false, provider: 'ollama', model: '' }
+  // 默认本地 Ollama 向量模型开启（2026-09-24 起）：蒸馏成功即自动向量化（llmWorker 成功路径 enqueueEmbed），
+  // Ollama 服务与模型由 service.sh 随后端拉起；config 缺失/损坏时按开启兜底，闭环不因配置丢失静默断链
+  const fallback: EmbeddingConfig = { enabled: true, provider: 'ollama', model: 'qwen3-embedding:4b' }
   try {
     return { ...fallback, ...JSON.parse(row?.value || '{}') }
   } catch {
@@ -108,58 +110,29 @@ export async function callEmbedding(text: string, cfg?: EmbeddingConfig): Promis
   return vec.map(Number)
 }
 
-export async function upsertFileEmbedding(db: any, fileId: number, model: string, vector: number[]): Promise<void> {
-  const stmt = await db.prepare(`
-    INSERT INTO file_embeddings (file_id, model, dim, vector, updated_at)
-    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(file_id) DO UPDATE SET model = excluded.model, dim = excluded.dim, vector = excluded.vector, updated_at = CURRENT_TIMESTAMP
-  `)
-  // 注意：@homeofthings/sqlite3 的 run 多参数须包数组传（见 wiki.ts 既有用法）
-  await stmt.run([fileId, model, vector.length, JSON.stringify(vector)])
+/* ---- L1 延迟治理：向量 BLOB 编解码（Float32 小端二进制） ----
+ * WHY：向量原以 JSON TEXT 存储，54k chunks × 2560 维全量检索时逐行 JSON.parse 是搜索 28s 的主因
+ * （文本体积 4-5× 于二进制 + 解析器开销）。BLOB 写入后读取是 Buffer 上的 Float32Array 零拷贝视图。
+ * 双读兼容：存量 TEXT 行由 boot 迁移（vectorBlobMigrate）后台收敛，迁移完成前两种格式共存。 */
+export function vecToBlob(vector: number[]): Buffer {
+  return Buffer.from(new Float32Array(vector).buffer, 0, vector.length * 4)
 }
 
-export interface EmbeddingHit {
-  file_id: number
-  title: string
-  path: string
-  score: number
-}
-
-/** 全量拉取向量做 JS 余弦检索（本地数千篇规模足够），只统计 active 文件 */
-export async function searchEmbeddings(queryVector: number[], topK = 5): Promise<EmbeddingHit[]> {
-  const db = await getDb()
-  const rows = await (await db.prepare(`
-    SELECT e.file_id, e.vector, COALESCE(f.title, f.name) AS title, f.path
-    FROM file_embeddings e JOIN files f ON f.id = e.file_id
-    WHERE f.status = 'active'
-  `)).all() as any[]
-  const hits: EmbeddingHit[] = []
-  for (const r of rows) {
-    try {
-      const vec = JSON.parse(r.vector)
-      const score = cosine(queryVector, vec)
-      if (score > 0) hits.push({ file_id: r.file_id, title: r.title, path: r.path, score })
-    } catch { /* 单条向量损坏跳过 */ }
+/** 双读：Buffer（BLOB，零拷贝视图）/ string（存量 JSON，解析）；损坏返回 null 由调用方跳过 */
+export function storedVecToF32(raw: any): Float32Array | null {
+  if (raw == null) return null
+  if (Buffer.isBuffer(raw)) {
+    return new Float32Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 4))
   }
-  hits.sort((a, b) => b.score - a.score)
-  return hits.slice(0, topK)
+  try {
+    const arr = JSON.parse(String(raw))
+    if (!Array.isArray(arr) || !arr.length) return null
+    return Float32Array.from(arr)
+  } catch { return null }
 }
 
-/** 已向量化文件数 */
-export async function countEmbeddings(): Promise<number> {
-  const db = await getDb()
-  const row = await (await db.prepare('SELECT COUNT(*) AS n FROM file_embeddings')).get() as any
-  return Number(row?.n || 0)
-}
-
-/** 单篇向量化：取 title+summary 拼接文本 → callEmbedding → upsert（cfg 缺省自动读取配置） */
-export async function embedFileById(db: any, fileId: number, cfg?: EmbeddingConfig): Promise<{ model: string; dim: number }> {
-  const config = cfg || await getEmbeddingConfig()
-  const row = await (await db.prepare("SELECT COALESCE(NULLIF(title, ''), name) AS title, COALESCE(summary, '') AS summary FROM files WHERE id = ?")).get(fileId) as any
-  if (!row) throw new Error('file_not_found')
-  const text = `${row.title}\n${row.summary}`.replace(/\s+/g, ' ').trim()
-  if (!text) throw new Error('no_valid_content')
-  const vector = await callEmbedding(text, config)
-  await upsertFileEmbedding(db, fileId, config.model, vector)
-  return { model: config.model, dim: vector.length }
-}
+// 方案 B（2026-09-24）：file 级向量 API（upsertFileEmbedding / searchEmbeddings /
+// countEmbeddings / embedFileById / setEmbedState / EmbeddingHit）随 file_embeddings
+// DROP 整体移除——向量主路唯一为词条分块（search/chunkEmbed + P2 内存索引）。
+// 本文件保留：cosine / vecToBlob / storedVecToF32（chunk 路复用）、getEmbeddingConfig、
+// callEmbedding（查询向量化）、Ollama 探测族。

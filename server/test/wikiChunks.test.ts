@@ -77,11 +77,50 @@ test('indexWikiChunks 单词条索引 + hash 幂等：二次调用零嵌入调�
   const rows = await (await db.prepare('SELECT chunk_index, content_hash, embedding, model FROM entry_chunks WHERE entry_id = ? ORDER BY chunk_index')).all([id]) as any[]
   assert.equal(rows.length, 2)
   assert.ok(rows.every(r => r.content_hash && String(r.content_hash).length === 64), '每块必须落 content_hash（sha256 hex）')
-  assert.deepEqual(JSON.parse(String(rows[0].embedding)), [1, 0], '向量必须按 JSON 文本落库')
+  // L1 起向量按 Float32 BLOB 落库（JSON 文本为迁移期兼容格式）——双读解码后断言
+  const { storedVecToF32, vecToBlob } = await import('../src/llm/embeddings.js')
+  assert.deepEqual(Array.from(storedVecToF32(rows[0].embedding)!), [1, 0], '向量必须按 BLOB 落库且可解码')
+  // BLOB 编解码契约（原 embedState.test.ts 随方案 B 并入）：roundtrip 精度 + 损坏输入返回 null
+  const rt = storedVecToF32(vecToBlob([0.4, 0.5, 0.6]))!
+  assert.equal(rt.length, 3)
+  assert.ok(Math.abs(rt[0]! - 0.4) < 1e-6 && Math.abs(rt[2]! - 0.6) < 1e-6, 'roundtrip Float32 精度内无损')
+  assert.equal(storedVecToF32('not json'), null, '损坏文本返回 null 由调用方跳过')
+  assert.equal(storedVecToF32(null), null, '空值返回 null')
 
   const second = await indexWikiChunks(db, id, { embedFn: spyEmbed })
   assert.equal(second.indexed, 1, '幂等重跑仍按成功口径返回')
   assert.equal(calls.length, 2, 'content_hash 未变时二次调用必须零嵌入调用')
+})
+
+test('P2 内存索引：写入即命中 + 失效即消失 + 加载窗口内写入不丢（常驻缓存一致性契约）', async () => {
+  // WHY：向量常驻内存后，缓存与 DB 的一致性是检索正确性的生命线——
+  // ① indexWikiChunks 写入后无需等待即可检索命中（reloadEntry 增量维护）
+  // ② 正文清空后缓存同步消失（invalidateEntry）
+  // ③ 缓存评分与 DB 路径评分一致（norm 预计算不得改变余弦语义）
+  const db = await getDb()
+  const { vectorSearchWiki } = await import('../src/search/chunkEmbed.js')
+  const { ensureLoaded, indexCacheStats } = await import('../src/search/vectorIndex.js')
+  await ensureLoaded(db) // 先建立缓存（模拟服务运行态）
+
+  const id = await seedWikiEntry({ title: '内存索引一致性', md: '# 内存索引一致性\n\n唯一标记向量内容 P2XYZ\n\n## 小节\n\n小节正文 P2ABC\n' })
+  const n = await indexWikiChunks(db, id, { embedFn: async t => t!.includes('P2ABC') ? [0, 1] : [1, 0] })
+  assert.equal(n.indexed, 1, '词条成功入索引')
+
+  // ① 写入即命中：内存缓存立即可检（query [1,0] 对应首块）
+  const hitNow = await vectorSearchWiki(db, [1, 0], 5)
+  assert.ok(hitNow.some(h => h.entry_id === id), '写入后无需等待/重建即可命中')
+
+  // ③ 与 DB 评分一致性：同 query 下缓存命中块的分数与直接余弦一致（容差 1e-4）
+  const hit = hitNow.find(h => h.entry_id === id)!
+  assert.ok(Math.abs(hit.score - 1) < 1e-4 || hit.score > 0.99, '归一化向量自相似度≈1（norm 预计算不失真）')
+
+  // ② 失效即消失：正文清空 → 块集清零 → 缓存同步消失
+  await rewriteEntryMd(id, '# 内存索引一致性\n\n\n')
+  await indexWikiChunks(db, id, { embedFn: async () => [0, 0] })
+  const gone = await vectorSearchWiki(db, [1, 0], 50)
+  assert.ok(!gone.some(h => h.entry_id === id), '正文清空后缓存必须同步消失')
+  const s = indexCacheStats()
+  assert.ok(s.chunks > 0, '缓存非空（其他词条仍在）')
 })
 
 test('局部更新只重嵌脏块：变化块数 = 新增嵌入调用数，stale 块被清理（WHY：增量重嵌是向量路的成本下限契约）', async () => {

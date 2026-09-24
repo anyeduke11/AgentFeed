@@ -69,6 +69,58 @@ test('mergeForCommit：user_added 与 vetoed 原样搬运；active 全新替换'
   assert.deepEqual(first.claims, [])
 })
 
+test('portrait：解析提取五段画像（缺失容忍不拒收）；merge 新版全量替换/缺失沿用上版', () => {
+  const idx = new Map([['E1', 'read_history:7']])
+  const withPortrait = `{"role_pattern":"全栈+AI 工程","portrait":"【基本信息】用户使用中文，时区 Asia/Shanghai\\n【工作背景】全栈与 AI 工程\\n【个人背景】无\\n【协作偏好】偏好简短直接\\n【长期记忆】重实操","claims":[{"claim":"重实操","evidence_refs":["E1"],"confidence":0.8}]}`
+  const p = parseLlmProfileOutput(withPortrait, idx)
+  assert.ok(p?.portrait?.includes('【协作偏好】'), 'portrait 五段结构必须被提取')
+  assert.ok(p!.portrait!.includes('【长期记忆】'))
+
+  // portrait 缺失：不触发整包拒收（claims 证据体系是主契约）
+  const without = parseLlmProfileOutput(withPortrait.replace(/"portrait":"[^"]*",/, ''), idx)
+  assert.ok(without, '无 portrait 不得拒收整包')
+  assert.equal(without!.portrait, undefined)
+
+  // merge：新版有 portrait 全量替换；缺失沿用上版（画像不因一次缺失倒退为空）
+  const prev = parseProfileContent(JSON.stringify({ schema_version: '1', role_pattern: '旧', portrait: '旧画像文本', claims: [] }))
+  assert.equal(mergeForCommit(prev, { role_pattern: '新', portrait: '新画像文本', claims: [] }).portrait, '新画像文本')
+  assert.equal(mergeForCommit(prev, { role_pattern: '新', claims: [] }).portrait, '旧画像文本')
+
+  // prompt 必须含 portrait 指令（五段结构与「用户」指代约定）
+  const prompt = buildProfileDistillPrompt(
+    { domains: [], global: { totalReads: 1, totalAgentCalls: 0, totalChatMentions: 0, avgRating: null, topTags: [] } } as any,
+    null, idx
+  )
+  assert.ok(prompt.includes('【基本信息】') && prompt.includes('【长期记忆】'), 'prompt 必须带五段结构指令')
+  assert.ok(prompt.includes('「用户」指代'), 'prompt 必须约束人称口径')
+})
+
+test('triggerProfileDistill：手动插队语义 + 默认服务商；自动触发不插队', async () => {
+  // 层 1（纯逻辑，无竞态）：LlmQueue 优先级插入——pr=100 的画像 job 必须排在 pr=0 重蒸馏积压之前。
+  // 先 pause 挡住 enqueue 内的 process() 消费，插完再读位置
+  const { LlmQueue } = await import('../src/llm/llmQueue.js')
+  const q = new LlmQueue(4)
+  q.pause()
+  for (let i = 0; i < 50; i++) q.enqueue({ fileId: i + 1, provider: 'p', model: 'm', prompt: '' })  // 模拟重蒸馏积压
+  q.enqueue({ fileId: 0, provider: 'default-prov', model: '', prompt: '', priority: 100, options: { type: 'profile' } })
+  const internal = (q as any).queue as any[]
+  assert.equal(internal[0].options?.type, 'profile', '手动画像 job 必须插到积压队首（priority 100）')
+  assert.equal(internal[0].provider, 'default-prov')
+
+  // 层 2（流程语义）：真实 trigger 在 providers fixture 下入队成功；开关关闭返回 false
+  const db = await getDb()
+  await (await db.prepare(`UPDATE config SET value = ? WHERE key = 'ai.providers'`)).run([
+    JSON.stringify([{ name: 'pd-prov-first' }, { name: 'pd-default-prov' }])
+  ])
+  await (await db.prepare("UPDATE config SET value = 'pd-default-prov' WHERE key = 'ai.defaultProvider'")).run()
+  assert.equal(await triggerProfileDistill(true), true, '默认服务商存在时入队成功')
+
+  // userProfile.enabled 不在 seedDefaults——INSERT OR REPLACE 造键（UPDATE 0 行测不到关闭态）
+  await (await db.prepare("INSERT OR REPLACE INTO config (key, value, type) VALUES ('userProfile.enabled', 'false', 'boolean')")).run()
+  assert.equal(await triggerProfileDistill(true), false, '开关关闭不入队')
+  await (await db.prepare("UPDATE config SET value = 'true' WHERE key = 'userProfile.enabled'")).run()
+})
+
 test('buildProfileDistillPrompt：低信号域不进 prompt；负例与 user_added 清单在案；证据桶在案', async () => {
   const db = await getDb()
   const dHi = Number((await (await db.prepare(`INSERT INTO domains (name) VALUES ('pd-高信号域')`)).run()).lastID)
@@ -117,13 +169,14 @@ test('processProfileJob 端到端：入库/版本互斥/user_added 保留/vetoed
   await processProfileJob(fakeJob(), { llmFn: llmOk })
   const e1 = captured.match(/(E\d+) → read_history:/)?.[1]
   assert.ok(e1, 'prompt 中必须存在 read_history 证据编号')
-  // 用真实编号重跑（首轮可能引用了错误编号被拒收——两段式保证端到端用合法编号过闸）
-  const llmOk2 = async (p: string) => { captured = p; return `{"role_pattern":"新角色画像","claims":[{"claim":"全局新断言","evidence_refs":["${e1}"],"confidence":0.9}],"domains":[{"domain":"${dName}","proficiency":"expert","claims":[{"claim":"域内倾向","evidence_refs":["${e1}"],"confidence":0.8}]},{"domain":"不存在的域","claims":[]}]}` }
+  // 用真实编号重跑（首轮可能引用了错误编号被拒收——两段式保证端到端用合法编号过闸）；响应带 portrait
+  const llmOk2 = async (p: string) => { captured = p; return `{"role_pattern":"新角色画像","portrait":"【基本信息】用户使用中文\\n【工作背景】全栈与 AI 工程\\n【个人背景】无\\n【协作偏好】偏好简短直接\\n【长期记忆】重实操","claims":[{"claim":"全局新断言","evidence_refs":["${e1}"],"confidence":0.9}],"domains":[{"domain":"${dName}","proficiency":"expert","claims":[{"claim":"域内倾向","evidence_refs":["${e1}"],"confidence":0.8}]},{"domain":"不存在的域","claims":[]}]}` }
   await processProfileJob(fakeJob(), { llmFn: llmOk2 })
 
   const g = await getActiveProfile(db, 'global', null)
   assert.ok(g)
   assert.equal(g.content.role_pattern, '新角色画像')
+  assert.ok(g.content.portrait?.includes('【协作偏好】'), 'portrait 必须随蒸馏入库（fresh 接线：parse → merge → commit）')
   const gClaims = g.content.claims.map(c => c.claim)
   assert.ok(gClaims.includes('全局新断言') && gClaims.includes('用户补充保留'), '新 active + user_added 并存')
   assert.ok(!projectProfile(g.content).claims.some(c => c.claim === '否决不出'), 'vetoed 不进出口')

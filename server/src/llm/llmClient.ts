@@ -52,6 +52,8 @@ export interface LlmCallLog {
   duration_ms?: number | null
   status: 'success' | 'failed' | 'timeout' | 'rate_limited'
   error?: string | null
+  /** 网关 finish_reason 原文（length/stop/...）：失败分桶区分截断与拒答形态（配套修复③） */
+  stop_reason?: string | null
 }
 
 export async function getProviders(): Promise<LlmProvider[]> {
@@ -100,6 +102,7 @@ const PROVIDER_ERROR_HINTS: Array<{ type?: string; status?: number; hint: string
  */
 const INTERNAL_ERROR_HINTS: Array<{ code: string; hint: string }> = [
   { code: 'llm_output_not_json', hint: '模型没有按约定返回 JSON（flash 级模型偶发输出截断或格式漂移），系统已强制 json_object 模式，重试通常可恢复' },
+  { code: 'content_too_long_for_model', hint: '内容超过模型上下文窗口：系统已自动压缩重试一次仍超限，建议换更大窗口的默认模型，或在 设置 → AI 设置 调整 ai.modelContextTokens' },
   { code: 'llm_json_parse_failed', hint: '模型输出无法解析为 JSON（多为长输出被截断），可减小批次大小或重试' },
   { code: 'empty_llm_response', hint: '模型返回空响应（流式通道偶发），重试通常可恢复' },
   { code: 'no_llm_provider', hint: '未配置可用的 LLM 服务商，请在 设置 → AI 设置 添加服务商并填入 API Key' },
@@ -168,7 +171,8 @@ export async function saveCallLog(log: LlmCallLog): Promise<void> {
   const error = log.error ? `'${friendlyLlmError(log.error).replace(/'/g, "''")}'` : 'NULL'
   const status = classifyCallStatus(log.status, String(log.error || ''))
   const fileId = log.file_id ?? 'NULL'
-  const sql = `INSERT INTO llm_call_logs (file_id, provider, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, error) VALUES (${fileId}, '${provider}', '${model}', ${log.prompt_tokens ?? 'NULL'}, ${log.completion_tokens ?? 'NULL'}, ${log.total_tokens ?? 'NULL'}, ${log.duration_ms ?? 'NULL'}, '${status}', ${error})`
+  const stopReason = log.stop_reason ? `'${String(log.stop_reason).replace(/'/g, "''")}'` : 'NULL'
+  const sql = `INSERT INTO llm_call_logs (file_id, provider, model, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, error, stop_reason) VALUES (${fileId}, '${provider}', '${model}', ${log.prompt_tokens ?? 'NULL'}, ${log.completion_tokens ?? 'NULL'}, ${log.total_tokens ?? 'NULL'}, ${log.duration_ms ?? 'NULL'}, '${status}', ${error}, ${stopReason})`
   await db.exec(sql)
 }
 

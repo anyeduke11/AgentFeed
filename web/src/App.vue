@@ -1,6 +1,6 @@
 <template>
   <div>
-    <header class="topbar">
+    <header class="topbar" :class="{ paused: ui.queuePaused }">
       <button class="btn ghost icon-btn menu-btn" @click="ui.toggleMenu()" aria-label="导航菜单" title="导航菜单">
         <Icon name="menu" :size="18" />
       </button>

@@ -1,7 +1,7 @@
 <template>
   <!-- 局域网与安全 -->
   <div class="sect">
-    <div class="sect-head"><span class="sq"></span><h2 class="stitle">局域网与安全</h2><div class="sright"><span class="cap">仅本机 127.0.0.1</span></div></div>
+    <div class="sect-head"><span class="sq"></span><h2 class="stitle">局域网与安全</h2><span class="sect-en">LAN & Security</span><div class="sright"><span class="cap">仅本机 127.0.0.1</span></div></div>
     <div class="setrow">
       <span class="sr-k">局域网访问</span>
       <span class="sr-v"><span class="cap">预留功能：开启后支持局域网访问 + token 认证（暂未开放）</span></span>

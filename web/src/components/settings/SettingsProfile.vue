@@ -3,7 +3,7 @@
   <div class="sect">
     <div class="sect-head">
       <span class="sq"></span>
-      <h2 class="stitle">用户画像</h2>
+      <h2 class="stitle">用户画像</h2><span class="sect-en">User Profile</span>
       <div class="sright">
         <label class="pf-switch">
           <input type="checkbox" :checked="status.enabled" @change="toggleEnabled($event)" />
@@ -24,6 +24,8 @@
         <span class="pf-budget">{{ claimCount(profile) }}/{{ budget }} 断言</span>
       </div>
       <div v-if="profile?.content?.role_pattern" class="pf-role">{{ profile.content.role_pattern }}</div>
+      <!-- portrait：五段人读画像（基本信息/工作背景/个人背景/协作偏好/长期记忆），跨 AI 工具可复制使用 -->
+      <pre v-if="profile?.content?.portrait" class="pf-portrait">{{ profile.content.portrait }}</pre>
       <div v-if="profile" class="pf-claims">
         <div v-for="c in profile.content.claims" :key="c.claim" class="pf-claim" :class="{ vetoed: c.status === 'vetoed' }">
           <span class="pf-badge" :class="c.status">{{ c.status === 'active' ? 'AI' : c.status === 'user_added' ? '用户' : '已否决' }}</span>
@@ -88,7 +90,7 @@ const props = defineProps<{ refreshSeq?: number }>()
 const ui = useUiStore()
 
 const status = ref<{ enabled: boolean, lastDistilledAt: string | null }>({ enabled: true, lastDistilledAt: null })
-const profile = ref<{ id: number, content: { role_pattern: string, claims: any[] } } | null>(null)
+const profile = ref<{ id: number, content: { role_pattern: string, portrait?: string, claims: any[] } } | null>(null)
 const budget = ref(20)
 const versions = ref<any[]>([])
 const showVersions = ref(false)
@@ -121,7 +123,30 @@ async function toggleEnabled(e: Event) {
 
 async function distillNow() {
   const r = await api.profile.distill()
-  ui.toast(r.queued ? '画像蒸馏已入队（低优先级，完成后此处刷新可见）' : (r.enabled ? '已有蒸馏在进行中' : '画像蒸馏已关闭'))
+  ui.toast(r.queued ? '画像蒸馏已插队执行 · 完成后自动刷新' : (r.enabled ? '已有蒸馏在进行中' : '画像蒸馏已关闭'))
+  if (r.queued) pollDistillDone()
+}
+
+/** 蒸馏完成自动刷新：轮询 status.lastDistilledAt 变化（3s × 60 次 ≈ 3 分钟窗口，手动插队任务足够完成） */
+let pollTimer: ReturnType<typeof setInterval> | null = null
+function pollDistillDone() {
+  if (pollTimer) clearInterval(pollTimer)
+  let n = 0
+  const before = status.value.lastDistilledAt
+  pollTimer = setInterval(async () => {
+    n++
+    try {
+      const st = await api.profile.status()
+      if (st.lastDistilledAt && st.lastDistilledAt !== before) {
+        clearInterval(pollTimer!)
+        pollTimer = null
+        await loadAll()
+        ui.toast('画像蒸馏完成 · 已刷新展示')
+        return
+      }
+    } catch { /* 下轮再查 */ }
+    if (n >= 60) { clearInterval(pollTimer!); pollTimer = null }
+  }, 3000)
 }
 
 async function veto(versionId: number, claim: string) {
@@ -169,31 +194,33 @@ export default { name: 'SettingsProfile' }
 </script>
 
 <style scoped>
-.pf-meta { font-size: 12px; color: var(--muted, #888); padding: 2px 0 10px; }
-.pf-hint { font-size: 12px; color: var(--muted, #888); }
+.pf-meta { font-size: 12px; color: var(--text-2); padding: 2px 0 10px; }
+.pf-hint { font-size: 12px; color: var(--text-2); }
 .pf-switch { font-size: 12px; display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; cursor: pointer; }
-.pf-card { border: 1px solid var(--line, #eee); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.pf-card { border: 1px solid var(--border); border-radius: var(--r); padding: 10px 12px; margin-bottom: 12px; }
 .pf-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .pf-card-head h3 { margin: 0; font-size: 13px; }
-.pf-budget { font-size: 11px; color: var(--muted, #999); }
+.pf-budget { font-size: 11px; color: var(--text-2); }
 .pf-role { font-size: 13px; font-weight: 600; padding: 4px 0 8px; }
+/* portrait 五段画像：保留换行的等宽块（内容是纯文本非 Markdown） */
+.pf-portrait { font-family: var(--sans); font-size: 12.5px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; background: var(--hover-2); border: 1px solid var(--border); border-radius: var(--r); padding: 10px 12px; margin: 0 0 10px; }
 .pf-claims { display: flex; flex-direction: column; gap: 4px; }
 .pf-claim { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; }
 .pf-claim.vetoed { opacity: .5; text-decoration: line-through; }
 .pf-badge { font-size: 10px; border-radius: 4px; padding: 1px 5px; border: 1px solid currentColor; }
-.pf-badge.active { color: #409eff; }
-.pf-badge.user_added { color: #67c23a; }
+.pf-badge.active { color: var(--steel); }
+.pf-badge.user_added { color: var(--ok); }
 .pf-badge.vetoed { color: #999; }
-.pf-conf { color: var(--muted, #999); font-size: 11px; }
+.pf-conf { color: var(--text-2); font-size: 11px; }
 .pf-add { display: flex; gap: 6px; margin-top: 8px; }
-.pf-input { flex: 1; font-size: 12px; padding: 4px 8px; border: 1px solid var(--line, #ddd); border-radius: 6px; }
+.pf-input { flex: 1; font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--r); }
 .pf-versions { display: flex; flex-direction: column; gap: 4px; }
 .pf-ver { display: flex; align-items: center; gap: 10px; font-size: 12px; padding: 3px 0; }
 .pf-ver.cur { font-weight: 600; }
-.pf-tag { font-size: 10px; color: #409eff; border: 1px solid #409eff; border-radius: 4px; padding: 0 4px; }
-.pf-evidence { border: 1px dashed var(--line, #ccc); border-radius: 8px; padding: 10px 12px; margin-top: 4px; }
+.pf-tag { font-size: 10px; color: var(--steel); border: 1px solid var(--steel); border-radius: var(--r); padding: 0 4px; }
+.pf-evidence { border: 1px dashed var(--border); border-radius: var(--r); padding: 10px 12px; margin-top: 4px; }
 .pf-ev-row { margin-bottom: 6px; }
-.pf-ev-ptr { font-size: 11px; color: var(--muted, #888); }
-.pf-ev-json { font-size: 11px; background: var(--bg-soft, #f7f7f7); border-radius: 6px; padding: 6px 8px; margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; }
+.pf-ev-ptr { font-size: 11px; color: var(--text-2); }
+.pf-ev-json { font-size: 11px; background: var(--hover-2); border-radius: var(--r); padding: 6px 8px; margin: 4px 0 0; white-space: pre-wrap; word-break: break-all; }
 .btn.ghost { background: transparent; }
 </style>

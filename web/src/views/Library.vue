@@ -14,9 +14,10 @@
       <div class="frow1">
         <div class="search-wrap">
           <Icon name="search" :size="16" />
-          <input class="inp" v-model="files.filters.kw" type="text" placeholder="搜索标题 / 标签 / 来源 agent" @input="onFilter" aria-label="搜索文件" />
+          <input class="inp" v-model="files.filters.kw" type="text" :placeholder="smart ? '混合检索 · 支持 title:标题 tag:标签 “精确短语” -排除词' : '搜索标题 / 标签 / 来源 agent'" @input="onFilter" aria-label="搜索文件" />
         </div>
-        <span class="cap mono">命中 {{ files.total }} 行</span>
+        <button class="chip" :class="{ on: smart }" @click="toggleSmart" title="三路混合检索（全文 FTS5 + 词条摘要 + 语义向量）· 与 MCP search_knowledge 同内核，命中正文内容">智能检索</button>
+        <span class="cap mono">{{ smartHint }}</span>
       </div>
       <div class="frow-line"><span class="flabel">类型</span><div class="chips"><button v-for="o in EXT_F" :key="o.v" class="chip" :class="{ on: files.filters.ext === o.v }" @click="setFilter('ext', o.v)">{{ o.t }}</button></div></div>
       <div class="frow-line"><span class="flabel">状态</span><div class="chips"><button v-for="s in STATUS_F" :key="s" class="chip" :class="{ on: files.filters.status === s }" @click="setFilter('status', s)">{{ s }}</button></div></div>
@@ -24,8 +25,33 @@
       <div class="frow-line"><span class="flabel">来源</span><div class="chips"><button class="chip" :class="{ on: files.filters.agent === '全部' }" @click="setFilter('agent', '全部')">全部</button><button v-for="a in agentList" :key="a" class="chip" :class="{ on: files.filters.agent === a }" @click="setFilter('agent', a)">{{ a }}</button></div></div>
     </div>
 
-    <!-- 批量操作栏 -->
-    <div class="batchbar">
+    <!-- 智能检索结果区：三路混合命中（文件行开抽屉 · 纯词条行跳成品仓） -->
+    <div v-if="smartActive" class="sect smart-results">
+      <div class="sect-head">
+        <span class="sq"></span><h2 class="stitle">混合检索结果</h2><span class="sect-en">Hybrid Results</span>
+        <div class="sright"><span class="cap mono">全文 FTS5 · 摘要 · 语义向量 三路 RRF · {{ smartItems.length }} 条</span></div>
+      </div>
+      <div v-if="smartLoading" class="cap sect-empty">检索中…</div>
+      <div v-else-if="!smartItems.length" class="cap sect-empty">没有命中内容 · 换个关键词，或关闭智能检索回到列表筛选。</div>
+      <div v-else class="smart-list">
+        <div v-for="(it, i) in smartItems" :key="i" class="smart-item dom-link" :title="it.path" @click="openSmartItem(it)">
+          <span class="mono dim3 smart-rank">{{ String(i + 1).padStart(2, '0') }}</span>
+          <span class="smart-main">
+            <b class="row-title">{{ it.title || it.path }}</b>
+            <span class="cap smart-summary">{{ it.summary }}</span>
+          </span>
+          <span class="smart-meta">
+            <span v-if="it.entry_path" class="tagchip">纯词条</span>
+            <span v-if="it.domain_name" class="cap"><span class="dot" style="background:var(--steel)"></span> {{ it.domain_name }}</span>
+            <span v-if="it.source_agent" class="cap mono">{{ it.source_agent }}</span>
+            <span v-if="it.file_mtime" class="cap mono dim3">{{ fmtTime(it.file_mtime) }}</span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 批量操作栏（智能检索模式下隐藏——混合结果不可勾选批量） -->
+    <div v-else class="batchbar">
       <span class="bb-info"><template v-if="selCount">已选 <b class="mono">{{ selCount }}</b> 项</template><template v-else>勾选文件后可批量处理</template></span>
       <div class="bb-acts">
         <button class="btn sm" :disabled="!selCount" @click="batchRedistill"><Icon name="beaker" :size="14" /> 批量重新蒸馏</button>
@@ -36,7 +62,8 @@
       <span class="bb-hint mono">全库 {{ files.total }} 个文件</span>
     </div>
 
-    <!-- 列表 -->
+    <!-- 列表（智能检索模式下整体隐藏） -->
+    <template v-if="!smartActive">
     <div v-if="!files.items.length" class="sect" style="padding:0">
       <div class="empty">
         <span class="e-ic"><Icon name="inbox" :size="30" /></span>
@@ -67,7 +94,7 @@
             <td class="c-size" data-l="大小"><span class="cv"><span class="c-dim">{{ fmtSize(f.size) }}</span></span></td>
             <td class="c-state" data-l="蒸馏状态"><span class="cv">
               <span v-if="f.status === 'deleted'" class="stb stb-del">已删除</span>
-              <span v-else class="stb"><span class="dot" :class="stateDot(f.llm_state)"></span>{{ stateText(f.llm_state) }}</span>
+              <span v-else class="stb"><span class="dot" :class="llmStateDot(f.llm_state)"></span>{{ llmStateText(f.llm_state) }}</span>
             </span></td>
             <td class="c-ver" data-l="版本"><span class="cv"><span class="c-dim">{{ f.md5 ? f.md5.slice(0, 6) : '—' }}{{ f.status === 'deleted' ? ' · 已删除' : '' }}</span></span></td>
             <td class="c-ops" data-l="" @click.stop>
@@ -92,20 +119,25 @@
       <button class="btn xs" :disabled="files.page <= 1" @click="pageTo(files.page - 1)">上一页</button>
       <button class="btn xs" :disabled="files.page >= pageCount" @click="pageTo(files.page + 1)">下一页</button>
     </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { useFilesStore } from '../stores/useFilesStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
 import { useUiStore } from '../stores/useUiStore'
 import { api } from '../api'
+import { fmtTime, fmtSize } from '../utils/format'
+import { useDebouncedWatch, llmStateText, llmStateDot } from '../composables/ui'
 
 const files = useFilesStore()
 const domains = useDomainsStore()
 const ui = useUiStore()
+const router = useRouter()
 
 const EXT_F = [{ v: '全部', t: '全部' }, { v: '.html', t: 'HTML' }, { v: '.md', t: 'Markdown' }]
 const STATUS_F = ['全部', '已蒸馏', '编目中', '待处理', '失败', '已跳过', '已删除']
@@ -115,30 +147,9 @@ const selCount = computed(() => files.selectedIds().length)
 const pageCount = computed(() => Math.max(1, Math.ceil(files.total / files.limit)))
 const allChecked = computed(() => files.items.length > 0 && files.items.every((f: any) => !!files.selection[f.id]))
 
-const STATE_MAP: Record<string, { t: string; dot: string }> = {
-  done: { t: '已蒸馏', dot: 'dot-done' },
-  running: { t: '编目中', dot: 'dot-run' },
-  pending: { t: '待处理', dot: 'dot-pend' },
-  failed: { t: '失败', dot: 'dot-fail' },
-  skipped: { t: '已跳过', dot: 'dot-skip' }
-}
-const stateText = (s: string) => STATE_MAP[s]?.t || s
-const stateDot = (s: string) => STATE_MAP[s]?.dot || 'dot-pend'
-
 const domColor = (f: any) => {
   const hit = domains.findNode(f.domain_id)
   return hit?.node?.color || 'var(--skip)'
-}
-
-function fmtTime(t?: string) {
-  if (!t) return '—'
-  const dt = new Date(String(t).includes('T') ? t : t.replace(' ', 'T') + 'Z')
-  if (isNaN(dt.getTime())) return String(t)
-  return `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
-}
-function fmtSize(n?: number) {
-  if (!n) return '—'
-  return n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B'
 }
 
 async function refresh() {
@@ -147,14 +158,55 @@ async function refresh() {
 
 function onFilter() {
   files.page = 1
+  if (smartActive.value) return runSmart()   // 智能模式：kw/领域/来源变化都触发混合检索，不打 LIKE 列表
   files.fetchFiles()
 }
 
-let kwTimer: ReturnType<typeof setTimeout> | null = null
-watch(() => files.filters.kw, () => {
-  if (kwTimer) clearTimeout(kwTimer)
-  kwTimer = setTimeout(onFilter, 350)
+// ---- 智能检索（三路混合，与 MCP search_knowledge 同内核）----
+const smart = ref(false)
+const smartItems = ref<any[]>([])
+const smartLoading = ref(false)
+const smartActive = computed(() => smart.value && !!files.filters.kw.trim())
+
+const smartHint = computed(() => {
+  if (!smart.value) return `命中 ${files.total} 行`
+  return smartActive.value ? `混合 ${smartItems.value.length} 条` : '输入关键词开始混合检索'
 })
+
+function toggleSmart() {
+  smart.value = !smart.value
+  if (smartActive.value) runSmart()
+  else if (!smart.value) files.fetchFiles()   // 关闭开关回到列表口径
+}
+
+async function runSmart() {
+  if (!smartActive.value) return
+  smartLoading.value = true
+  try {
+    const params: Record<string, string> = { query: files.filters.kw.trim() }
+    if (files.filters.domain && files.filters.domain !== '全部') params.domain = files.filters.domain
+    if (files.filters.agent && files.filters.agent !== '全部') params.agent = files.filters.agent
+    const r = await api.search.knowledge(params)
+    smartItems.value = r.items || []
+  } catch {
+    ui.toast('混合检索失败')
+    smartItems.value = []
+  } finally {
+    smartLoading.value = false
+  }
+}
+
+/** 结果行点击：关联文件 → 点击归因（Web 漏斗 level1）+ 详情抽屉；纯词条 → 成品仓按标题找 */
+function openSmartItem(it: any) {
+  if (!it.entry_path) {
+    api.search.click(Number(it.id), files.filters.kw.trim()).catch(() => { /* 归因旁路失败不打扰 */ })
+    ui.openDrawer(Number(it.id))
+  } else {
+    router.push({ path: '/entry', query: { kw: it.title || '' } })
+  }
+}
+
+useDebouncedWatch(() => files.filters.kw, onFilter, 350)
 
 function setFilter(k: 'ext' | 'status' | 'domain' | 'agent', v: string) {
   ;(files.filters as any)[k] = v

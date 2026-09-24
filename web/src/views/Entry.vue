@@ -21,7 +21,13 @@
       </div>
       <div class="frow-line"><span class="flabel">领域</span><div class="chips">
         <button class="chip" :class="{ on: domain === '' }" @click="domain = ''">全部</button>
-        <button v-for="d in domains.tree" :key="d.id" class="chip" :class="{ on: domain === d.name }" @click="domain = d.name">{{ d.name }}</button>
+        <template v-for="d in domains.tree" :key="d.id">
+          <button class="chip" :class="{ on: domain === d.name }" @click="domain = d.name">{{ d.name }}</button>
+          <!-- 子领域 chip：仅在筛选正落在此树的子域时显示（平时不撑长 chip 条） -->
+          <template v-if="isChildSelected(d)">
+            <button v-for="c in d.children" :key="c.id" class="chip sub" :class="{ on: domain === c.name }" @click="domain = c.name">{{ c.name }}</button>
+          </template>
+        </template>
       </div></div>
     </div>
 
@@ -54,7 +60,7 @@
       <div v-if="detail" class="entry-panel">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span class="plate" style="min-width:64px">{{ detail.source_type === 'imported' ? 'M.' + String(detail.no).slice(1) : 'No.' + detail.no }}</span>
-          <span v-if="detail.source_type === 'imported'" class="stb"><span class="dot" style="background:#7A5AA8"></span>外部挂载</span>
+          <span v-if="detail.source_type === 'imported'" class="stb"><span class="dot" style="background:var(--wikilink)"></span>外部挂载</span>
           <span v-else class="stb"><span class="dot dot-done"></span>已蒸馏</span>
           <span v-if="detail.source_type !== 'imported'" class="mono dim3" style="font-size:11.5px">llm_state: {{ detail.llm_state || 'done' }}</span>
           <span v-else class="cap mono dim3" style="font-size:11.5px" :title="detail.path">{{ (detail.path || '').split('/').slice(0, 3).join('/') }}/…</span>
@@ -76,31 +82,31 @@
         </div>
 
         <div class="entry-sec">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">摘要</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">摘要</h3><span class="sect-en">Summary</span></div>
           <p class="entry-summary">{{ detail.summary || '（暂无摘要）' }}</p>
         </div>
 
         <div class="entry-sec" v-if="detail.content && !points.length">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">正文</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">正文</h3><span class="sect-en">Full Text</span></div>
           <div class="mdview" v-html="mdContent"></div>
         </div>
 
         <div class="entry-sec" v-if="points.length">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">关键要点</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">关键要点</h3><span class="sect-en">Key Points</span></div>
           <ul class="points">
             <li v-for="(p, i) in points" :key="i"><span class="pnum">{{ String(i + 1).padStart(2, '0') }}</span><span>{{ p.point || p.text || p }}</span></li>
           </ul>
         </div>
 
         <div class="entry-sec" v-if="entities.length">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">实体</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">实体</h3><span class="sect-en">Entities</span></div>
           <div class="ents">
             <span v-for="(x, i) in entities" :key="i" class="ent">{{ x.name || x.n }}<span class="et">{{ x.type || x.t }}</span></span>
           </div>
         </div>
 
         <div class="entry-sec" v-if="relations.length">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">关系</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">关系</h3><span class="sect-en">Relations</span></div>
           <div class="flows">
             <div v-for="(r, i) in relations" :key="i" class="flow">
               <span class="flownode">{{ r.source || r.a }}</span>
@@ -112,12 +118,12 @@
         </div>
 
         <div class="entry-sec">
-          <div class="sect-head"><span class="sq"></span><h3 class="stitle">回链（源文件）</h3></div>
+          <div class="sect-head"><span class="sq"></span><h3 class="stitle">回链（源文件）</h3><span class="sect-en">Source Link</span></div>
           <div class="pathbox">
             <span class="mono">{{ detail.path }}</span>
             <button class="btn xs" @click="copyText(detail.path)"><Icon name="copy" :size="12" /> 复制路径</button>
             <button v-if="detail.source_type !== 'imported'" class="btn xs" @click="openSource"><Icon name="external" :size="12" /> 在默认应用中打开</button>
-            <span v-if="detail.source_type === 'imported' && detail.readable === false" class="cap" style="color:#C2402A">⚠ 外部卷未挂载或文件已移动，正文不可读</span>
+            <span v-if="detail.source_type === 'imported' && detail.readable === false" class="cap mark-fail">⚠ 外部卷未挂载或文件已移动，正文不可读</span>
           </div>
         </div>
       </div>
@@ -136,19 +142,30 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import Icon from '../components/Icon.vue'
 import { useWikiStore } from '../stores/useWikiStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
 import { useUiStore } from '../stores/useUiStore'
 import { api } from '../api'
+import { fmtTimeRelative as fmtTime } from '../utils/format'
+import { useCopyToClipboard, useDebouncedWatch } from '../composables/ui'
+
+const route = useRoute()
 
 const wiki = useWikiStore()
 const domains = useDomainsStore()
 const ui = useUiStore()
 
-const kw = ref('')
-const domain = ref('')
+const kw = ref(typeof route.query.kw === 'string' ? route.query.kw : '')
+// 领域筛选初始值来自 route query（分拣区领域卡跳转 /entry?domain=X 自动套用筛选）
+const domain = ref(typeof route.query.domain === 'string' ? route.query.domain : '')
 const currentId = ref<number | string | null>(null)
+
+/** 筛选是否落在这棵一级树的子域上（决定是否展开显示子领域 chip 行） */
+function isChildSelected(d: any): boolean {
+  return !!d.children?.length && d.children.some((c: any) => c.name === domain.value)
+}
 
 const detail = computed(() => wiki.current)
 const points = computed<any[]>(() => detail.value?.points || [])
@@ -214,18 +231,6 @@ function renderMd(src: string): string {
 
 const mdContent = computed(() => (detail.value?.content ? renderMd(detail.value.content) : ''))
 
-function fmtTime(t?: string) {
-  if (!t) return '—'
-  const dt = new Date(String(t).includes('T') ? t : t.replace(' ', 'T') + 'Z')
-  if (isNaN(dt.getTime())) return String(t)
-  const now = new Date()
-  const hm = `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
-  if (dt.toDateString() === now.toDateString()) return `今天 ${hm}`
-  const yest = new Date(now.getTime() - 86400000)
-  if (dt.toDateString() === yest.toDateString()) return `昨天 ${hm}`
-  return `${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${hm}`
-}
-
 async function reload() {
   const params: Record<string, string> = {}
   if (kw.value.trim()) params.kw = kw.value.trim()
@@ -233,26 +238,25 @@ async function reload() {
   await wiki.fetchEntries(params)
 }
 
-let kwTimer: ReturnType<typeof setTimeout> | null = null
-watch(kw, () => {
-  if (kwTimer) clearTimeout(kwTimer)
-  kwTimer = setTimeout(reload, 350)
-})
+useDebouncedWatch(kw, reload, 350)
 watch(domain, reload)
+// 已在成品仓时再次从别处跳转（query 变化）→ 同步筛选并重查（watch(domain) 链式触发 reload）
+watch(() => route.query.domain, (v) => {
+  const d = typeof v === 'string' ? v : ''
+  if (d !== domain.value) domain.value = d
+})
+// 智能检索纯词条跳转（/entry?kw=X）：同步搜索框并触发检索（watch(kw) 链式生效）
+watch(() => route.query.kw, (v) => {
+  const k = typeof v === 'string' ? v : ''
+  if (k !== kw.value) kw.value = k
+})
 
 async function select(id: number | string) {
   currentId.value = id
   await wiki.fetchDetail(id)
 }
 
-async function copyText(t: string) {
-  try {
-    await navigator.clipboard.writeText(t)
-    ui.toast('已复制路径')
-  } catch {
-    ui.toast('复制失败，请手动选择复制')
-  }
-}
+const { copy: copyText } = useCopyToClipboard()
 
 async function openSource() {
   if (!detail.value) return

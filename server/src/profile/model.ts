@@ -24,6 +24,8 @@ export interface ProfileContent {
   schema_version: '1'
   /** 全局角色画像一句话（scope=global 专用；domain 行留空字符串） */
   role_pattern: string
+  /** 五段人读画像（基本信息/工作背景/个人背景/协作偏好/长期记忆，纯文本）——LLM 可选产物，旧版无此字段 */
+  portrait?: string
   claims: ProfileClaim[]
 }
 
@@ -63,7 +65,10 @@ export function parseProfileContent(raw: string): ProfileContent | null {
       confidence: Math.min(1, Math.max(0, conf))
     })
   }
-  return { schema_version: '1', role_pattern: obj.role_pattern, claims }
+  // portrait 仅在存在时带键（undefined 键会破坏 deepEqual 往返一致性；JSON 序列化本就丢弃 undefined）
+  const out: ProfileContent = { schema_version: '1', role_pattern: obj.role_pattern, claims }
+  if (typeof obj.portrait === 'string' && obj.portrait) out.portrait = obj.portrait
+  return out
 }
 
 /** 序列化（与 parse 往返一致；DB 写入统一走此口，杜绝手工拼 JSON） */

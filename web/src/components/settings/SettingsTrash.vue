@@ -1,7 +1,7 @@
 <template>
   <!-- 回收区 -->
   <div class="sect">
-    <div class="sect-head"><span class="sq"></span><h2 class="stitle">已删除文件（{{ deleted.length }}）</h2><div class="sright"><button class="btn xs danger" :disabled="!deleted.length" @click="ui.openModal('purge')"><Icon name="trash" :size="12" /> 清理全部</button></div></div>
+    <div class="sect-head"><span class="sq"></span><h2 class="stitle">已删除文件（{{ deleted.length }}）</h2><span class="sect-en">Trash</span><div class="sright"><button class="btn xs danger" :disabled="!deleted.length" @click="ui.openModal('purge')"><Icon name="trash" :size="12" /> 清理全部</button></div></div>
     <template v-if="deleted.length">
       <div v-for="f in deleted" :key="f.id" class="delrow">
         <span class="dn mono">{{ f.path }}</span>

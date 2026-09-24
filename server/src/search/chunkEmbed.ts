@@ -1,13 +1,14 @@
 import type { SqliteDatabase } from '@homeofthings/sqlite3'
 import fs from 'fs/promises'
 import { createHash } from 'node:crypto'
-import { getEmbeddingConfig, callEmbedding, cosine, type EmbeddingConfig } from '../llm/embeddings.js'
+import { getEmbeddingConfig, callEmbedding, cosine, vecToBlob, storedVecToF32, type EmbeddingConfig } from '../llm/embeddings.js'
+import { ensureLoaded, searchIndexCache, invalidateEntry, reloadEntry } from './vectorIndex.js'
 import { getProviders } from '../llm/llmClient.js'
 
 // Phase 2 检索基建 · 任务 2.2：entry.md 按 heading 分块 + 分块向量路（parent-child 检索）。
 // 语义：命中 child 块 → 返回 parent 词条（wiki_entries_meta.id），解决长词条整体向量稀释局部语义的问题。
 // 嵌入能力复用现有封装：getEmbeddingConfig（config 键 ai.embedding）+ callEmbedding（OpenAI 兼容 /embeddings）；
-// 向量存法与 file_embeddings 对齐 = JSON 文本（embedding TEXT）。
+// 向量按 Float32 BLOB 落库（L1 起，vecToBlob/storedVecToF32 编解码）。
 // 降级承诺：provider 未配置或单条调用失败一律优雅跳过（不抛错、不阻塞启动）——本地优先不绑厂商，向量路必须可缺席。
 // 幂等模型：entry_chunks UNIQUE(entry_id, chunk_index) + content_hash（sha256 of 嵌入文本）——
 // hash 相同的块零嵌入调用，变了才重嵌；入口 indexWikiChunks 支持单词条增量（entryId）与全量（不传）。
@@ -114,6 +115,7 @@ async function processEntryChunks(db: SqliteDatabase, entry: { id: any; entry_pa
     const entryId = Number(entry.id)
     if (chunks.length === 0) {
       await (await db.prepare('DELETE FROM entry_chunks WHERE entry_id = ?')).run([entryId])
+      invalidateEntry(entryId) // P2 内存索引：内容消失 = 缓存同步消失
       return true
     }
     const existingRows = await (await db.prepare('SELECT chunk_index, content_hash FROM entry_chunks WHERE entry_id = ?')).all([entryId]) as any[]
@@ -141,13 +143,15 @@ async function processEntryChunks(db: SqliteDatabase, entry: { id: any; entry_pa
             updated_at = CURRENT_TIMESTAMP
         `)).run([
           entryId, d.chunk.chunk_index, d.chunk.heading_path, d.chunk.content,
-          String(cfg.model || ''), d.vector.length, JSON.stringify(d.vector), d.hash
+          String(cfg.model || ''), d.vector.length, vecToBlob(d.vector), d.hash
         ])
       }
       for (const i of stale) {
         await (await db.prepare('DELETE FROM entry_chunks WHERE entry_id = ? AND chunk_index = ?')).run([entryId, i])
       }
     })
+    // P2 内存索引：事务后增量重载该词条（脏块/删块立即反映到缓存；几块点查级开销）
+    if (dirty.length || stale.length) await reloadEntry(db, entryId)
     return true
   } catch {
     return false
@@ -235,38 +239,59 @@ export interface VectorHit {
 }
 
 /**
- * 分块向量检索：全量拉取向量做 JS 余弦（本地数千词条规模足够，与 searchEmbeddings 同模式），
- * 命中 child 块映射回 parent 词条，同词条取最高分块，按分数降序截 limit；空索引返回空数组不抛错。
+ * 分块向量检索（L1 延迟治理·两段式）：扫描阶段只取 entry_id/chunk_index/embedding 三列——
+ * 旧实现 JOIN wiki_entries_meta 全量携带 title/summary/entry_path/content 文本列，54k chunks
+ * 下数十 MB 明文随扫描搬进 JS 却只在命中后使用（命中率 <0.1%）。先算余弦得 Top 词条，
+ * 再按 (entry_id, chunk_index) 回查元数据与 snippet。语义与旧实现一致（含损坏向量跳过）。
  */
 export async function searchVector(db: SqliteDatabase, queryVector: number[], limit = 5): Promise<VectorHit[]> {
-  const rows = await (await db.prepare(`
-    SELECT c.entry_id, c.chunk_index, c.heading_path, c.content, c.embedding,
-           m.title, m.summary, m.entry_path
-    FROM entry_chunks c JOIN wiki_entries_meta m ON m.id = c.entry_id
-    WHERE c.embedding IS NOT NULL
-  `)).all() as any[]
-  const best = new Map<number, VectorHit>()
-  for (const r of rows) {
-    try {
-      const score = cosine(queryVector, JSON.parse(String(r.embedding)))
+  // P2 内存索引优先：常驻缓存点积（norm 预计算，零 DB 搬运）；加载失败降级 DB 两段式
+  let top: Array<{ entryId: number; chunk_index: number; score: number }> = []
+  try {
+    await ensureLoaded(db)
+    top = searchIndexCache(queryVector, limit)
+  } catch { /* 降级 DB 扫描 */ }
+  if (!top.length) {
+    const rows = await (await db.prepare(`
+      SELECT c.entry_id, c.chunk_index, c.embedding
+      FROM entry_chunks c
+      WHERE c.embedding IS NOT NULL
+    `)).all() as any[]
+    const best = new Map<number, { score: number; chunk_index: number }>()
+    for (const r of rows) {
+      const vec = storedVecToF32(r.embedding)
+      if (!vec) continue
+      const score = cosine(queryVector, vec)
       if (score <= 0) continue
       const entryId = Number(r.entry_id)
       const prev = best.get(entryId)
       if (!prev || score > prev.score) {
-        best.set(entryId, {
-          entry_id: entryId,
-          title: String(r.title || ''),
-          summary: String(r.summary || ''),
-          entry_path: String(r.entry_path || ''),
-          score,
-          chunk_index: Number(r.chunk_index),
-          heading_path: String(r.heading_path || ''),
-          snippet: String(r.content || '').slice(0, 160)
-        })
+        best.set(entryId, { score, chunk_index: Number(r.chunk_index) })
       }
-    } catch { /* 单条向量损坏跳过 */ }
+    }
+    top = [...best.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, limit)
+      .map(([entryId, info]) => ({ entryId, chunk_index: info.chunk_index, score: info.score }))
   }
-  return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit)
+  if (!top.length) return []
+  const hits: VectorHit[] = []
+  for (const t of top) {
+    const row = await (await db.prepare(`
+      SELECT m.title, m.summary, m.entry_path, c.heading_path, c.content
+      FROM wiki_entries_meta m JOIN entry_chunks c ON c.entry_id = m.id AND c.chunk_index = ?
+      WHERE m.id = ?`)).get([t.chunk_index, t.entryId]) as any
+    if (!row) continue
+    hits.push({
+      entry_id: t.entryId,
+      title: String(row.title || ''),
+      summary: String(row.summary || ''),
+      entry_path: String(row.entry_path || ''),
+      score: t.score,
+      chunk_index: t.chunk_index,
+      heading_path: String(row.heading_path || ''),
+      snippet: String(row.content || '').slice(0, 160),
+    })
+  }
+  return hits.sort((a, b) => b.score - a.score)
 }
 
 /** 任务 2.2.4 命名口径的向量检索入口（与 searchVector 同一实现）：命中 parent 词条按余弦相似度降序 */

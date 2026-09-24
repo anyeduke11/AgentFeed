@@ -1,7 +1,7 @@
 <template>
   <!-- 扫描根 -->
   <div class="sect">
-    <div class="sect-head"><span class="sq"></span><h2 class="stitle">扫描根（{{ settings.roots.length }} 个）</h2><div class="sright"><span class="cap mono">{{ settings.scanStatus.watcherRunning ? 'watcher 运行中' : 'watcher 未运行' }}</span></div></div>
+    <div class="sect-head"><span class="sq"></span><h2 class="stitle">扫描根（{{ settings.roots.length }} 个）</h2><span class="sect-en">Scan Roots</span><div class="sright"><span class="cap mono">{{ settings.scanStatus.watcherRunning ? 'watcher 运行中' : 'watcher 未运行' }}</span></div></div>
     <div v-for="r in settings.roots" :key="r.id" class="rootrow">
       <span><span class="rp">{{ r.path }}</span> <span class="rc">{{ r.enabled ? (r.files != null ? r.files + ' 个文件' : '') : '停用' }}</span> <span v-if="r.agent" class="stb" :title="`绑定 Agent：${r.agent}`">{{ r.agent }}</span></span>
       <span class="rootstop">{{ r.enabled ? '启用' : '停用' }}</span>

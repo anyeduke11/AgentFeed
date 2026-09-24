@@ -24,7 +24,7 @@
 
         <!-- 重新蒸馏确认 -->
         <template v-else-if="ui.modal.type === 'redistill'">
-          <p style="font-size:13.5px;line-height:1.9">
+          <p class="modal-text">
             将重新调用 <b class="mono">{{ llm.providers.defaultModel || '默认模型' }}</b> 蒸馏「{{ targetFile?.title || targetFile?.name || '' }}」。<br />
             完成后更新的词条会替换入库。
           </p>
@@ -33,7 +33,7 @@
 
         <!-- 删除领域确认 -->
         <template v-else-if="ui.modal.type === 'domdel'">
-          <p style="font-size:13.5px;line-height:1.9">
+          <p class="modal-text">
             确认删除领域「<b>{{ delDomain?.name }}</b>」？
             <template v-if="delDomain?.children?.length">该领域含 {{ delDomain.children.length }} 个子领域，将一并移除。</template>
             名下文件的归属将变为「未分类」。
@@ -42,14 +42,14 @@
 
         <!-- 清理已删除文件 -->
         <template v-else-if="ui.modal.type === 'purge'">
-          <p style="font-size:13.5px;line-height:1.9">
+          <p class="modal-text">
             将彻底清理 <b class="mono">{{ delCount }}</b> 个已删除文件及其索引记录（源文件磁盘内容不会被删除）。此操作不可撤销。
           </p>
         </template>
 
         <!-- 批量归类 -->
         <template v-else-if="ui.modal.type === 'assign'">
-          <p style="font-size:13.5px;line-height:1.9">将已选的 <b class="mono">{{ assignCount }}</b> 个文件归类到以下领域：</p>
+          <p class="modal-text">将已选的 <b class="mono">{{ assignCount }}</b> 个文件归类到以下领域：</p>
           <div class="form-grid" style="margin-top:8px">
             <span class="fl">目标领域</span>
             <select class="inp" v-model="assignDomainId">
@@ -62,8 +62,8 @@
 
         <!-- 阅读打分（两维极简） -->
         <template v-else-if="ui.modal.type === 'rate'">
-          <p style="font-size:13.5px;line-height:1.9;margin-bottom:10px">读完「<b>{{ rateTitle }}</b>」了吗？10 秒打个分：</p>
-          <div v-if="rateProgress > 0 && rateProgress < 100" class="notice" style="margin-bottom:10px;color:#B4651A">当前阅读进度 {{ rateProgress }}%，尚未读毕——补齐进度可在推荐池快捷档操作。</div>
+          <p class="modal-text" style="margin-bottom:10px">读完「<b>{{ rateTitle }}</b>」了吗？10 秒打个分：</p>
+          <div v-if="rateProgress > 0 && rateProgress < 100" class="notice mark-warn" style="margin-bottom:10px">当前阅读进度 {{ rateProgress }}%，尚未读毕——补齐进度可在推荐池快捷档操作。</div>
           <div class="form-grid" style="margin-bottom:10px">
             <span class="fl">整体价值</span>
             <span class="stars" style="display:flex;gap:4px">
@@ -80,7 +80,7 @@
 
         <!-- 挂载外部 Wiki（demo 预览） -->
         <template v-else-if="ui.modal.type === 'wikiImport'">
-          <p style="font-size:13.5px;line-height:1.9">输入外部 llm-wiki 目录绝对路径，解析词条元数据（标题 / 来源 / 置信度 / 标签）并与库内文件比对。</p>
+          <p class="modal-text">输入外部 llm-wiki 目录绝对路径，解析词条元数据（标题 / 来源 / 置信度 / 标签）并与库内文件比对。</p>
           <div class="form-grid" style="margin-top:8px">
             <span class="fl">wiki 目录</span>
             <input class="inp" v-model="wiDir" placeholder="/Volumes/新加卷/你的知识库/wiki" style="flex:1" @keyup.enter="runPreview" />
@@ -88,23 +88,23 @@
               <Icon name="search" :size="13" /> {{ wiLoading ? '解析中…' : '解析预览' }}
             </button>
           </div>
-          <div v-if="wiError" class="notice" style="color:#C2402A">{{ wiError }}</div>
+          <div v-if="wiError" class="notice mark-fail">{{ wiError }}</div>
           <template v-if="wiReport">
             <div class="qsum" style="margin-top:12px">
               <div class="qsum-i"><span class="qsum-v">{{ wiReport.stats.total }}</span><span class="qsum-k">词条总数</span></div>
-              <div class="qsum-i"><span class="qsum-v" style="color:#1E8E5A">{{ wiReport.stats.matched }}</span><span class="qsum-k">可挂接</span></div>
-              <div class="qsum-i"><span class="qsum-v" style="color:#B4651A">{{ wiReport.stats.standalone }}</span><span class="qsum-k">独立词条</span></div>
+              <div class="qsum-i"><span class="qsum-v mark-ok">{{ wiReport.stats.matched }}</span><span class="qsum-k">可挂接</span></div>
+              <div class="qsum-i"><span class="qsum-v mark-warn">{{ wiReport.stats.standalone }}</span><span class="qsum-k">独立词条</span></div>
               <div class="qsum-i"><span class="qsum-v">{{ wiReport.stats.already }}</span><span class="qsum-k">已存在</span></div>
             </div>
-            <div style="max-height:300px;overflow:auto;margin-top:10px;border:1px solid var(--line)">
+            <div style="max-height:300px;overflow:auto;margin-top:10px;border:1px solid var(--border)">
               <table class="rtable">
                 <tr v-for="e in wiReport.entries" :key="e.file">
                   <td style="max-width:180px"><b style="font-size:12.5px">{{ e.title || '(无标题)' }}</b><br /><span class="cap mono" style="font-size:10.5px">{{ e.sourceBase || e.topic }}</span></td>
                   <td class="cap" style="white-space:nowrap">{{ e.confidence || '—' }}</td>
                   <td>
-                    <span v-if="e.match === 'matched'" class="cap" style="color:#1E8E5A">可挂接 → {{ e.matchedTitle }}</span>
+                    <span v-if="e.match === 'matched'" class="cap mark-ok">可挂接 → {{ e.matchedTitle }}</span>
                     <span v-else-if="e.match === 'already'" class="cap">已存在</span>
-                    <span v-else class="cap" style="color:#B4651A">独立词条（源不在库内）</span>
+                    <span v-else class="cap mark-warn">独立词条（源不在库内）</span>
                   </td>
                 </tr>
               </table>

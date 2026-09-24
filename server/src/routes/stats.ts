@@ -317,7 +317,41 @@ statsRouter.get('/funnel', async (_req, res) => {
       WHERE tool = 'search_knowledge' AND created_at >= datetime('now', '-7 days')
       GROUP BY date(created_at) ORDER BY day ASC`)).all() as any[]
 
-    res.json({ success: true, metrics, attribution, trend })
+    // Web 检索半边（批次②⑤）：read_history source='search' 埋点聚合——人侧漏斗。
+    // file_id 空 = 发起搜索，非空 = 搜索后点击打开（/api/search/click 归因），
+    // click/search 即 Web 侧 level1 转化率（与 MCP sessionsWithSearch→read 口径并列对照）。
+    // MCP 与 Web 分开统计不混入 sessionsWithSearch（避免污染「面板与脚本一字不差」的 MCP 口径）
+    const web30 = await (await db.prepare(`
+      SELECT COUNT(*) as n FROM read_history
+      WHERE source = 'search' AND opened_at >= datetime('now', '-30 days')`)).get() as any
+    const webSearches30 = await (await db.prepare(`
+      SELECT COUNT(*) as n FROM read_history
+      WHERE source = 'search' AND file_id IS NULL AND opened_at >= datetime('now', '-30 days')`)).get() as any
+    const webClicks30 = await (await db.prepare(`
+      SELECT COUNT(*) as n FROM read_history
+      WHERE source = 'search' AND file_id IS NOT NULL AND opened_at >= datetime('now', '-30 days')`)).get() as any
+    const webTrend = await (await db.prepare(`
+      SELECT date(opened_at) as day, COUNT(*) as calls FROM read_history
+      WHERE source = 'search' AND opened_at >= datetime('now', '-7 days')
+      GROUP BY date(opened_at) ORDER BY day ASC`)).all() as any[]
+    const webTopQueries = await (await db.prepare(`
+      SELECT query, COUNT(*) as n FROM read_history
+      WHERE source = 'search' AND query IS NOT NULL AND query != ''
+        AND opened_at >= datetime('now', '-30 days')
+      GROUP BY query ORDER BY n DESC LIMIT 5`)).all() as any[]
+    const rate = (n: number, d: number) => d === 0 ? 0 : Math.round((n / d) * 1000) / 1000
+
+    res.json({
+      success: true, metrics, attribution, trend,
+      web: {
+        searches30d: webSearches30?.n ?? 0,
+        clicks30d: webClicks30?.n ?? 0,
+        clickRate: rate(webClicks30?.n ?? 0, webSearches30?.n ?? 0),
+        events30d: web30?.n ?? 0,
+        trend7d: webTrend,
+        topQueries: webTopQueries
+      }
+    })
   } catch (e: any) {
     res.status(500).json({ success: false, message: String(e) })
   }
