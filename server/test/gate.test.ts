@@ -103,6 +103,43 @@ test('扫描根相对判定：agent 目录整体挂载为扫描根时不被自�
   assert.equal(isExcludedPath('/Users/demo/.trae/proj/node_modules/a.md', c, ['/Users/demo/.trae']), true)
 })
 
+test('skill 过滤开启：skill 容器目录段与 SKILL.md 文件名命中即排除', () => {
+  // WHY: Agent skill 的实现文档（SKILL.md 等）是工具配置而非知识产物，入库会污染知识库
+  const c = cfg({})
+  assert.equal(isExcludedPath('/root/proj/skills/foo/SKILL.md', c, ['/root/proj']), true)
+  // 容器目录内非 SKILL.md 的文件（README、资源说明）随目录一并忽略——目录语义即「这里是 skill」
+  assert.equal(isExcludedPath('/root/proj/skills/foo/README.md', c, ['/root/proj']), true)
+  // skill 单数段（部分 Agent 用 skill/ 命名）
+  assert.equal(isExcludedPath('/root/proj/.claude/skill/bar.md', c, ['/root/proj']), true)
+  // 散落在普通目录下的 SKILL.md 清单文件按文件名命中
+  assert.equal(isExcludedPath('/root/proj/docs/SKILL.md', c, ['/root/proj']), true)
+  assert.equal(isExcludedPath('/root/proj/docs/Skills.md', c, ['/root/proj']), true)
+})
+
+test('skill 过滤不误杀：目录段非精确、文件名非清单的一律放行', () => {
+  // WHY: 用户硬约束——包含「skill」字样但不是 skill 产物的普通文档绝不能被拦
+  const c = cfg({})
+  assert.equal(isExcludedPath('/root/proj/docs/skill系统设计.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/skills-tutorial/a.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/myskills/a.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/PRD/SKILL设计-notes.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/notes/skill.md.bak', c, ['/root/proj']), false)
+})
+
+test('skill 过滤关闭：skills 目录与 SKILL.md 恢复放行', () => {
+  // WHY: 开关语义——用户想收藏某些 skill 文档时可以整体关闭该规则
+  const c = cfg({ skillFilterEnabled: false })
+  assert.equal(isExcludedPath('/root/proj/skills/foo/SKILL.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/docs/SKILL.md', c, ['/root/proj']), false)
+})
+
+test('skill 过滤让位路径白名单：白名单内 skill 文档强制放行', () => {
+  // WHY: 路径白名单是门禁最高优先级（显式收藏压过一切排除）
+  const c = cfg({ pathWhitelist: ['/root/proj/skills/keep'], pathWhitelistEnabled: true })
+  assert.equal(isExcludedPath('/root/proj/skills/keep/SKILL.md', c, ['/root/proj']), false)
+  assert.equal(isExcludedPath('/root/proj/skills/other/SKILL.md', c, ['/root/proj']), true)
+})
+
 test('内置文件黑名单不受 excludeDirs 开关控制', () => {
   // WHY: CHANGELOG/LICENSE/.log 是无价值文件的兜底规则，与可配置的目录列表语义不同
   const c = cfg({ excludeDirsEnabled: false })

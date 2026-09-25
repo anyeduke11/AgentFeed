@@ -72,6 +72,11 @@
         <button class="switch" role="switch" :aria-checked="gate.pathWhitelistEnabled ? 'true' : 'false'" aria-label="路径白名单开关" @click="toggleRule('pathWhitelistEnabled')"></button>
       </span>
     </div>
+    <div class="setrow">
+      <span class="sr-k">Skill 文档过滤</span>
+      <span class="sr-v"><span class="cap">skills / skill 目录段与 SKILL.md、SKILLS.md 文件名命中即彻底忽略（不入库不记录）；含 skill 字样的普通文档不受影响，路径白名单内可强制放行</span></span>
+      <span class="sr-a"><button class="switch" role="switch" :aria-checked="gate.skillFilterEnabled ? 'true' : 'false'" aria-label="Skill 文档过滤开关" @click="toggleRule('skillFilterEnabled')"></button></span>
+    </div>
     <div v-if="openField && vdetail[openField]" class="vdetail">
       <div class="vd-head"><b>{{ vdetail[openField].label }}</b>：{{ vdetail[openField].items.length }} 条问题，无效条目不会生效<button class="btn xs" @click="openField = ''">收起</button></div>
       <div v-for="(it, ix) in vdetail[openField].items" :key="ix" class="vd-item">
@@ -116,7 +121,8 @@ const gate = ref({
   blacklistText: '',
   blacklistEnabled: true,
   pathWhitelistText: '',
-  pathWhitelistEnabled: true
+  pathWhitelistEnabled: true,
+  skillFilterEnabled: true
 })
 
 /** 门禁配置有效性（后端按真实匹配语义逐字段校验，抓静默失败） */
@@ -152,6 +158,7 @@ async function loadGate() {
   gate.value.blacklistEnabled = c['gate.blacklistEnabled']?.value ?? true
   gate.value.pathWhitelistText = (c['gate.pathWhitelist']?.value || []).join(', ')
   gate.value.pathWhitelistEnabled = c['gate.pathWhitelistEnabled']?.value ?? true
+  gate.value.skillFilterEnabled = c['gate.skillFilterEnabled']?.value ?? true
   await loadGateValidity()
 }
 
@@ -198,7 +205,7 @@ async function toggleGate() {
 }
 
 /** 单规则开关：切换后立即静默保存 */
-async function toggleRule(f: 'minSizeEnabled' | 'minCharsEnabled' | 'codeRatioEnabled' | 'excludeDirsEnabled' | 'filenameWhitelistEnabled' | 'keywordsEnabled' | 'blacklistEnabled' | 'pathWhitelistEnabled') {
+async function toggleRule(f: 'minSizeEnabled' | 'minCharsEnabled' | 'codeRatioEnabled' | 'excludeDirsEnabled' | 'filenameWhitelistEnabled' | 'keywordsEnabled' | 'blacklistEnabled' | 'pathWhitelistEnabled' | 'skillFilterEnabled') {
   gate.value[f] = !gate.value[f]
   await saveGate(true)
 }
@@ -221,7 +228,8 @@ async function saveGate(silent = false) {
     'gate.blacklist': { value: gate.value.blacklistText.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean) },
     'gate.blacklistEnabled': { value: gate.value.blacklistEnabled },
     'gate.pathWhitelist': { value: gate.value.pathWhitelistText.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean) },
-    'gate.pathWhitelistEnabled': { value: gate.value.pathWhitelistEnabled }
+    'gate.pathWhitelistEnabled': { value: gate.value.pathWhitelistEnabled },
+    'gate.skillFilterEnabled': { value: gate.value.skillFilterEnabled }
   })
   await loadGateValidity()
   if (!silent) {
