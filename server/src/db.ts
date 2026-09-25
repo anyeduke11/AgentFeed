@@ -557,6 +557,7 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'gate.filenameWhitelistEnabled', value: 'true', type: 'boolean', description: '文件名白名单开关' },
     { key: 'gate.keywordsEnabled', value: 'true', type: 'boolean', description: '关键词白名单开关' },
     { key: 'gate.pathWhitelistEnabled', value: 'true', type: 'boolean', description: '路径白名单开关' },
+    { key: 'gate.skillFilterEnabled', value: 'true', type: 'boolean', description: 'Skill 文档过滤开关（skills/skill 目录段与 SKILL.md、SKILLS.md 文件名命中即彻底忽略，路径白名单可强制放行）' },
     { key: 'gate.pathWhitelist', value: '[]', type: 'json', description: '路径白名单（前缀匹配，命中无视大小与内容门禁强制入库）' },
     { key: 'gate.excludeDirs', value: JSON.stringify(['node_modules', 'dist', 'build', 'out', 'coverage', '.git', '__pycache__', '.venv', 'venv', 'target', 'vendor', '.next', '.cache', '.trae', '.openclaw-autoclaw', '.idea', '.vscode', '.output', '.nuxt', 'server/public']), type: 'json', description: '路径排除目录列表（命中即彻底忽略）' },
     { key: 'gate.filenameWhitelist', value: JSON.stringify(['AGENTS.md', 'AGENT.md', 'CLAUDE.md', 'SKILL.md', 'SKILLS.md']), type: 'json', description: '文件名白名单（命中即放行）' },
@@ -575,6 +576,7 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'ai.modelContextTokens', value: '', type: 'number', description: '蒸馏模型上下文窗口（tokens）：超预算 60% 的长文件触发结构化压缩；空=默认 32768（保守口径）' },
     { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' },
     { key: 'webclip.limits', value: '{"pageMaxMB":20,"imgMaxMB":5,"imgMaxCount":30,"navTimeoutMs":30000,"deadlineMs":45000}', type: 'json', description: '网页剪藏限额（页面MB/单图MB/单页图数/导航ms/总时限ms）' },
+    { key: 'webclip.imageFilter', value: '{"enabled":true,"minPx":80,"maxRatio":4,"minBytes":1024,"urlKeywords":["qrcode","qr_code","二维码","wechat_qr","barcode","watermark","水印","logo","avatar","icon","badge","banner","promo","share_","follow"],"altKeywords":["点击关注","扫码关注","二维码","公众号","赞赏","打赏","阅读原文","关注我们","长按识别","加我微信","企业微信","推广"]}', type: 'json', description: '剪藏图片质量过滤（默认开启）：URL/alt 关键词 + 尺寸阈值剔除二维码/横幅/图标等宣传图，词表可增补' },
     { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' }
   ]
 

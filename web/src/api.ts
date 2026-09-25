@@ -37,6 +37,7 @@ export const api = {
     convert: (payload: { url: string; snapshot?: boolean; force?: boolean }) => post(`${base}/webclip/convert`, payload),
     retry: (id: number) => post(`${base}/webclip/records/${id}/retry`),
     putLimits: (limits: Record<string, number>) => put(`${base}/webclip/limits`, limits),
+    putImageFilter: (filter: Record<string, unknown>) => put(`${base}/webclip/imagefilter`, filter),
     records: (params?: Record<string, string>) => {
       const qs = params ? new URLSearchParams(params).toString() : ''
       return getJSON<any>(`${base}/webclip/records${qs ? '?' + qs : ''}`)

@@ -140,6 +140,7 @@ export interface GateConfig {
   excludeDirsEnabled: boolean
   filenameWhitelistEnabled: boolean
   keywordsEnabled: boolean
+  skillFilterEnabled: boolean
 }
 
 export const GATE_DEFAULTS: GateConfig = {
@@ -155,6 +156,7 @@ export const GATE_DEFAULTS: GateConfig = {
   keywordsEnabled: true,
   pathWhitelistEnabled: true,
   blacklistEnabled: true,
+  skillFilterEnabled: true,
   blacklist: [],
   pathWhitelist: [],
   excludeDirs: [
@@ -260,6 +262,14 @@ export function isExcludedPath(fp: string, cfg: GateConfig, roots: string[] = []
     if (parts.some(p => cfg.excludeDirs.includes(p))) return true
   }
   const base = path.basename(fp)
+  // skill 文档过滤：skill 容器目录段（skills/skill，大小写不敏感）或 SKILL.md/SKILLS.md 清单文件名
+  // 命中即彻底忽略。段匹配用精确等值而非包含——skills-tutorial / myskills 这类非 skill 目录不能误杀；
+  // 文件名用清单精确正则——skill系统设计.md 等普通文档不能误杀。路径白名单已在函数首行优先放行。
+  if (cfg.skillFilterEnabled) {
+    const segs = rel.split(path.sep).map(p => p.toLowerCase())
+    if (segs.some(p => p === 'skills' || p === 'skill')) return true
+    if (/^skills?\.md$/i.test(base)) return true
+  }
   if (/^(CHANGELOG\.md|LICENSE\.md|LICENSE|NOTICE)$/i.test(base)) return true
   if (/\.log$/i.test(base)) return true
   return false

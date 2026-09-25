@@ -7,7 +7,7 @@ import { scan } from '../scanner.js'
 import { restartWatcherForRoots } from '../watcher.js'
 import { WebclipError, assertPublicUrl } from '../webclip/ssrf.js'
 import { buildDocBase, reserveBase } from '../webclip/naming.js'
-import { htmlToMarkdown, rewriteSnapshot } from '../webclip/convert.js'
+import { htmlToMarkdown, rewriteSnapshot, type ImgFilterConfig } from '../webclip/convert.js'
 import { renderPage, isReady } from '../webclip/fetcher.js'
 import { yamlSafe, commentSafe } from '../webclip/sanitize.js'
 
@@ -52,6 +52,32 @@ export async function getLimits(): Promise<WebclipLimits> {
   try { return { ...DEFAULT_LIMITS, ...JSON.parse(String(row.value)) } } catch { return { ...DEFAULT_LIMITS } }
 }
 
+/** 图片质量过滤默认配置：微信文章宣传图剔除（二维码/横幅/图标/引流文案），词表可在设置页增补 */
+const DEFAULT_IMG_FILTER: ImgFilterConfig = {
+  enabled: true,
+  minPx: 80,
+  maxRatio: 4,
+  minBytes: 1024,
+  urlKeywords: ['qrcode', 'qr_code', '二维码', 'wechat_qr', 'barcode', 'watermark', '水印', 'logo', 'avatar', 'icon', 'badge', 'banner', 'promo', 'share_', 'follow'],
+  altKeywords: ['点击关注', '扫码关注', '二维码', '公众号', '赞赏', '打赏', '阅读原文', '关注我们', '长按识别', '加我微信', '企业微信', '推广']
+}
+
+/** 图片质量过滤配置（config webclip.imageFilter 覆盖默认；损坏 JSON 回退默认） */
+export async function getImageFilter(): Promise<ImgFilterConfig> {
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.imageFilter'")).get() as any
+  if (!row?.value) return { ...DEFAULT_IMG_FILTER, urlKeywords: [...DEFAULT_IMG_FILTER.urlKeywords], altKeywords: [...DEFAULT_IMG_FILTER.altKeywords] }
+  try {
+    const stored = JSON.parse(String(row.value))
+    return {
+      ...DEFAULT_IMG_FILTER,
+      ...stored,
+      urlKeywords: Array.isArray(stored.urlKeywords) && stored.urlKeywords.length ? stored.urlKeywords : [...DEFAULT_IMG_FILTER.urlKeywords],
+      altKeywords: Array.isArray(stored.altKeywords) && stored.altKeywords.length ? stored.altKeywords : [...DEFAULT_IMG_FILTER.altKeywords]
+    }
+  } catch { return { ...DEFAULT_IMG_FILTER, urlKeywords: [...DEFAULT_IMG_FILTER.urlKeywords], altKeywords: [...DEFAULT_IMG_FILTER.altKeywords] } }
+}
+
 webclipRouter.get('/config', async (req, res) => {
   try {
     const storageRoot = await getStorageRoot()
@@ -59,7 +85,7 @@ webclipRouter.get('/config', async (req, res) => {
     const rootRow = storageRoot
       ? await (await db.prepare('SELECT id, enabled FROM scan_roots WHERE path = ?')).get(storageRoot) as any
       : null
-    res.json({ success: true, storageRoot, rootRegistered: !!rootRow, rootEnabled: !!rootRow?.enabled, playwrightReady: await isReady(), limits: await getLimits() })
+    res.json({ success: true, storageRoot, rootRegistered: !!rootRow, rootEnabled: !!rootRow?.enabled, playwrightReady: await isReady(), limits: await getLimits(), imageFilter: await getImageFilter() })
   } catch (e: any) {
     console.error('webclip /config failed', e)
     res.status(500).json({ success: false, message: e?.message || String(e) })
@@ -131,6 +157,7 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   const assertUrl = deps.assertPublicUrl ?? assertPublicUrl
   const db = await getDb()
   const limits = await getLimits()
+  const imgFilter = await getImageFilter()
   const storageRoot = await getStorageRoot()
   if (!storageRoot) throw new WebclipError('config', '未配置剪藏目录，请先在设置页配置')
 
@@ -147,7 +174,7 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   assertDeadline()
   if (Buffer.byteLength(html) > limits.pageMaxMB * 1024 * 1024) throw new WebclipError('toolarge', `页面超过 ${limits.pageMaxMB}MB 限额`)
 
-  const { title, markdown, images } = htmlToMarkdown(html, String(url), limits.imgMaxCount)
+  const { title, markdown, images } = htmlToMarkdown(html, String(url), limits.imgMaxCount, imgFilter)
   const base = reserveBase(storageRoot, buildDocBase(title))
   const mdPath = path.join(storageRoot, `${base}.md`)
   const htmlPath = path.join(storageRoot, `${base}.html`)
@@ -173,6 +200,8 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
       const buf = Buffer.from(await r.arrayBuffer())
       if (buf.byteLength > limits.imgMaxMB * 1024 * 1024) throw new Error(`超过单图 ${limits.imgMaxMB}MB 限额`)
+      // 下载后兜底：超小文件（像素点/表情级）按失败路径降级 alt——采集时无 HTML 尺寸信号的噪声图二次保险
+      if (imgFilter.enabled && buf.byteLength < imgFilter.minBytes) throw new Error(`图片过小（${buf.byteLength}B < ${imgFilter.minBytes}B）`)
       // 扩展名：URL 后缀仅在白名单内才采用，否则按 Content-Type 映射；仍未知 → 抛错降级 alt 文案（不写 .img 这种代理必 404 的文件）
       const urlExt = (path.extname(new URL(img.absUrl).pathname).replace(/[^.\w]/g, '') || '').toLowerCase().slice(0, 8)
       const ctype = String(r.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
@@ -304,6 +333,33 @@ webclipRouter.put('/limits', async (req, res) => {
     res.json({ success: true, limits: next })
   } catch (e: any) {
     console.error('webclip /limits failed', e)
+    res.status(500).json({ success: false, message: e?.message || String(e) })
+  }
+})
+
+/** 图片质量过滤配置：开关/阈值/两组词表。词表字符串数组（非空校验），阈值正数；未提供的数组回落默认词表 */
+webclipRouter.put('/imagefilter', async (req, res) => {
+  try {
+    const body = (req.body || {}) as Record<string, any>
+    const next: ImgFilterConfig = { ...DEFAULT_IMG_FILTER, urlKeywords: [...DEFAULT_IMG_FILTER.urlKeywords], altKeywords: [...DEFAULT_IMG_FILTER.altKeywords] }
+    if (body.enabled !== undefined) next.enabled = !!body.enabled
+    for (const k of ['minPx', 'maxRatio', 'minBytes'] as const) {
+      const v = Number(body[k])
+      if (Number.isFinite(v) && v > 0) next[k] = v
+      else if (body[k] !== undefined) return res.status(400).json({ success: false, message: `${k} 必须为正数` })
+    }
+    for (const k of ['urlKeywords', 'altKeywords'] as const) {
+      if (body[k] === undefined) continue
+      if (!Array.isArray(body[k]) || body[k].some((x: any) => typeof x !== 'string')) {
+        return res.status(400).json({ success: false, message: `${k} 必须是字符串数组` })
+      }
+      next[k] = (body[k] as string[]).map(s => s.trim()).filter(Boolean)
+    }
+    const db = await getDb()
+    await db.exec(`UPDATE config SET value = '${JSON.stringify(next).replace(/'/g, "''")}', updated_at = CURRENT_TIMESTAMP WHERE key = 'webclip.imageFilter'`)
+    res.json({ success: true, imageFilter: next })
+  } catch (e: any) {
+    console.error('webclip /imagefilter failed', e)
     res.status(500).json({ success: false, message: e?.message || String(e) })
   }
 })
