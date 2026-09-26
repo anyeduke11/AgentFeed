@@ -80,3 +80,44 @@ describe('P1 冷却池核心', () => {
     assert.equal(await isCooling(notDue), true)
   })
 })
+
+describe('P1 去重判定与 feeder 闸', () => {
+  test('findDuplicates：同 embedding 高相似判重；未启用 embedding 降级标题精确匹配', async () => {
+    const db = await getDb()
+    const { findDuplicates, markDuplicate } = await import('../src/attention.js')
+    const a = await mkFile('/p1/dup-a.md')
+    // 造一条已蒸馏的近邻：wiki_entries_meta 有标题匹配即可触发标题降级判定
+    // （embedding 未启用场景：callEmbedding 抛错 → 降级路径）
+    // 列适配：实际表为 entry_path NOT NULL + source_type（无 source/status 列）；
+    // distilled_at 必填近期时间——30 天近邻窗口查询依赖它
+    const verdict = await findDuplicates(a, '完全一样的高分攻略标题', async () => { throw new Error('embedding 未启用') })
+    assert.equal(verdict.duplicate, false) // 库内无同标题已蒸馏条目 → 不判重
+    // 造同标题已蒸馏条目后应判重（brief 原文用 a+1 幽灵 id——files 无该行断言必炸，改显式建第二个文件）
+    const b = await mkFile('/p1/dup-b.md')
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at) VALUES (${a}, '/wiki/p1/dup-a.md', '完全一样的高分攻略标题', 'x', datetime('now'))`)
+    const v2 = await findDuplicates(b, '完全一样的高分攻略标题', async () => { throw new Error('embedding 未启用') })
+    assert.equal(v2.duplicate, true)
+    // markDuplicate 落 cold + 死因
+    await markDuplicate(b)
+    const row = await (await db.prepare('SELECT lifecycle, llm_state FROM files WHERE id = ?')).get(b) as any
+    assert.equal(row.lifecycle, 'cold')
+    assert.equal(row.llm_state, 'skipped') // 枚举含 skipped（files 建表 CHECK），feeder 只拾 pending 不会死循环
+  })
+
+  test('feeder 闸：冷却中文件不喂蒸馏，released 后恢复', async () => {
+    const db = await getDb()
+    const { enterCooling, isCooling } = await import('../src/attention.js')
+    await db.exec('UPDATE config SET value = \'{"lifecycle":true,"decay":false,"cooling":true}\' WHERE key = \'attention.features\'')
+    await db.exec("UPDATE config SET value = 'true' WHERE key = 'ai.autoTag'")
+    const f = await mkFile('/p1/feeder.md')
+    await db.exec(`UPDATE files SET llm_state = 'pending' WHERE id = ${f}`)
+    await enterCooling(f)
+    // isCooling 判定生效（feeder 侧消费同一函数）
+    assert.equal(await isCooling(f), true)
+    // 出池后恢复
+    await db.exec(`UPDATE cooling_pool SET release_at = datetime('now','-1 hour') WHERE file_id = ${f}`)
+    const { releaseExpired } = await import('../src/attention.js')
+    await releaseExpired()
+    assert.equal(await isCooling(f), false)
+  })
+})
