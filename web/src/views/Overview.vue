@@ -77,7 +77,7 @@
       <div v-else class="cap sect-empty">执行队列是空的 · 在发车区给读完的文章打分并选「立即试 / 稍后试」，到点这里会调起重读。</div>
       <!-- 周卡（回顾区块）：本周阅读 / 打分分布 / 完成轮次 / 逾期堆积 / 周目标环（R3） -->
       <div class="cap" style="padding:0 14px 12px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px">
-        <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池待读 {{ rstats.pool?.unread ?? 0 }}/{{ rstats.pool?.total ?? 0 }}</span>
+        <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池存量 {{ rstats.pool?.total ?? 0 }}</span>
         <span style="display:inline-flex;align-items:center;gap:6px;margin-left:auto">
           <svg width="20" height="20" viewBox="0 0 36 36" role="img" :aria-label="`周目标完成 ${goalPct}%`">
             <circle cx="18" cy="18" r="15" fill="none" stroke="var(--border)" stroke-width="5" />
@@ -92,9 +92,6 @@
             <button class="btn xs primary" @click="saveGoal">存</button>
           </template>
         </span>
-      </div>
-      <div v-if="(rstats.staleCount ?? 0) > 0" class="notice mark-warn" style="margin:0 14px 12px">
-        有 {{ rstats.staleCount }} 篇到期超 7 天未执行，建议回顾或忽略：{{ (rstats.stale || []).map((s: any) => s.title).join('、') }}
       </div>
       <!-- 薄弱点提示（M3）：按领域聚合本周低星与逾期堆积 -->
       <div v-if="(rstats.weakDomains || []).length" class="notice mark-warn" style="margin:0 14px 12px">
