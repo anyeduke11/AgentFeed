@@ -421,6 +421,16 @@ function initTables(db: SqliteDatabase) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- attention P1：冷却池——新采集条目静置 coolingHours 才进蒸馏/推荐（状态机 cooling→released/expired）
+    CREATE TABLE IF NOT EXISTS cooling_pool (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_id INTEGER UNIQUE NOT NULL,
+      entered_at TEXT NOT NULL,
+      release_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'cooling',
+      death_reason TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS exec_queue (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       file_id INTEGER NOT NULL,
@@ -589,8 +599,9 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'webclip.limits', value: '{"pageMaxMB":20,"imgMaxMB":5,"imgMaxCount":30,"navTimeoutMs":30000,"deadlineMs":45000}', type: 'json', description: '网页剪藏限额（页面MB/单图MB/单页图数/导航ms/总时限ms）' },
     { key: 'webclip.imageFilter', value: '{"enabled":true,"minPx":80,"maxRatio":4,"minBytes":1024,"urlKeywords":["qrcode","qr_code","二维码","wechat_qr","barcode","watermark","水印","logo","avatar","icon","badge","banner","promo","share_","follow"],"altKeywords":["点击关注","扫码关注","二维码","公众号","赞赏","打赏","阅读原文","关注我们","长按识别","加我微信","企业微信","推广"]}', type: 'json', description: '剪藏图片质量过滤（默认开启）：URL/alt 关键词 + 尺寸阈值剔除二维码/横幅/图标等宣传图，词表可增补' },
     { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' },
-    { key: 'attention.features', value: '{"lifecycle":true,"decay":false}', type: 'json', description: '注意力预算灰度开关（v0.1.6 方案定稿 §6 P0-5）：lifecycle=touch 回写与生命周期分层；decay=下沉日批（默认关，dry_run 观测后开）。全关=行为与改造前完全一致' },
-    { key: 'attention.decayDays', value: '{"demoteDays":90,"archiveDays":180}', type: 'json', description: '生命周期下沉阈值：90d 未触及且 touch≤1 降推荐可见性（lifecycle=warm）；180d 未触及归 cold（搜索默认折叠）。pinned 永不下沉' }
+    { key: 'attention.features', value: '{"lifecycle":true,"decay":false,"cooling":false}', type: 'json', description: '注意力预算灰度开关（v0.1.6 方案定稿 §6 P0-5/P1）：lifecycle=touch 回写与生命周期分层；decay=下沉日批（默认关，dry_run 观测后开）；cooling=冷却池（新条目静置 coolingHours 再进蒸馏/推荐，默认关先观测一周期）。全关=行为与改造前完全一致' },
+    { key: 'attention.decayDays', value: '{"demoteDays":90,"archiveDays":180}', type: 'json', description: '生命周期下沉阈值：90d 未触及且 touch≤1 降推荐可见性（lifecycle=warm）；180d 未触及归 cold（搜索默认折叠）。pinned 永不下沉' },
+    { key: 'attention.coolingHours', value: '48', type: 'number', description: '冷却时长（小时）：新条目入库后静置该时长才进入蒸馏/推荐' }
   ]
 
   await db.transactionalize(async () => {
