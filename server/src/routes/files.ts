@@ -2,6 +2,7 @@ import { Router } from 'express'
 import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from '../db.js'
+import { touchFiles } from '../attention.js'
 import { openFile, revealFile } from '../opener.js'
 import { buildReaderDoc } from '../reader.js'
 import { scan, ScanOptions } from '../scanner.js'
@@ -147,6 +148,8 @@ filesRouter.post('/:id/open', async (req, res) => {
       const f = await (await db.prepare('SELECT path FROM files WHERE id = ?')).get(fileId) as any
       const source = String(req.body?.source || 'other').replace(/'/g, "''").slice(0, 20)
       if (f) await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${fileId}, '${String(f.path).replace(/'/g, "''")}', '${source}')`)
+      // attention P0：打开即 touch（lifecycle 灰度关闭时内部 no-op）
+      await touchFiles([fileId])
       // R1 回溯：池内文件返回上次阅读进度，供前端 toast「上次读到 X%」（读毕 100% 不再提示）
       const rec = await (await db.prepare('SELECT progress FROM recommendations WHERE file_id = ?')).get(fileId) as any
       if (rec && rec.progress > 0 && rec.progress < 100) (result as any).lastProgress = rec.progress

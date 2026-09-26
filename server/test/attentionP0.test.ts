@@ -42,3 +42,40 @@ describe('attention P0 迁移', () => {
     assert.ok(idx.includes('idx_files_touched'), '缺 idx_files_touched')
   })
 })
+
+describe('attention P0 touch 与回填', () => {
+  test('touchFiles 更新 last_touched_at/touch_count（幂等递增），feature 关闭时不动', async () => {
+    const db = await getDb()
+    const ins = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state) VALUES ('/attn/a.md', 'a.md', '.md', 'active', 'done')")).run() as any
+    const id = ins.lastID
+    const { touchFiles } = await import('../src/attention.js')
+    await touchFiles([id])
+    let row = await (await db.prepare('SELECT last_touched_at, touch_count FROM files WHERE id = ?')).get(id) as any
+    assert.ok(row.last_touched_at)
+    assert.equal(row.touch_count, 1)
+    await touchFiles([id])
+    row = await (await db.prepare('SELECT touch_count FROM files WHERE id = ?')).get(id) as any
+    assert.equal(row.touch_count, 2)
+    // feature 关闭 → no-op
+    await db.exec("UPDATE config SET value = '{\"lifecycle\":false,\"decay\":false}' WHERE key = 'attention.features'")
+    await touchFiles([id])
+    row = await (await db.prepare('SELECT touch_count FROM files WHERE id = ?')).get(id) as any
+    assert.equal(row.touch_count, 2)
+    await db.exec("UPDATE config SET value = '{\"lifecycle\":true,\"decay\":false}' WHERE key = 'attention.features'")
+  })
+
+  test('backfillLastTouched：有 read_history 用最早 opened_at，无则 file_mtime', async () => {
+    const db = await getDb()
+    const { backfillLastTouched } = await import('../src/attention.js')
+    const mtime = '2026-09-01T00:00:00.000Z'
+    const ins1 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime) VALUES ('/attn/b.md', 'b.md', '.md', 'active', 'done', ?)")).run([mtime]) as any
+    const ins2 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime) VALUES ('/attn/c.md', 'c.md', '.md', 'active', 'done', ?)")).run([mtime]) as any
+    await (await db.prepare("INSERT INTO read_history (file_id, path, source, opened_at) VALUES (?, '/attn/b.md', 'reader', '2026-09-20 10:00:00')")).run([ins1.lastID])
+    const n = await backfillLastTouched()
+    assert.ok(n >= 2)
+    const b = await (await db.prepare('SELECT last_touched_at FROM files WHERE id = ?')).get(ins1.lastID) as any
+    const c = await (await db.prepare('SELECT last_touched_at FROM files WHERE id = ?')).get(ins2.lastID) as any
+    assert.ok(String(b.last_touched_at).startsWith('2026-09-20'))
+    assert.ok(String(c.last_touched_at).startsWith('2026-09-01'))
+  })
+})
