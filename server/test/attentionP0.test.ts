@@ -79,3 +79,46 @@ describe('attention P0 touch 与回填', () => {
     assert.ok(String(c.last_touched_at).startsWith('2026-09-01'))
   })
 })
+
+describe('attention P0 生命周期下沉', () => {
+  test('planDecay：90d 未触及且 touch≤1 → warm；180d → cold；pinned/recent 豁免；dry_run 不落库', async () => {
+    const db = await getDb()
+    // brief 适配：seed 默认 decay=false（先观测），本用例需开启 decay 才能产出非空计划
+    await db.exec("UPDATE config SET value = '{\"lifecycle\":true,\"decay\":true}' WHERE key = 'attention.features'")
+    const { planDecay, applyDecay } = await import('../src/attention.js')
+    const old90 = new Date(Date.now() - 100 * 86400e3).toISOString()
+    const old200 = new Date(Date.now() - 200 * 86400e3).toISOString()
+    const recent = new Date().toISOString()
+    const mk = async (path: string, touched: string, touchCount: number, pinned = 0) =>
+      ((await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, last_touched_at, touch_count, pinned) VALUES (?, ?, '.md', 'active', 'done', ?, ?, ?)")).run([path, path.split('/').pop(), touched, touchCount, pinned])) as any).lastID
+    const w = await mk('/attn/w.md', old90, 1)      // → warm
+    const c = await mk('/attn/c2.md', old200, 3)    // → cold（180d 判定不看 touch_count）
+    const p = await mk('/attn/p.md', old200, 0, 1)  // pinned 豁免
+    const r = await mk('/attn/r.md', recent, 0)     // 近期触及豁免
+    const plan = await planDecay()
+    assert.ok(plan.warmIds.includes(w), '90d 未触及应进 warm')
+    assert.ok(plan.coldIds.includes(c), '180d 未触及应进 cold')
+    assert.ok(!plan.warmIds.includes(p) && !plan.coldIds.includes(p), 'pinned 豁免')
+    assert.ok(!plan.warmIds.includes(r) && !plan.coldIds.includes(r), '近期触及豁免')
+    // dry_run 不落库
+    let row = await (await db.prepare('SELECT lifecycle FROM files WHERE id = ?')).get(w) as any
+    assert.equal(row.lifecycle, null)
+    // apply 后落库；warm 判定需 touch≤1，c2 touch=3 仍进 cold（180d 规则独立）
+    const applied = await applyDecay(plan)
+    assert.ok(applied.warm >= 1 && applied.cold >= 1)
+    row = await (await db.prepare('SELECT lifecycle FROM files WHERE id = ?')).get(w) as any
+    assert.equal(row.lifecycle, 'warm')
+    row = await (await db.prepare('SELECT lifecycle FROM files WHERE id = ?')).get(c) as any
+    assert.equal(row.lifecycle, 'cold')
+    row = await (await db.prepare('SELECT lifecycle FROM files WHERE id = ?')).get(p) as any
+    assert.equal(row.lifecycle, null)
+  })
+
+  test('decay 开关关闭时 planDecay 返回空计划', async () => {
+    const db = await getDb()
+    const { planDecay } = await import('../src/attention.js')
+    await db.exec("UPDATE config SET value = '{\"lifecycle\":true,\"decay\":false}' WHERE key = 'attention.features'")
+    const plan = await planDecay()
+    assert.equal(plan.warmIds.length + plan.coldIds.length, 0)
+  })
+})
