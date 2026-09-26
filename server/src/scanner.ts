@@ -4,6 +4,7 @@ import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import matter from 'gray-matter'
 import { getDb } from './db.js'
+import { enterCooling } from './attention.js'
 import { getExtractor, extractMd, extractHtml, readHead, inferAgent, RootBinding } from './extractor.js'
 import { loadGateConfig, isExcludedPath, checkGate, checkGateSample, streamCodeRatioStats, purgeExcludedFiles, archiveSkippedRecords, pathWhitelisted, normalizeRootPath } from './gate.js'
 import { computeRuleScore, RULE_SCORE_VERSION } from './ruleScore.js'
@@ -281,6 +282,16 @@ async function ingestFile(db: any, fp: string, stat: any, roots: string[], cfg: 
   // running 不动（正在蒸馏的任务由本次扫描结果自然覆盖）；墓碑复活路径（md5 相同）不会走到本分支
   const sql = `INSERT INTO files (path, name, ext, title, alias, source_agent, file_mtime, content_time, size, md5, domain_id, summary, status, llm_state, rule_score, gate_sampled, updated_at) VALUES ('${fp.replace(/'/g, "''")}', '${name.replace(/'/g, "''")}', '${ext.replace(/'/g, "''")}', ${titleVal}, ${aliasVal}, ${agentVal}, '${mtime.replace(/'/g, "''")}', '${ctime.replace(/'/g, "''")}', ${stat.size}, '${currentMd5.replace(/'/g, "''")}', NULL, NULL, 'active', 'pending', ${ruleScoreSql}, ${gateSampled}, CURRENT_TIMESTAMP) ON CONFLICT(path) DO UPDATE SET name = excluded.name, ext = excluded.ext, title = excluded.title, alias = excluded.alias, source_agent = excluded.source_agent, file_mtime = excluded.file_mtime, content_time = excluded.content_time, size = excluded.size, md5 = excluded.md5, gate_sampled = excluded.gate_sampled, rule_score = COALESCE(${ruleScoreSql}, rule_score), llm_state = CASE WHEN files.md5 != excluded.md5 AND files.llm_state IN ('done', 'failed') THEN 'pending' ELSE files.llm_state END, status = 'active', updated_at = CURRENT_TIMESTAMP`
   await db.exec(sql)
+  // attention P1：新入库（!existing——重扫更新/墓碑复活走 UPDATE 或提前 return，不入池）即进冷却池；
+  // enterCooling 内部自判总开关与豁免清单，失败只记日志不阻断入库（同 touch 接线惯例）
+  if (!existing) {
+    try {
+      const inserted = await (await db.prepare(`SELECT id FROM files WHERE path = '${fp.replace(/'/g, "''")}'`)).get() as any
+      if (inserted?.id) await enterCooling(Number(inserted.id), { sourceAgent: meta.agent ?? null, filePath: fp })
+    } catch (e) {
+      console.error('enterCooling failed', e)
+    }
+  }
   return { added: !existing, updated: !!existing }
 }
 

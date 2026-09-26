@@ -162,9 +162,40 @@ export async function findDuplicates(fileId: number, title: string, embed: (t: s
 }
 
 /** 判重处置：lifecycle=cold（可检索不蒸馏），llm_state=skipped（feeder 只拾 pending，不会死循环；
- *  skipped 在 files 建表 CHECK 枚举内） */
+ *  skipped 在 files 建表 CHECK 枚举内）；updated_at 同步置 now——suppressionToday 的 deduped
+ *  按「当日被判重」计数，依赖此时间戳 */
 export async function markDuplicate(fileId: number, dupOf?: string): Promise<void> {
   const db = await getDb()
-  await db.exec(`UPDATE files SET lifecycle = 'cold', llm_state = 'skipped' WHERE id = ${Number(fileId)}`)
+  await db.exec(`UPDATE files SET lifecycle = 'cold', llm_state = 'skipped', updated_at = CURRENT_TIMESTAMP WHERE id = ${Number(fileId)}`)
   console.log(`[attention] duplicate detected: file=${fileId} ${dupOf || ''}`)
+}
+
+/* ---- P1-5 suppression 日指标：日报「安全忽略」段数据源（全部只读计数） ---- */
+
+/** 抑制日指标：collected=当日入库（files.created_at 本地日）；deduped=当日去重落冷
+ *  （lifecycle=cold + llm_state=skipped，按 updated_at 日）；cooling_alive/cooling_died=池内
+ *  状态机快照（death_reason 当前无写入方，P2 起有值）；delivered 预留 0（recommendations 无
+ *  交付时间字段）；digested=当日阅读反馈；simulated_quota_overflow=max(0, collected-30)
+ *  ——智谱观测仪表：若配额 30 生效今日超额多少，只记不拦 */
+export async function suppressionToday(): Promise<Record<string, number>> {
+  const db = await getDb()
+  const cnt = async (sql: string): Promise<number> => {
+    const r = await (await db.prepare(sql)).get() as any
+    return Number(r?.n ?? 0)
+  }
+  const collected = await cnt("SELECT COUNT(*) AS n FROM files WHERE date(created_at) = date('now', 'localtime')")
+  const deduped = await cnt("SELECT COUNT(*) AS n FROM files WHERE lifecycle = 'cold' AND llm_state = 'skipped' AND date(updated_at) = date('now', 'localtime')")
+  const cooling_alive = await cnt("SELECT COUNT(*) AS n FROM cooling_pool WHERE status = 'cooling' AND release_at > datetime('now')")
+  const cooling_died = await cnt("SELECT COUNT(*) AS n FROM cooling_pool WHERE death_reason IS NOT NULL OR status = 'expired'")
+  const digested = await cnt("SELECT COUNT(*) AS n FROM reading_feedback WHERE date(created_at) = date('now', 'localtime')")
+  const delivered = 0 // recommendations 无当日 delivered 字段——按计划口径计 0，字段落地后补真实计数
+  return {
+    collected,
+    deduped,
+    cooling_alive,
+    cooling_died,
+    delivered,
+    digested,
+    simulated_quota_overflow: Math.max(0, collected - 30),
+  }
 }
