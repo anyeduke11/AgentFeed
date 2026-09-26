@@ -4,6 +4,7 @@ import { SqliteDatabase } from '@homeofthings/sqlite3'
 import { DATA_DIR, getDb } from './db.js'
 import { selectDailyPicks, localDateStr } from './routes/recommend.js'
 import { suppressionToday } from './attention.js'
+import { buildWeeklyDigest } from './weeklyDigest.js'
 import { cleanTitle, cleanSummary } from './formatter.js'
 
 // 日报日期严格 YYYY-MM-DD：既是文件名白名单，也是定时任务跨天判断的「日」口径
@@ -157,6 +158,11 @@ export function startDailyReportJob() {
       const db = await getDb()
       const r = await generateDailyReport(db, localDateStr(new Date()))
       if (r.generated) console.log(`daily report generated: ${r.date} -> ${r.path}`)
+      // P2-5/2-6：周日顺带触发周度一页纸（幂等由周文件存在性保证；非周日零开销）
+      if (new Date().getDay() === 0) {
+        const w = await buildWeeklyDigest(new Date())
+        if (w.generated) console.log(`weekly digest generated: ${w.week} -> ${w.path}`)
+      }
     } catch (e) {
       console.error('daily report job failed', e)
     }

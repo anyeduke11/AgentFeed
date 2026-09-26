@@ -161,6 +161,8 @@ readingRouter.get('/stats', async (req, res) => {
     const opened7 = await (await db.prepare("SELECT COUNT(*) AS n FROM read_history WHERE opened_at >= datetime('now', '-7 days')")).get() as any
     const rated7 = await (await db.prepare("SELECT COUNT(*) AS n FROM reading_feedback WHERE created_at >= datetime('now', '-7 days')")).get() as any
     const avgStars = await (await db.prepare("SELECT AVG(stars) AS v FROM reading_feedback WHERE created_at >= datetime('now', '-7 days')")).get() as any
+    // P2-4 消化计数口径：只计 digest_text 非空行（与 suppressionToday.digested 同口径），/rate 打分行不双计
+    const digested7 = await (await db.prepare("SELECT COUNT(*) AS n FROM reading_feedback WHERE digest_text IS NOT NULL AND created_at >= datetime('now', '-7 days')")).get() as any
     const poolRow = await (await db.prepare("SELECT COUNT(*) AS n, SUM(CASE WHEN status = 'unread' THEN 1 ELSE 0 END) AS unread FROM recommendations")).get() as any
     // 周卡扩展：打分分布 / 独立篇数 / 完成轮次 / 逾期堆积（>7 天待回顾）
     const distRows = await (await db.prepare("SELECT stars, COUNT(*) AS n FROM reading_feedback WHERE created_at >= datetime('now', '-7 days') GROUP BY stars")).all() as any[]
@@ -214,6 +216,7 @@ readingRouter.get('/stats', async (req, res) => {
       opened7: opened7.n,
       openedFiles7: openedFiles.n,
       rated7: rated7.n,
+      digested7: digested7.n,
       weeklyGoal: Math.max(1, parseInt(goalRow?.value) || 5),
       ratedFiles7: ratedFiles.n,
       avgStars: avgStars.v ? Number(Number(avgStars.v).toFixed(1)) : null,

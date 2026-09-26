@@ -100,4 +100,65 @@ describe('P2 轻量消化', () => {
     assert.equal(drow.stars, null)
     assert.equal(drow.exec_intent, null)
   })
+
+  test('suppressionToday.digested 口径：只计 digest_text 非空行，/rate 打分行不双计', async () => {
+    const db = await getDb()
+    const { suppressionToday } = await import('../src/attention.js')
+    // WHY：P2 起 reading_feedback 同表承载 digest 行与旧 /rate 打分行——若按全行计数，
+    // 日常打分会让日报「已消化」虚高双计（P2 Task 4 评审裁定的口径缺陷）。
+    // digest_text IS NOT NULL 是唯一「已消化」信号；用增量断言避免测试间造数干扰。
+    const before = (await suppressionToday()).digested
+    const a = await mkFile('/p2/sup-digest.md')
+    const b = await mkFile('/p2/sup-rate.md')
+    await (await db.prepare("INSERT INTO reading_feedback (file_id, digest_kind, digest_text) VALUES (?, 'conclusion', '这是一条超过十个字的今日消化结论内容')")).run([a])
+    await db.exec(`INSERT INTO reading_feedback (file_id, stars, exec_intent) VALUES (${b}, 4, 'info')`)
+    const after = (await suppressionToday()).digested
+    assert.equal(after - before, 1)
+  })
+})
+
+describe('P2 周度一页纸', () => {
+  test('buildWeeklyDigest：领域分簇（keep/act_now 及无 hook 存量入簇）+ ignore 计 skipped + 落盘幂等', async () => {
+    const db = await getDb()
+    const { buildWeeklyDigest } = await import('../src/weeklyDigest.js')
+    const dom = await (await db.prepare("INSERT INTO domains (name) VALUES ('周报域A')")).run() as any
+    const domId = Number(dom.lastID)
+    const ids: number[] = []
+    for (const p of ['/p2/wk-keep.md', '/p2/wk-act.md', '/p2/wk-ign.md', '/p2/wk-nohook.md']) {
+      const id = await mkFile(p)
+      ids.push(id)
+      await db.exec(`UPDATE files SET domain_id = ${domId} WHERE id = ${id}`)
+    }
+    const H = (t: string, a: string) => JSON.stringify({ text: t, verdict: '判定', action: a }).replace(/'/g, "''")
+    // 窗口：sunday=2026-09-20（UTC）前 6 天 → distilled_at 落 09-16~09-18 视为本周
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at, hook) VALUES (${ids[0]}, '/p2/wk-keep', '保留篇', 's', '2026-09-16 08:00:00', '${H('结论甲', 'keep')}')`)
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at, hook) VALUES (${ids[1]}, '/p2/wk-act', '行动篇', 's', '2026-09-17 08:00:00', '${H('结论乙', 'act_now')}')`)
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at, hook) VALUES (${ids[2]}, '/p2/wk-ign', '忽略篇', 's', '2026-09-17 09:00:00', '${H('结论丙', 'ignore')}')`)
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at) VALUES (${ids[3]}, '/p2/wk-nohook', '存量篇', 's', '2026-09-18 08:00:00')`)
+    const sunday = new Date('2026-09-20T00:00:00Z')
+    const d = await buildWeeklyDigest(sunday)
+    assert.ok('clusters' in d && 'skipped' in d)
+    assert.equal(d.skipped, 1, 'action=ignore 计安全忽略')
+    const c = d.clusters.find((x: any) => x.domain === '周报域A')
+    assert.ok(c, 'keep/act_now 条目应按领域聚簇')
+    assert.equal(c.count, 3, 'keep + act_now + 无 hook 存量条目入簇')
+    assert.ok(String(c.paragraph).includes('周报域A'))
+    // 落盘 + 幂等：同周文件已存在不重写（mtime 不变）
+    const { DATA_DIR } = await import('../src/db.js')
+    const mdPath = path.join(DATA_DIR, 'reports', 'weekly', '2026-W38.md')
+    assert.ok(await fsp.stat(mdPath).catch(() => null), '周报 md 应落盘 reports/weekly/')
+    const j = JSON.parse(await fsp.readFile(mdPath.replace(/\.md$/, '.json'), 'utf8'))
+    assert.equal(j.clusters.length, d.clusters.length)
+    assert.equal(j.skipped, 1)
+    const mtime1 = (await fsp.stat(mdPath)).mtimeMs
+    await buildWeeklyDigest(sunday)
+    assert.equal((await fsp.stat(mdPath)).mtimeMs, mtime1, '幂等：周文件已存在不重写')
+  })
+
+  test('buildWeeklyDigest：空周返回空簇零忽略', async () => {
+    const { buildWeeklyDigest } = await import('../src/weeklyDigest.js')
+    const d = await buildWeeklyDigest(new Date('2026-01-04T00:00:00Z')) // 亦为周日，窗口内无蒸馏条目
+    assert.equal(d.clusters.length, 0)
+    assert.equal(d.skipped, 0)
+  })
 })

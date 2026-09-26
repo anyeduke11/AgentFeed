@@ -190,7 +190,7 @@ export async function markDuplicate(fileId: number, dupOf?: string): Promise<voi
 /** 抑制日指标：collected=当日入库（files.created_at 本地日）；deduped=当日去重落冷
  *  （lifecycle=cold + llm_state=skipped，按 updated_at 日）；cooling_alive/cooling_died=池内
  *  状态机快照（death_reason 当前无写入方，P2 起有值）；delivered 预留 0（recommendations 无
- *  交付时间字段）；digested=当日阅读反馈；simulated_quota_overflow=max(0, collected-30)
+ *  交付时间字段）；digested=当日已消化行（digest_text 非空，P2 起不含 /rate 打分行）；simulated_quota_overflow=max(0, collected-30)
  *  ——智谱观测仪表：若配额 30 生效今日超额多少，只记不拦 */
 export async function suppressionToday(): Promise<Record<string, number>> {
   const db = await getDb()
@@ -202,7 +202,9 @@ export async function suppressionToday(): Promise<Record<string, number>> {
   const deduped = await cnt("SELECT COUNT(*) AS n FROM files WHERE lifecycle = 'cold' AND llm_state = 'skipped' AND date(updated_at) = date('now', 'localtime')")
   const cooling_alive = await cnt("SELECT COUNT(*) AS n FROM cooling_pool WHERE status = 'cooling' AND release_at > datetime('now')")
   const cooling_died = await cnt("SELECT COUNT(*) AS n FROM cooling_pool WHERE death_reason IS NOT NULL OR status = 'expired'")
-  const digested = await cnt("SELECT COUNT(*) AS n FROM reading_feedback WHERE date(created_at) = date('now', 'localtime')")
+  // P2 口径修正：reading_feedback 同表承载 digest 行与旧 /rate 打分行——只计 digest_text 非空
+  // （「已消化」唯一信号），否则日常打分会让日报「已消化」虚高双计
+  const digested = await cnt("SELECT COUNT(*) AS n FROM reading_feedback WHERE date(created_at) = date('now', 'localtime') AND digest_text IS NOT NULL")
   const delivered = 0 // recommendations 无当日 delivered 字段——按计划口径计 0，字段落地后补真实计数
   return {
     collected,
