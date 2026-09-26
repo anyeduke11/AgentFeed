@@ -34,7 +34,9 @@ export async function getDb(): Promise<SqliteDatabase> {
       { name: 'title', ddl: 'title TEXT' },
       { name: 'summary', ddl: 'summary TEXT' },
       { name: 'tags', ddl: 'tags TEXT' },
-      { name: 'confidence', ddl: 'confidence TEXT' }
+      { name: 'confidence', ddl: 'confidence TEXT' },
+      // 注意力预算 P2-1：蒸馏顺带产出的钩子 JSON（{text,verdict,action}），NULL=未产出
+      { name: 'hook', ddl: 'hook TEXT' }
     ])
     // 既有库列迁移（人读推荐：规则分缓存 + 别名；质量分复用 wiki_entries_meta.quality_score）
     await ensureColumns(db, 'files', [

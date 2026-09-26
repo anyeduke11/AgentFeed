@@ -230,9 +230,9 @@ async function buildPrompt(filePath: string, content: string, domainNames: strin
   // 会中途被截断成无闭合残缺 JSON。5KB+ 输入收紧指令：summary 上限 200 字、points 最多 6 条，
   // 从源头把输出体积压进安全区（实测失败样本 82% 为 5-50KB .md）。
   const budget = size > 5000
-    ? '\n注意：内容较长，请严格控制输出体积——summary 不超过 200 字，points 最多 6 条且每条一句话，entities 最多 8 个，relations 最多 5 条。宁可精炼，禁止截断式长输出。'
+    ? '\n注意：内容较长，请严格控制输出体积——summary 不超过 200 字，points 最多 6 条且每条一句话，entities 最多 8 个，relations 最多 5 条，hook.text 不超过 30 字。宁可精炼，禁止截断式长输出。'
     : ''
-  return `请为以下知识文件生成结构化 wiki 词条。输出 JSON：{"title":"","summary":"2-3 句摘要","points":["3-6 条关键要点，每条一句话"],"entities":[{"n":"名称","t":"类型"}],"relations":[{"a":"主体","v":"关系动词","b":"客体","note":"备注"}],"domain":"","tags":["2-4 个主题标签"]}。${budget}\ndomain 必须从给出的可选领域列表中选择；tags 是自由主题词。${domainHint}\n文件：${fileName}\n内容：\n${effective}`
+  return `请为以下知识文件生成结构化 wiki 词条。输出 JSON：{"title":"","summary":"2-3 句摘要","points":["3-6 条关键要点，每条一句话"],"entities":[{"n":"名称","t":"类型"}],"relations":[{"a":"主体","v":"关系动词","b":"客体","note":"备注"}],"domain":"","tags":["2-4 个主题标签"],"importance":"critical|useful|noise","hook":{"text":"≤30字核心结论","verdict":"≤20字判断","action":"ignore|keep|act_now|schedule"}}。${budget}\ndomain 必须从给出的可选领域列表中选择；tags 是自由主题词；importance 评估该内容对安全行业工程师的关键程度；hook 用一句话说清最值得记住的结论与建议动作。${domainHint}\n文件：${fileName}\n内容：\n${effective}`
 }
 
 function sanitizeSensitive(text: string): string {
@@ -249,7 +249,11 @@ function sanitizeSensitive(text: string): string {
   return out
 }
 
-function safeParseWikiJson(text: string): {
+export type HookAction = 'ignore' | 'keep' | 'act_now' | 'schedule'
+
+export interface WikiHook { text: string; verdict: string; action: HookAction }
+
+export function safeParseWikiJson(text: string): {
   title: string
   summary: string
   points: string[]
@@ -257,6 +261,8 @@ function safeParseWikiJson(text: string): {
   relations: Array<{ a: string; v: string; b: string; note?: string }>
   domain: string
   tags: string[]
+  importance: 'critical' | 'useful' | 'noise'
+  hook?: WikiHook
 } {
   // H1 修法①（2026-09-22 归因 §6-A）：长输出截断产生无闭合 } 的残缺 JSON，原正则 \{[\s\S]*\} 要求
   // 成对匹配必败 → 74% file 重试死循环。宽容提取三段式：
@@ -285,7 +291,7 @@ function safeParseWikiJson(text: string): {
       }
     }
   }
-  if (!obj) return { title: '', summary: '', points: [], entities: [], relations: [], domain: '', tags: [] }
+  if (!obj) return { title: '', summary: '', points: [], entities: [], relations: [], domain: '', tags: [], importance: 'useful' }
   const title = String(obj.title || '').trim()
   const summary = String(obj.summary || '').trim()
   const points = Array.isArray(obj.points) ? obj.points.filter((p: any) => typeof p === 'string' && p.trim()).map(String) : []
@@ -298,7 +304,19 @@ function safeParseWikiJson(text: string): {
     : []
   const domain = typeof obj.domain === 'string' ? obj.domain.trim() : ''
   const tags = Array.isArray(obj.tags) ? obj.tags.filter((t: any) => typeof t === 'string' && t.trim()).map((t: any) => String(t).trim()).slice(0, 4) : []
-  return { title, summary, points, entities, relations, domain, tags }
+  // P2-1 hook/importance 归一（守卫而非丢弃）：枚举外 importance 回退 'useful'（错档损失小于丢字段）；
+  // hook 缺失/非对象 → undefined；hook.text 截 30 字、verdict 截 20 字；action 枚举外（模型自创
+  // must_read 等）回退 'keep'——中性默认，保留结论但不催行动、不忽略（丢弃整个 hook 损失更大）
+  const importance = (['critical', 'useful', 'noise'] as const).includes(obj.importance) ? obj.importance : 'useful'
+  let hook: WikiHook | undefined
+  if (obj.hook && typeof obj.hook === 'object') {
+    hook = {
+      text: String(obj.hook.text || '').trim().slice(0, 30),
+      verdict: String(obj.hook.verdict || '').trim().slice(0, 20),
+      action: (['ignore', 'keep', 'act_now', 'schedule'] as const).includes(obj.hook.action) ? obj.hook.action : 'keep'
+    }
+  }
+  return { title, summary, points, entities, relations, domain, tags, importance, hook }
 }
 
 /* ---------- triage 熔断：按需精选批次的连续失败保护（内存态，重启自动清零） ---------- */
@@ -437,12 +455,14 @@ async function processDistill(job: LlmJob): Promise<void> {
       await db.exec(`UPDATE files SET summary = '${String(wiki.summary).replace(/'/g, "''")}' WHERE id = ${job.fileId}`)
     }
 
+    // P2-1：hook 随蒸馏落 wiki_entries_meta.hook 列（JSON 字符串，未产出存 NULL）——与 title 同款转义
+    const hookSql = wiki.hook ? `'${JSON.stringify(wiki.hook).replace(/'/g, "''")}'` : 'NULL'
     const metaStmt = await db.prepare('SELECT id FROM wiki_entries_meta WHERE file_id = ?')
     const metaRow = await metaStmt.get(job.fileId) as any
     if (!metaRow) {
-      await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, title) VALUES (${job.fileId}, '${String(path.join(entryDir, 'entry.md')).replace(/'/g, "''")}', ${wiki.entities.length}, CURRENT_TIMESTAMP, '${entryTitle}')`)
+      await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, entities_count, distilled_at, title, hook) VALUES (${job.fileId}, '${String(path.join(entryDir, 'entry.md')).replace(/'/g, "''")}', ${wiki.entities.length}, CURRENT_TIMESTAMP, '${entryTitle}', ${hookSql})`)
     } else {
-      await db.exec(`UPDATE wiki_entries_meta SET title = '${entryTitle}', entities_count = ${wiki.entities.length}, distilled_at = CURRENT_TIMESTAMP WHERE file_id = ${job.fileId}`)
+      await db.exec(`UPDATE wiki_entries_meta SET title = '${entryTitle}', entities_count = ${wiki.entities.length}, distilled_at = CURRENT_TIMESTAMP, hook = ${hookSql} WHERE file_id = ${job.fileId}`)
     }
 
     // Wave 1 挂点：蒸馏写入/更新词条后同步检索索引（FTS 关键词 + 分块向量）。
