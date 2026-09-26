@@ -2,7 +2,7 @@ import { Router } from 'express'
 import fs from 'fs/promises'
 import path from 'path'
 import { getDb } from '../db.js'
-import { touchFiles } from '../attention.js'
+import { touchFiles, getHook } from '../attention.js'
 import { openFile, revealFile } from '../opener.js'
 import { buildReaderDoc } from '../reader.js'
 import { scan, ScanOptions } from '../scanner.js'
@@ -200,7 +200,9 @@ filesRouter.get('/:id/content', async (req, res) => {
       // R4-M2：进阅读器即记一次打开（source=reader，与外部打开并列），并带出池内进度供前端回位
       const rec = await (await db.prepare('SELECT progress FROM recommendations WHERE file_id = ?')).get(fileId) as any
       await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${fileId}, '${String(f.path).replace(/'/g, "''")}', 'reader')`)
-      res.json({ success: true, html, toc, title: f.title || f.name, truncated, inPool: !!rec, lastProgress: rec && rec.progress > 0 && rec.progress < 100 ? rec.progress : 0, path: f.path })
+      // P2-1：带出蒸馏 hook（L1 展开态数据源）；读取失败不阻塞内容返回
+      const hook = await getHook(fileId).catch(() => null)
+      res.json({ success: true, html, toc, title: f.title || f.name, truncated, inPool: !!rec, lastProgress: rec && rec.progress > 0 && rec.progress < 100 ? rec.progress : 0, path: f.path, hook })
     } finally {
       await fh.close()
     }

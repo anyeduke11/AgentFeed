@@ -1,6 +1,20 @@
 import { getDb } from './db.js'
 import path from 'path'
 import { callEmbedding, cosine } from './llm/embeddings.js'
+import type { WikiHook } from './llm/llmWorker.js'
+
+/** 读单条 hook（P2-1）：解析 wiki_entries_meta.hook 列 JSON。无行/未产出/坏 JSON 返 null——读侧 fail-safe，不阻塞展示 */
+export async function getHook(fileId: number): Promise<WikiHook | null> {
+  const db = await getDb()
+  const row = await (await db.prepare('SELECT hook FROM wiki_entries_meta WHERE file_id = ?')).get(fileId) as any
+  if (!row?.hook) return null
+  try {
+    const h = JSON.parse(row.hook)
+    return h && typeof h === 'object'
+      ? { text: String(h.text || ''), verdict: String(h.verdict || ''), action: String(h.action || 'keep') as WikiHook['action'] }
+      : null
+  } catch { return null }
+}
 
 /** attention.features 灰度开关读取（坏 JSON 回退全关——fail-closed 到旧行为）。
  * cooling 缺省即关（`=== true`）：INSERT OR IGNORE 对既有库不回填新键 */
