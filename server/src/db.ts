@@ -137,6 +137,17 @@ export async function getDb(): Promise<SqliteDatabase> {
     await ensureColumns(db, 'webclip_records', [
       { name: 'code', ddl: 'code TEXT' }
     ])
+    // attention P0：生命周期五列（hot|warm|cold 分层 + 使用侧衰减数据面）。默认值保证旧库行为不变：
+    // lifecycle NULL=未分层（视同 hot 但不参与下沉首跑），last_touched_at NULL=以 file_mtime 回填
+    await ensureColumns(db, 'files', [
+      { name: 'lifecycle', ddl: 'lifecycle TEXT' },
+      { name: 'lifecycle_deadline', ddl: 'lifecycle_deadline TEXT' },
+      { name: 'last_touched_at', ddl: 'last_touched_at TEXT' },
+      { name: 'touch_count', ddl: 'touch_count INTEGER DEFAULT 0' },
+      { name: 'pinned', ddl: 'pinned INTEGER DEFAULT 0' }
+    ])
+    // 索引须在加列之后建（initTables 索引批量先于 ensureColumns 执行，列尚不存在会炸初始化）
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_files_touched ON files(last_touched_at)')
     await seedDefaults(db)
     await migrateTagLevels(db)
     await reconcileDomainTagSync(db)
@@ -577,7 +588,9 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'webclip.storageRoot', value: '', type: 'string', description: '网页剪藏存储目录（保存时自动注册为扫描根，agent=webclip）' },
     { key: 'webclip.limits', value: '{"pageMaxMB":20,"imgMaxMB":5,"imgMaxCount":30,"navTimeoutMs":30000,"deadlineMs":45000}', type: 'json', description: '网页剪藏限额（页面MB/单图MB/单页图数/导航ms/总时限ms）' },
     { key: 'webclip.imageFilter', value: '{"enabled":true,"minPx":80,"maxRatio":4,"minBytes":1024,"urlKeywords":["qrcode","qr_code","二维码","wechat_qr","barcode","watermark","水印","logo","avatar","icon","badge","banner","promo","share_","follow"],"altKeywords":["点击关注","扫码关注","二维码","公众号","赞赏","打赏","阅读原文","关注我们","长按识别","加我微信","企业微信","推广"]}', type: 'json', description: '剪藏图片质量过滤（默认开启）：URL/alt 关键词 + 尺寸阈值剔除二维码/横幅/图标等宣传图，词表可增补' },
-    { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' }
+    { key: 'chat.exportDir', value: '', type: 'string', description: '会话导出/蒸馏入库目录（须在已启用扫描根内；空=首个启用扫描根下 conversations/）' },
+    { key: 'attention.features', value: '{"lifecycle":true,"decay":false}', type: 'json', description: '注意力预算灰度开关（v0.1.6 方案定稿 §6 P0-5）：lifecycle=touch 回写与生命周期分层；decay=下沉日批（默认关，dry_run 观测后开）。全关=行为与改造前完全一致' },
+    { key: 'attention.decayDays', value: '{"demoteDays":90,"archiveDays":180}', type: 'json', description: '生命周期下沉阈值：90d 未触及且 touch≤1 降推荐可见性（lifecycle=warm）；180d 未触及归 cold（搜索默认折叠）。pinned 永不下沉' }
   ]
 
   await db.transactionalize(async () => {
