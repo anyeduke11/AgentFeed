@@ -1,5 +1,6 @@
 import { getDb } from './db.js'
 import path from 'path'
+import { callEmbedding, cosine } from './llm/embeddings.js'
 
 /** attention.features 灰度开关读取（坏 JSON 回退全关——fail-closed 到旧行为）。
  * cooling 缺省即关（`=== true`）：INSERT OR IGNORE 对既有库不回填新键 */
@@ -125,4 +126,45 @@ export async function releaseExpired(): Promise<{ released: number }> {
   const cnt = await (await db.prepare("SELECT COUNT(*) AS n FROM cooling_pool WHERE status = 'cooling' AND release_at <= datetime('now')")).get() as any
   await db.exec(`UPDATE cooling_pool SET status = 'released' WHERE status = 'cooling' AND release_at <= datetime('now')`)
   return { released: Number(cnt?.n ?? 0) }
+}
+
+/* ---- P1 蒸馏前廉价去重：判冷不判死（可检索、不蒸馏） ---- */
+
+export interface DupVerdict { duplicate: boolean; reason: string; degraded: boolean }
+
+/** 蒸馏前去重：embedding 可用 → 与近 30 天已蒸馏条目标题向量比相似度（≥0.92 判重）；
+ *  不可用 → 降级为标题精确匹配（degraded 标注）。近邻限 200 条防大产出自爆；
+ *  标题精确匹配走零成本快速路径（命中即停），未命中才逐条 embed。
+ *  fail-closed：查重失败不判重，放行走原流程 */
+export async function findDuplicates(fileId: number, title: string, embed: (t: string) => Promise<number[]> = callEmbedding): Promise<DupVerdict> {
+  const db = await getDb()
+  const rows = await (await db.prepare(`
+    SELECT m.file_id, m.title FROM wiki_entries_meta m
+    JOIN files f ON f.id = m.file_id
+    WHERE m.distilled_at >= datetime('now', '-30 days') AND f.id != ? AND COALESCE(m.title, '') != ''
+    ORDER BY m.distilled_at DESC LIMIT 200`)).all(fileId) as any[]
+  if (!rows.length) return { duplicate: false, reason: 'no_neighbors', degraded: false }
+  // 快速路径：标题精确匹配（大小写不敏感），零 embedding 成本
+  const norm = title.trim().toLowerCase()
+  const exact = norm ? rows.find(r => String(r.title).trim().toLowerCase() === norm) : undefined
+  if (exact) return { duplicate: true, reason: `duplicate_of:${exact.file_id}`, degraded: true }
+  try {
+    const target = await embed(title)
+    for (const r of rows) {
+      const v = await embed(r.title)
+      if (cosine(target, v) >= 0.92) return { duplicate: true, reason: `duplicate_of:${r.file_id}`, degraded: false }
+    }
+    return { duplicate: false, reason: 'ok', degraded: false }
+  } catch {
+    // embedding 不可用：精确匹配已在快速路径做过 → 不判重放行
+    return { duplicate: false, reason: 'ok_degraded', degraded: true }
+  }
+}
+
+/** 判重处置：lifecycle=cold（可检索不蒸馏），llm_state=skipped（feeder 只拾 pending，不会死循环；
+ *  skipped 在 files 建表 CHECK 枚举内） */
+export async function markDuplicate(fileId: number, dupOf?: string): Promise<void> {
+  const db = await getDb()
+  await db.exec(`UPDATE files SET lifecycle = 'cold', llm_state = 'skipped' WHERE id = ${Number(fileId)}`)
+  console.log(`[attention] duplicate detected: file=${fileId} ${dupOf || ''}`)
 }

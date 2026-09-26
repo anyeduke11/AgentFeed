@@ -6,6 +6,8 @@ import { getProviders, getDefaultModel, getModels, getDefaultProvider, type LlmP
 import { LlmQueue } from './llmQueue.js'
 import { processJob } from './llmWorker.js'
 import { enforceDailyBudget } from './budgetGate.js'
+import { releaseExpired, isCooling, findDuplicates, markDuplicate, attentionFeatures } from '../attention.js'
+import { callEmbedding, getEmbeddingConfig } from './embeddings.js'
 
 export interface WikiDraft {
   title: string
@@ -248,6 +250,11 @@ export async function startLlmFeeder() {
       if (llmQueue.isPaused || llmQueue.pending >= FEED_WATERMARK) return
       const cfgRow = await (await db.prepare("SELECT value FROM config WHERE key = 'ai.autoTag'")).get() as any
       if (cfgRow && cfgRow.value !== 'true') return
+      // P1 冷却池：先放行到期条目（放行动作与闸门同一函数来源）；开关与 embedding 配置每批取一次
+      await releaseExpired()
+      const fAttention = await attentionFeatures()
+      const embCfg = await getEmbeddingConfig()
+      const embedTitle = (t: string) => callEmbedding(t, embCfg)
       const provider = await getDefaultProvider()
       const model = await getDefaultModel()
       const rows = await (await db.prepare(`
@@ -260,6 +267,17 @@ export async function startLlmFeeder() {
       let fed = 0
       for (const r of rows) {
         if (llmQueue.hasFile(r.id)) continue
+        // P1 双闸：任何异常不得中断 feeder——fail-open 放行走原流程（与 findDuplicates 内部 fail-closed 一致）
+        try {
+          if (await isCooling(r.id)) continue // 闸 1：冷却中不喂蒸馏
+          if (fAttention.cooling) {           // 闸 2：蒸馏前廉价去重（统一由 cooling 总开关驱动）
+            const trow = await (await db.prepare("SELECT COALESCE(NULLIF(title, ''), name) AS t FROM files WHERE id = ?")).get(r.id) as any
+            const verdict = await findDuplicates(r.id, String(trow?.t || ''), embedTitle)
+            if (verdict.duplicate) { await markDuplicate(r.id, verdict.reason); continue }
+          }
+        } catch (e: any) {
+          console.error('llm feeder attention gate error:', String(e?.message || e))
+        }
         llmQueue.enqueue({ fileId: r.id, provider, model, prompt: '' })
         fed++
       }
