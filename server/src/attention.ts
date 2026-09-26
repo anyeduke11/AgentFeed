@@ -19,7 +19,10 @@ export async function touchFiles(ids: number[]): Promise<void> {
   await db.exec(`UPDATE files SET last_touched_at = '${new Date().toISOString()}', touch_count = touch_count + 1 WHERE id IN (${ids.join(',')})`)
 }
 
-/** 存量回填（幂等，只填 NULL 行）：有 read_history 取最早 opened_at，无则 file_mtime。返回回填行数 */
+/** 存量回填（幂等，只填 NULL 行）：有 read_history 取最早 opened_at，无则 created_at（入库时间）兜底。
+ * WHY 不用 file_mtime：agent 持续改写文件，mtime 新鲜 ≠ 用户注意力触及——mtime 兜底会把「agent 活跃」
+ * 误判为「用户看过」（P0 dry_run 实测：74k 存量 would_cold 仅 267，回填语义缺陷）。created_at 表达
+ * 「入库以来从未被你打开过」，与使用侧衰减本意一致（2026-09-26 用户裁决）。返回回填行数 */
 export async function backfillLastTouched(): Promise<number> {
   const db = await getDb()
   // @homeofthings/sqlite3 的 exec 返回 void 不带 changes——先 COUNT 待回填行数再执行
@@ -27,7 +30,7 @@ export async function backfillLastTouched(): Promise<number> {
   await db.exec(`
     UPDATE files SET last_touched_at = COALESCE(
       (SELECT MIN(opened_at) FROM read_history WHERE read_history.file_id = files.id),
-      file_mtime)
+      created_at)
     WHERE last_touched_at IS NULL`)
   return Number(cnt?.n ?? 0)
 }

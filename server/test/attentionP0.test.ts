@@ -64,19 +64,21 @@ describe('attention P0 touch 与回填', () => {
     await db.exec("UPDATE config SET value = '{\"lifecycle\":true,\"decay\":false}' WHERE key = 'attention.features'")
   })
 
-  test('backfillLastTouched：有 read_history 用最早 opened_at，无则 file_mtime', async () => {
+  test('backfillLastTouched：有 read_history 用最早 opened_at，无则 created_at 兜底（非 file_mtime）', async () => {
     const db = await getDb()
     const { backfillLastTouched } = await import('../src/attention.js')
-    const mtime = '2026-09-01T00:00:00.000Z'
-    const ins1 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime) VALUES ('/attn/b.md', 'b.md', '.md', 'active', 'done', ?)")).run([mtime]) as any
-    const ins2 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime) VALUES ('/attn/c.md', 'c.md', '.md', 'active', 'done', ?)")).run([mtime]) as any
+    // WHY created_at 兜底：mtime 新鲜 ≠ 用户触及（agent 持续改写），mtime 兜底会误判「agent 活跃」为「用户看过」
+    const mtime = '2026-09-24T00:00:00.000Z'   // 新鲜 mtime（若误用 mtime 兜底，断言会失败）
+    const createdAt = '2026-01-01 00:00:00'      // 陈旧入库时间 → 期望回填值
+    const ins1 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime, created_at) VALUES ('/attn/b.md', 'b.md', '.md', 'active', 'done', ?, ?)")).run([mtime, createdAt]) as any
+    const ins2 = await (await db.prepare("INSERT INTO files (path, name, ext, status, llm_state, file_mtime, created_at) VALUES ('/attn/c.md', 'c.md', '.md', 'active', 'done', ?, ?)")).run([mtime, createdAt]) as any
     await (await db.prepare("INSERT INTO read_history (file_id, path, source, opened_at) VALUES (?, '/attn/b.md', 'reader', '2026-09-20 10:00:00')")).run([ins1.lastID])
     const n = await backfillLastTouched()
     assert.ok(n >= 2)
     const b = await (await db.prepare('SELECT last_touched_at FROM files WHERE id = ?')).get(ins1.lastID) as any
     const c = await (await db.prepare('SELECT last_touched_at FROM files WHERE id = ?')).get(ins2.lastID) as any
     assert.ok(String(b.last_touched_at).startsWith('2026-09-20'))
-    assert.ok(String(c.last_touched_at).startsWith('2026-09-01'))
+    assert.ok(String(c.last_touched_at).startsWith('2026-01-01'))
   })
 })
 
