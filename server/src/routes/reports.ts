@@ -3,6 +3,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import { getDb } from '../db.js'
 import { generateDailyReport, dailyReportsDir } from '../reports.js'
+import { weeklyReportsDir } from '../weeklyDigest.js'
 import { localDateStr } from './recommend.js'
 
 export const reportsRouter = Router()
@@ -38,4 +39,18 @@ reportsRouter.post('/daily/generate', async (req, res) => {
     console.error('report generate failed', e)
     res.status(500).json({ success: false, message: String(e) })
   }
+})
+
+/** GET /api/reports/weekly —— 最新周度一页纸（P2-4 Overview 入口）：返回周键 + md 原文 + clusters JSON；无产出 404。
+ *  文件名取自目录白名单化枚举（readdir 结果非用户输入），无目录穿越面 */
+reportsRouter.get('/weekly', async (req, res) => {
+  const dir = path.resolve(weeklyReportsDir())
+  const mds = (await fs.readdir(dir).catch(() => [] as string[])).filter(f => f.endsWith('.md')).sort()
+  const latest = mds[mds.length - 1]
+  if (!latest) return res.status(404).json({ success: false, message: '暂无周度一页纸' })
+  const week = latest.slice(0, -3)
+  const md = await fs.readFile(path.join(dir, latest), 'utf8').catch(() => '')
+  let clusters: any = null
+  try { clusters = JSON.parse(await fs.readFile(path.join(dir, `${week}.json`), 'utf8'))?.clusters ?? null } catch { /* 仅 md 的旧版周报 */ }
+  res.json({ success: true, week, md, clusters })
 })

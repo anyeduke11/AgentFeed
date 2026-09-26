@@ -175,6 +175,10 @@ export const api = {
     curate: () => post(`${base}/recommend/curate`),
     daily: () => getJSON<{ items: any[]; date: string }>(`${base}/recommend/daily`)
   },
+  // 日报/周报出口（daily 落 read_history 埋点走 files open 语义，此处仅拉取）
+  reports: {
+    weekly: () => getJSON<{ success: boolean; week: string; md: string; clusters: Array<{ domain: string; count: number; paragraph: string }> | null }>(`${base}/reports/weekly`),
+  },
   reading: {
     rate: (fileId: number, stars: number, execIntent: 'now' | 'later' | 'info') => post(`${base}/reading/rate`, { fileId, stars, execIntent }),
     progress: (fileId: number, progress: number) => post(`${base}/reading/progress`, { fileId, progress }),

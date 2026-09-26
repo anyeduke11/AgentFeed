@@ -77,7 +77,7 @@
       <div v-else class="cap sect-empty">执行队列是空的 · 在发车区给读完的文章打分并选「立即试 / 稍后试」，到点这里会调起重读。</div>
       <!-- 周卡（回顾区块）：本周阅读 / 打分分布 / 完成轮次 / 逾期堆积 / 周目标环（R3） -->
       <div class="cap" style="padding:0 14px 12px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px">
-        <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池存量 {{ rstats.pool?.total ?? 0 }}</span>
+        <span>本周：打开 {{ rstats.opened7 ?? 0 }} 次（{{ rstats.openedFiles7 ?? 0 }} 篇） · 打分 {{ rstats.rated7 ?? 0 }} 篇 · 消化 {{ rstats.digested7 ?? 0 }} 条<template v-if="starsDist"> · {{ starsDist }}</template><template v-if="rstats.avgStars"> · 均分 {{ rstats.avgStars }} 星</template> · 完成执行 {{ rstats.doneWeek ?? 0 }} 轮 · 推荐池存量 {{ rstats.pool?.total ?? 0 }}</span>
         <span style="display:inline-flex;align-items:center;gap:6px;margin-left:auto">
           <svg width="20" height="20" viewBox="0 0 36 36" role="img" :aria-label="`周目标完成 ${goalPct}%`">
             <circle cx="18" cy="18" r="15" fill="none" stroke="var(--border)" stroke-width="5" />
@@ -93,6 +93,15 @@
           </template>
         </span>
       </div>
+      <!-- 周度一页纸（P2-4）：折叠展示最新周报簇段落（周日由日报任务自动产出，首次展开懒加载） -->
+      <details class="cap" style="margin:0 14px 12px" @toggle="loadWeekly($event)">
+        <summary style="cursor:pointer;user-select:none">周度一页纸<template v-if="weekly.week">（{{ weekly.week }}）</template></summary>
+        <div v-if="weekly.loading" style="margin-top:6px">加载中…</div>
+        <template v-else-if="(weekly.clusters || []).length">
+          <p v-for="c in weekly.clusters" :key="c.domain" style="margin:4px 0;line-height:1.6">{{ c.paragraph }}</p>
+        </template>
+        <div v-else-if="weekly.loaded" class="dim3" style="margin-top:6px">暂无周报 · 周日由日报任务自动生成。</div>
+      </details>
       <!-- 薄弱点提示（M3）：按领域聚合本周低星与逾期堆积 -->
       <div v-if="(rstats.weakDomains || []).length" class="notice mark-warn" style="margin:0 14px 12px">
         本周期薄弱领域：{{ (rstats.weakDomains || []).map((w: any) => `${w.name}（${[w.lowStars ? `低星 ${w.lowStars}` : '', w.stale ? `逾期 ${w.stale}` : ''].filter(Boolean).join(' · ')}）`).join('、') }}，建议优先补强。
@@ -501,6 +510,21 @@ async function saveGoal() {
     ui.toast(r?.message || '目标设置失败')
   }
   editingGoal.value = false
+}
+
+// ---- 周度一页纸（P2-4）：details 首次展开懒加载，失败静默留空不阻塞周卡 ----
+const weekly = ref<{ week: string; clusters: any[] | null; loading: boolean; loaded: boolean }>({ week: '', clusters: null, loading: false, loaded: false })
+
+async function loadWeekly(e: Event) {
+  const details = e.target as HTMLDetailsElement
+  if (!details.open || weekly.value.loaded || weekly.value.loading) return
+  weekly.value.loading = true
+  try {
+    const r = await api.reports.weekly()
+    weekly.value = { week: r?.week || '', clusters: r?.clusters || [], loading: false, loaded: true }
+  } catch {
+    weekly.value = { ...weekly.value, clusters: [], loading: false, loaded: true }
+  }
 }
 
 // 趋势图共享逻辑（与 Pipeline 同源单点维护：composables/ui）
