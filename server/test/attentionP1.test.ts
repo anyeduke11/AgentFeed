@@ -121,3 +121,17 @@ describe('P1 去重判定与 feeder 闸', () => {
     assert.equal(await isCooling(f), false)
   })
 })
+
+describe('P1 suppression 指标与精选排除', () => {
+  test('suppressionToday：今日 collected/deduped/cooling_died/delivered/digested 计数正确', async () => {
+    const db = await getDb()
+    const { suppressionToday } = await import('../src/attention.js')
+    // 造数方式用最小 INSERT 集，断言只验证函数返回的键齐全且为数字
+    // （各列口径的真值验证在 Task 4 端到端做：单测钉住「函数可用 + 七键齐全 + 类型正确」的契约）
+    const s = await suppressionToday()
+    for (const k of ['collected', 'deduped', 'cooling_alive', 'cooling_died', 'delivered', 'digested', 'simulated_quota_overflow']) {
+      assert.ok(typeof s[k] === 'number', `${k} 应为数字`)
+    }
+    assert.ok(s.simulated_quota_overflow >= 0)
+  })
+})

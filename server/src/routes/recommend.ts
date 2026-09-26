@@ -3,6 +3,7 @@ import { getDb } from '../db.js'
 import { llmQueue } from '../llm/index.js'
 import { getProviders, getDefaultModel } from '../llm/llmClient.js'
 import { ensureTag } from '../llm/tagGovernance.js'
+import { attentionFeatures } from '../attention.js'
 
 export const recommendRouter = Router()
 
@@ -180,8 +181,14 @@ export function localDateStr(d: Date): string {
 
 /** 每日精选选取（/daily 端点与日报生成共用，保证同一天选取一致）：
  *  今日 3 篇 = 池内 unread 按 score 降序 + 无状态窗口轮转（同一天结果确定，次日滑到下一窗）；
- *  不足 3 篇用预览高分（未入池）补位并标「池外推荐」。零 LLM 成本。 */
+ *  不足 3 篇用预览高分（未入池）补位并标「池外推荐」。零 LLM 成本。
+ *  P1-4：attention.features.cooling 开启时，冷却中条目（cooling_pool cooling 未到期）不进精选——
+ *  总开关关闭时不追加任何冷却条件（行为与 P1 前完全一致）。SQL 直查不走 isCooling，避免 N+1 */
 export async function selectDailyPicks(db: any, date?: string): Promise<any[]> {
+  const features = await attentionFeatures()
+  const coolingCond = features.cooling
+    ? ` AND NOT EXISTS (SELECT 1 FROM cooling_pool cp WHERE cp.file_id = f.id AND cp.status = 'cooling' AND cp.release_at > datetime('now'))`
+    : ''
   const pool = await (await db.prepare(`
       SELECT r.file_id, r.reason, r.reason_source,
              COALESCE(NULLIF(f.title, ''), f.name) AS title, f.path, f.ext, f.size,
@@ -190,7 +197,7 @@ export async function selectDailyPicks(db: any, date?: string): Promise<any[]> {
       JOIN files f ON f.id = r.file_id
       LEFT JOIN domains d ON f.domain_id = d.id
       LEFT JOIN wiki_entries_meta w ON w.file_id = f.id
-      WHERE r.status = 'unread' AND f.status = 'active'
+      WHERE r.status = 'unread' AND f.status = 'active'${coolingCond}
       ORDER BY r.score DESC, r.id ASC`)).all() as any[]
   const items: any[] = []
   if (pool.length) {
@@ -211,7 +218,7 @@ export async function selectDailyPicks(db: any, date?: string): Promise<any[]> {
       LEFT JOIN domains d ON f.domain_id = d.id
       LEFT JOIN wiki_entries_meta w ON w.file_id = f.id
       LEFT JOIN recommendations r ON r.file_id = f.id
-      WHERE f.status = 'active' AND r.id IS NULL
+      WHERE f.status = 'active' AND r.id IS NULL${coolingCond}
       ORDER BY (w.quality_score IS NOT NULL) DESC,
                (COALESCE(w.quality_score, 0) * 3 + COALESCE(f.rule_score, 0)) DESC,
                COALESCE(f.size, 0) DESC

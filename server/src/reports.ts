@@ -3,6 +3,7 @@ import fs from 'fs/promises'
 import { SqliteDatabase } from '@homeofthings/sqlite3'
 import { DATA_DIR, getDb } from './db.js'
 import { selectDailyPicks, localDateStr } from './routes/recommend.js'
+import { suppressionToday } from './attention.js'
 import { cleanTitle, cleanSummary } from './formatter.js'
 
 // 日报日期严格 YYYY-MM-DD：既是文件名白名单，也是定时任务跨天判断的「日」口径
@@ -39,13 +40,31 @@ function escapeHtml(v: any): string {
   return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-function renderMarkdown(date: string, stats: { count: number; avgQuality: number | null }, picks: any[]): string {
+/** 「安全忽略」段正文（P1-5 抑制指标可解释性）：六项计数全 0 整段跳过（cooling 默认关时即此态）；
+ *  模拟配额溢出仅在 >0 时追加（智谱观测仪表，只记不拦） */
+function suppressionText(sup: Record<string, number> | undefined): string | null {
+  if (!sup) return null
+  const hasAny = [sup.collected, sup.deduped, sup.cooling_alive, sup.cooling_died, sup.delivered, sup.digested]
+    .some(v => Number(v) > 0)
+  if (!hasAny) return null
+  let t = `今日入库 ${sup.collected} · 去重拦下 ${sup.deduped} · 冷却中 ${sup.cooling_alive} · 冷却期死亡 ${sup.cooling_died}`
+  if (Number(sup.simulated_quota_overflow) > 0) t += ` · 模拟配额溢出 ${sup.simulated_quota_overflow}（若配额 30 生效今日超额，仅观测）`
+  return t
+}
+
+function renderMarkdown(date: string, stats: { count: number; avgQuality: number | null }, picks: any[], sup?: Record<string, number>): string {
   const lines: string[] = []
   lines.push(`# AgentFeed 日报 ${date}`)
   lines.push('')
   const avg = stats.avgQuality != null ? `（平均质量分 ${stats.avgQuality.toFixed(1)}）` : ''
   lines.push(`- 当日新增蒸馏产物：${stats.count} 篇${avg}`)
   lines.push('')
+  const supText = suppressionText(sup)
+  if (supText) {
+    lines.push('## 安全忽略')
+    lines.push(`- ${supText}`)
+    lines.push('')
+  }
   lines.push('## 值得看 3 篇')
   if (!picks.length) lines.push('- 今日暂无推荐')
   for (const p of picks) {
@@ -61,8 +80,10 @@ function renderMarkdown(date: string, stats: { count: number; avgQuality: number
   return lines.join('\n') + '\n'
 }
 
-function renderHtml(date: string, stats: { count: number; avgQuality: number | null }, picks: any[]): string {
+function renderHtml(date: string, stats: { count: number; avgQuality: number | null }, picks: any[], sup?: Record<string, number>): string {
   const avg = stats.avgQuality != null ? `（平均质量分 ${escapeHtml(stats.avgQuality.toFixed(1))}）` : ''
+  const supText = suppressionText(sup)
+  const supHtml = supText ? `<h2>安全忽略</h2>\n<p>${escapeHtml(supText)}</p>\n` : ''
   const itemsHtml = picks.length
     ? picks.map(p => `
     <li>
@@ -88,6 +109,7 @@ function renderHtml(date: string, stats: { count: number; avgQuality: number | n
 <body>
 <h1>AgentFeed 日报 · ${escapeHtml(date)}</h1>
 <p>当日新增蒸馏产物：<strong>${stats.count}</strong> 篇${avg}</p>
+${supHtml}
 <h2>值得看 3 篇</h2>
 <ol>
 ${itemsHtml}
@@ -111,6 +133,8 @@ export async function generateDailyReport(db: SqliteDatabase, date: string): Pro
     if (await fs.stat(htmlPath).catch(() => null)) return { generated: false, date, path: htmlPath }
   }
   const stats = await distillStats(db, date)
+  // P1-5：抑制指标（今日入库/去重/冷却池状态），进「安全忽略」段——全 0 时渲染层自动跳过
+  const sup = await suppressionToday()
   // A3 出口层清洗：脏 title / 超长 reason 只在渲染层改写（md/html 双格式共用此映射），库内不回写
   const picks = (await selectDailyPicks(db, date)).map(p => ({
     ...p,
@@ -118,8 +142,8 @@ export async function generateDailyReport(db: SqliteDatabase, date: string): Pro
     reason: typeof p.reason === 'string' ? cleanSummary(p.reason) : p.reason,
   }))
   await fs.mkdir(dir, { recursive: true })
-  await fs.writeFile(mdPath, renderMarkdown(date, stats, picks), 'utf8')
-  await fs.writeFile(htmlPath, renderHtml(date, stats, picks), 'utf8')
+  await fs.writeFile(mdPath, renderMarkdown(date, stats, picks, sup), 'utf8')
+  await fs.writeFile(htmlPath, renderHtml(date, stats, picks, sup), 'utf8')
   return { generated: true, date, path: htmlPath }
 }
 
