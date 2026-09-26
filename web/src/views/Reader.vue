@@ -56,6 +56,14 @@
       <button class="btn ghost sm" style="margin-left:auto;flex:none" @click="quiz.open = false">收起</button>
     </div>
 
+    <!-- 轻量消化条（P2-3）：读毕 100% 一次性展开，一行输入 + 提交落 reading_feedback.digest_text（可收起） -->
+    <div v-if="digestOpen && !digestDone" class="reader-digest">
+      <span class="cap" style="font-weight:700;flex:none">留一句消化</span>
+      <input v-model="digestText" class="rate-input" type="text" placeholder="这篇最值得记住的一句结论（≥10 字）" maxlength="200" @keydown.enter="submitDigest" />
+      <button class="btn sm primary" :disabled="digestSending || digestText.trim().length < 10" @click="submitDigest">{{ digestSending ? '提交中…' : '留下' }}</button>
+      <button class="btn ghost sm" style="flex:none" @click="digestOpen = false">收起</button>
+    </div>
+
     <!-- 轻量评分条（I2）：5 星 hover 高亮 + 一句话感受，落 read_history（历史记录语义，可重复提交） -->
     <div v-if="!loading && !err" class="reader-rate">
       <span class="cap">这篇读得如何？</span>
@@ -106,6 +114,12 @@ const fbRating = ref(0)
 const hoverStar = ref(0)
 const fbText = ref('')
 const fbSending = ref(false)
+// 轻量消化（P2-3）：读毕一次性展开输入行，conclusion 落 reading_feedback.digest_text
+// （use/drop 为端点三态，读者入口保持最小：一行输入 + 提交）
+const digestOpen = ref(false)
+const digestText = ref('')
+const digestSending = ref(false)
+const digestDone = ref(false)
 // 理解度检查（I3 RSI）：quizEnabled 才露出入口；自问自答交互（q → 看答案 a → 答对/答错调间隔）
 const quizEnabled = ref(false)
 const quiz = ref<{ open: boolean; items: Array<{ q: string; a: string }>; idx: number; revealed: boolean }>({ open: false, items: [], idx: 0, revealed: false })
@@ -137,6 +151,9 @@ watch(() => route.params.id, (v) => {
     related.value = []
     fbRating.value = 0
     fbText.value = ''
+    digestOpen.value = false
+    digestText.value = ''
+    digestDone.value = false
     quiz.value = { open: false, items: [], idx: 0, revealed: false }
     load()
     loadRelated()
@@ -288,7 +305,7 @@ function syncPct() {
   pct.value = max <= 0 ? 0 : Math.min(100, Math.round((d.documentElement.scrollTop / max) * 100))
 }
 
-/** 进度上报：3s 节流（复用 POST /reading/progress 与 R1 同列）；100% 一次性 toast 引导打分 */
+/** 进度上报：3s 节流（复用 POST /reading/progress 与 R1 同列）；100% 一次性 toast + 展开消化条（P2-3） */
 function report(force: boolean) {
   if (!inPool.value) return
   const now = Date.now()
@@ -299,9 +316,35 @@ function report(force: boolean) {
   api.reading.progress(fileId.value, pct.value).then((r: any) => {
     if (r?.success && pct.value >= 100 && !scoredHintShown) {
       scoredHintShown = true
-      ui.toast('读完了？点右上「打分」完成阅读闭环')
+      digestOpen.value = true
+      ui.toast('读完了？留一句消化，或点右上打分')
     }
   }).catch(() => { /* 上报失败静默，不打断阅读 */ })
+}
+
+/** 提交消化（P2-3）：≥10 字落 reading_feedback.digest_text（digest_text 非空=已消化信号） */
+async function submitDigest() {
+  if (digestSending.value) return
+  const text = digestText.value.trim()
+  if (text.length < 10) {
+    ui.toast('消化内容至少 10 个字')
+    return
+  }
+  digestSending.value = true
+  try {
+    const r: any = await api.reading.digest(fileId.value, text, 'conclusion')
+    if (r?.success) {
+      digestDone.value = true
+      digestOpen.value = false
+      digestText.value = ''
+      ui.toast('已记录消化')
+    } else {
+      ui.toast(r?.message || '提交失败，请重试')
+    }
+  } catch {
+    ui.toast('提交失败，请稍后重试')
+  }
+  digestSending.value = false
 }
 
 /** 打分联动：复用 AppModal rate 弹层（两维 10 秒），带当前进度预填 */
@@ -342,6 +385,8 @@ function goBack() {
 .reader-rate { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px solid var(--border); }
 /* 理解度检查（I3 RSI） */
 .reader-quiz { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px dashed var(--border); flex-wrap: wrap; }
+/* 消化条（P2-3）：读毕一次性展开的一行输入，与 quiz 条同款极简形态 */
+.reader-digest { flex: none; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px dashed var(--border); flex-wrap: wrap; }
 .rate-stars { display: flex; gap: 2px; }
 .rate-star { background: none; border: 0; padding: 0 1px; font-size: 17px; line-height: 1; color: var(--border); cursor: pointer; transition: color .1s; }
 .rate-star.on { color: var(--accent); }

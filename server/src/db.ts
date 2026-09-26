@@ -65,6 +65,13 @@ export async function getDb(): Promise<SqliteDatabase> {
       { name: 'rule_id', ddl: 'rule_id TEXT' },
       { name: 'gate_metric', ddl: 'gate_metric TEXT' }
     ])
+    // 既有库列迁移（注意力预算 P2-3 轻量消化：digest_text 非空=已消化；digest_kind 存
+    // conclusion|use|drop 标记——reading_feedback 既有列无 feedback 可挪用，exec_intent 带
+    // CHECK 枚举不容改义，独立 kind 列为计划实现者注明确授权选项）
+    await ensureColumns(db, 'reading_feedback', [
+      { name: 'digest_text', ddl: 'digest_text TEXT' },
+      { name: 'digest_kind', ddl: 'digest_kind TEXT' }
+    ])
     // 既有库列迁移（MCP 埋点 v2：args 摘要落库，回答「agent 实际查了什么」）
     await ensureColumns(db, 'mcp_call_logs', [
       { name: 'args', ddl: 'args TEXT' }

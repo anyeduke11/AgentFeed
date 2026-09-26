@@ -72,3 +72,32 @@ describe('P2 三层摘要：hook 并入蒸馏', () => {
     assert.equal(await getHook(b), null)
   })
 })
+
+describe('P2 轻量消化', () => {
+  test('reading_feedback 有 digest_text / digest_kind 列', async () => {
+    const db = await getDb()
+    const cols = new Set(((await (await db.prepare("PRAGMA table_info('reading_feedback')")).all()) as any[]).map(r => r.name))
+    assert.ok(cols.has('digest_text'), '缺 digest_text 列')
+    assert.ok(cols.has('digest_kind'), '缺 digest_kind 列')
+  })
+
+  test('digest 列语义：digest_text 非空=已消化；drop 行只留 kind 标记但不缺席；不污染打分路径列', async () => {
+    const db = await getDb()
+    // 列语义裁定：reading_feedback 既有列（id/file_id/stars/exec_intent/created_at）无 feedback 列，
+    // 且 exec_intent 带 CHECK('now'|'later'|'info') 不容挪用——kind 标记落新增 digest_kind 列
+    // （计划实现者注明确授权此选项）；digest_text 非空即「已消化」信号，drop 行 digest_text 置空。
+    const f = await mkFile('/p2/digest.md')
+    await (await db.prepare("INSERT INTO reading_feedback (file_id, digest_kind, digest_text) VALUES (?, 'conclusion', ?)")).run([f, '这是一条超过十个字的消化结论内容验证'])
+    const row = await (await db.prepare('SELECT digest_text, digest_kind, stars, exec_intent FROM reading_feedback WHERE file_id = ?')).get(f) as any
+    assert.ok(String(row.digest_text).length >= 10)
+    assert.equal(row.digest_kind, 'conclusion')
+    // drop 本身是信号：行必须存在，但 digest_text/stars/exec_intent 全空（不冒充已写消化、不污染打分语义）
+    const d = await mkFile('/p2/drop.md')
+    await (await db.prepare("INSERT INTO reading_feedback (file_id, digest_kind) VALUES (?, 'drop')")).run([d])
+    const drow = await (await db.prepare('SELECT digest_text, digest_kind, stars, exec_intent FROM reading_feedback WHERE file_id = ?')).get(d) as any
+    assert.equal(drow.digest_text, null)
+    assert.equal(drow.digest_kind, 'drop')
+    assert.equal(drow.stars, null)
+    assert.equal(drow.exec_intent, null)
+  })
+})

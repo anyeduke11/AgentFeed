@@ -184,7 +184,8 @@ export const api = {
     goal: (weeklyGoal: number) => post(`${base}/reading/goal`, { weeklyGoal }),
     stats: () => getJSON<any>(`${base}/reading/stats`),
     related: (fileId: number) => getJSON<{ success: boolean; items: Array<{ id: number; title: string; path: string; opens: number }> }>(`${base}/reading/related/${fileId}`),
-    feedback: (fileId: number | null, path: string, rating: number, feedback?: string) => post(`${base}/reading/feedback`, { fileId, path, rating, feedback })
+    feedback: (fileId: number | null, path: string, rating: number, feedback?: string) => post(`${base}/reading/feedback`, { fileId, path, rating, feedback }),
+    digest: (fileId: number, text: string, kind: 'conclusion' | 'use' | 'drop' = 'conclusion') => post(`${base}/reading/digest`, { fileId, text, kind })
   },
 
   profile: {
