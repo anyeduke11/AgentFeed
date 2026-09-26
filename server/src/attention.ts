@@ -1,13 +1,15 @@
 import { getDb } from './db.js'
+import path from 'path'
 
-/** attention.features 灰度开关读取（坏 JSON 回退全关——fail-closed 到旧行为） */
-export async function attentionFeatures(): Promise<{ lifecycle: boolean; decay: boolean }> {
+/** attention.features 灰度开关读取（坏 JSON 回退全关——fail-closed 到旧行为）。
+ * cooling 缺省即关（`=== true`）：INSERT OR IGNORE 对既有库不回填新键 */
+export async function attentionFeatures(): Promise<{ lifecycle: boolean; decay: boolean; cooling: boolean }> {
   const db = await getDb()
   const row = await (await db.prepare("SELECT value FROM config WHERE key = 'attention.features'")).get() as any
   try {
     const f = JSON.parse(String(row?.value || '{}'))
-    return { lifecycle: f.lifecycle === true, decay: f.decay === true }
-  } catch { return { lifecycle: false, decay: false } }
+    return { lifecycle: f.lifecycle === true, decay: f.decay === true, cooling: f.cooling === true }
+  } catch { return { lifecycle: false, decay: false, cooling: false } }
 }
 
 /** touch 回写：Web 打开 / MCP 深读共用。幂等递增 touch_count，置 last_touched_at=now（UTC ISO） */
@@ -68,4 +70,59 @@ export async function applyDecay(plan: { warmIds: number[]; coldIds: number[] })
   if (plan.coldIds.length) await db.exec(`UPDATE files SET lifecycle = 'cold' WHERE id IN (${plan.coldIds.join(',')})`)
   if (plan.warmIds.length) await db.exec(`UPDATE files SET lifecycle = 'warm' WHERE id IN (${plan.warmIds.join(',')})`)
   return { warm: plan.warmIds.length, cold: plan.coldIds.length }
+}
+
+/* ---- P1 冷却池：新采集条目静置 coolingHours 才进蒸馏/推荐（豁免清单除外） ---- */
+
+export interface CoolingExempt { sourceAgent?: string | null; filePath?: string; filenameWhitelist?: string[]; pathWhitelist?: string[] }
+
+/** 豁免判定：webclip 来源 / 文件名白名单精确命中 / 路径白名单前缀命中（与 gate 同语义） */
+function isExempt(filePath: string | undefined, sourceAgent: string | null | undefined, whitelist: string[], pathWl: string[]): boolean {
+  if (sourceAgent === 'webclip') return true
+  if (!filePath) return false
+  const base = path.basename(filePath).toLowerCase()
+  if (whitelist.some(w => base === w.toLowerCase())) return true
+  const p = filePath.replace(/\/+$/, '')
+  return pathWl.some(e => {
+    const q = e.trim().replace(/\/+$/, '')
+    return q !== '' && (p === q || p.startsWith(q + '/'))
+  })
+}
+
+/** 入冷却池（幂等：同文件只入一次；豁免来源/关闭开关直接跳过）。release_at = entered_at + coolingHours */
+export async function enterCooling(fileId: number, exempt?: CoolingExempt): Promise<void> {
+  const f = await attentionFeatures()
+  if (!f.cooling) return
+  const db = await getDb()
+  const dup = await (await db.prepare('SELECT 1 FROM cooling_pool WHERE file_id = ?')).get(fileId)
+  if (dup) return
+  const h = await (await db.prepare("SELECT value FROM config WHERE key = 'attention.coolingHours'")).get() as any
+  const hours = Number(h?.value) > 0 ? Number(h.value) : 48
+  const wl = await (await db.prepare("SELECT value FROM config WHERE key = 'gate.filenameWhitelist'")).get() as any
+  const pw = await (await db.prepare("SELECT value FROM config WHERE key = 'gate.pathWhitelist'")).get() as any
+  let whitelist: string[] = []
+  let pathWl: string[] = []
+  try { whitelist = JSON.parse(String(wl?.value || '[]')) } catch { /* 默认空 */ }
+  try { pathWl = JSON.parse(String(pw?.value || '[]')) } catch { /* 默认空 */ }
+  if (isExempt(exempt?.filePath, exempt?.sourceAgent ?? null, whitelist, pathWl)) return
+  await db.exec(`INSERT INTO cooling_pool (file_id, entered_at, release_at, status)
+    VALUES (${Number(fileId)}, '${new Date().toISOString()}', datetime('now', '+${hours} hours'), 'cooling')`)
+}
+
+/** 是否冷却中（cooling 状态且未到 release_at）。feature 关闭恒 false */
+export async function isCooling(fileId: number): Promise<boolean> {
+  const f = await attentionFeatures()
+  if (!f.cooling) return false
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT 1 FROM cooling_pool WHERE file_id = ? AND status = 'cooling' AND release_at > datetime('now')")).get(fileId)
+  return !!row
+}
+
+/** 到期出池：release_at 已过且仍 cooling 的行置 released。返回出池文件数 */
+export async function releaseExpired(): Promise<{ released: number }> {
+  const db = await getDb()
+  // @homeofthings/sqlite3 的 exec 不带 changes——先 COUNT 同条件行数再更新（同 backfillLastTouched）
+  const cnt = await (await db.prepare("SELECT COUNT(*) AS n FROM cooling_pool WHERE status = 'cooling' AND release_at <= datetime('now')")).get() as any
+  await db.exec(`UPDATE cooling_pool SET status = 'released' WHERE status = 'cooling' AND release_at <= datetime('now')`)
+  return { released: Number(cnt?.n ?? 0) }
 }
