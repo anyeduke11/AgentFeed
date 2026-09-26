@@ -259,6 +259,30 @@ readingRouter.get('/related/:fileId', async (req, res) => {
 })
 
 /**
+ * P2 轻量消化（留一句/转行动/放弃 三选一）：conclusion=消化结论（≥10 字）/ use=用在哪 / drop=读过即弃。
+ * 复用 reading_feedback 落库不建新表：digest_text 非空即「已消化」信号；kind 标记落 digest_kind 列
+ * （既有列无 feedback 可挪用，exec_intent 带 CHECK 枚举不容改义）；drop 行只落 kind——drop 本身是信号，
+ * 行必须存在但 stars/exec_intent/digest_text 全空，不冒充已写消化、不污染打分语义。同一文件允许重复提交。
+ */
+readingRouter.post('/digest', async (req, res) => {
+  try {
+    const db = await getDb()
+    const fileId = parseInt(req.body?.fileId)
+    const text = String(req.body?.text || '').trim()
+    const kind = String(req.body?.kind || 'conclusion')
+    if (!Number.isFinite(fileId)) return res.status(400).json({ success: false, message: 'fileId 必填' })
+    if (!['conclusion', 'use', 'drop'].includes(kind)) return res.status(400).json({ success: false, message: 'kind 需为 conclusion|use|drop' })
+    if (kind !== 'drop' && text.length < 10) return res.status(422).json({ success: false, message: '消化内容至少 10 个字' })
+    await (await db.prepare('INSERT INTO reading_feedback (file_id, digest_kind, digest_text) VALUES (?, ?, ?)'))
+      .run([fileId, kind, kind === 'drop' ? null : text])
+    res.json({ success: true })
+  } catch (e: any) {
+    console.error('reading digest failed', e)
+    res.status(500).json({ success: false, message: String(e) })
+  }
+})
+
+/**
  * I2 阅读反馈：轻量评分（1-5 星）+ 一句话反馈落 read_history（file_id 可空、source='reader'）。
  * 与 POST /rate（阅读闭环打分：stars + execIntent，驱动间隔复习/执行队列）是两套口径，互不影响；
  * 历史记录语义——同一文件允许重复提交（每次都是一条独立信号）。
