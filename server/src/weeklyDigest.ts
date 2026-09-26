@@ -31,23 +31,42 @@ export interface WeeklyDigestResult {
 }
 
 /**
- * 周度一页纸（P2-5/2-6）：本周（sunday 前 6 天 ~ sunday）蒸馏条目按领域分簇。
+ * 周度一页纸（P2-5/2-6）：本周（sunday 本地零点前 6 天 ~ sunday 本地零点，即周一 00:00 ~
+ * 周日 00:00 本地）蒸馏条目按领域分簇。窗口端点锚定本地零点而非运行时刻（review Minor 2）——
+ * 旧实现 start = 运行时刻 - 6 天，周日首个 tick（00:05）会把窗口起点钉在周一 00:05，
+ * 每周周一 00:00-00:05 的蒸馏条目永久落缝。
  * 分簇口径：hook.action ∈ {keep, act_now} 为主信号入簇；schedule 及无 hook 存量条目
  * 同样入簇（周报不静默丢条目——计划参考实现即此口径）；action='ignore' 计入 skipped，
  * 与 suppressionToday 安全忽略段对账。每簇段落：本地统计句兜底；ai.autoTag 开启时
- * 尝试 LLM 增强段（单簇失败降级回兜底句，不阻塞整报）。落盘 md + clusters JSON，
- * 幂等：同周文件已存在则跳过重写（同 generateDailyReport 文件存在性语义）。
+ * 尝试 LLM 增强段（单簇失败降级回兜底句，不阻塞整报）。落盘 md + clusters JSON。
+ * 幂等前置（review Important）：同周 md 已存在直接返回缓存结果，不重跑聚类/LLM——否则周日
+ * 每 5 分钟的 ensure() tick 都会整批重调 LLM 后丢弃。缓存读同伴 .json 的 clusters/skipped；
+ * json 缺失/损坏时返空簇（md 本身仍是完整一页纸，仅结构化数据缺失），path 指向既有 md。
  */
 export async function buildWeeklyDigest(sunday: Date): Promise<WeeklyDigestResult> {
-  const db = await getDb()
   const week = isoWeekKey(sunday)
-  const start = new Date(sunday.getTime() - 6 * 86400e3)
+  const dir = weeklyReportsDir()
+  const mdPath = path.join(dir, `${week}.md`)
+  if (await fs.stat(mdPath).catch(() => null)) {
+    let clusters: WeeklyCluster[] = []
+    let skipped = 0
+    try {
+      const j = JSON.parse(await fs.readFile(path.join(dir, `${week}.json`), 'utf8'))
+      if (Array.isArray(j?.clusters)) clusters = j.clusters
+      skipped = Number(j?.skipped) || 0
+    } catch { /* 同伴 json 缺失/损坏 → 空簇缓存语义 */ }
+    return { generated: false, week, path: mdPath, clusters, skipped }
+  }
+  const db = await getDb()
+  // 窗口端点 = sunday 本地零点（exclusive），start = 端点前 6 天（同为本地零点）
+  const end = new Date(sunday.getFullYear(), sunday.getMonth(), sunday.getDate())
+  const start = new Date(end.getTime() - 6 * 86400e3)
   const rows = await (await db.prepare(`
     SELECT COALESCE(d.name, '未分类') AS domain, m.title, m.hook
     FROM wiki_entries_meta m JOIN files f ON f.id = m.file_id
     LEFT JOIN domains d ON d.id = f.domain_id
     WHERE m.distilled_at >= datetime(?) AND m.distilled_at < datetime(?)
-      AND f.status = 'active'`)).all([utcStr(start), utcStr(sunday)]) as any[]
+      AND f.status = 'active'`)).all([utcStr(start), utcStr(end)]) as any[]
   const byDomain = new Map<string, { title: string; hook: any }[]>()
   let skipped = 0
   for (const r of rows) {
@@ -68,23 +87,17 @@ export async function buildWeeklyDigest(sunday: Date): Promise<WeeklyDigestResul
     }
     clusters.push({ domain, count: items.length, paragraph })
   }
-  const dir = weeklyReportsDir()
-  const mdPath = path.join(dir, `${week}.md`)
   const jsonPath = path.join(dir, `${week}.json`)
-  let generated = false
-  if (!(await fs.stat(mdPath).catch(() => null))) {
-    await fs.mkdir(dir, { recursive: true })
-    const lines: string[] = [`# AgentFeed 周度一页纸 ${week}`, '']
-    if (!clusters.length) lines.push('本周暂无新增蒸馏产物。', '')
-    for (const c of clusters) {
-      lines.push(`## ${c.domain}（${c.count} 条）`, '', c.paragraph, '')
-    }
-    lines.push(`安全忽略（hook.action=ignore）：${skipped} 条`, '')
-    await fs.writeFile(mdPath, lines.join('\n'), 'utf8')
-    await fs.writeFile(jsonPath, JSON.stringify({ week, clusters, skipped }, null, 2), 'utf8')
-    generated = true
+  await fs.mkdir(dir, { recursive: true })
+  const lines: string[] = [`# AgentFeed 周度一页纸 ${week}`, '']
+  if (!clusters.length) lines.push('本周暂无新增蒸馏产物。', '')
+  for (const c of clusters) {
+    lines.push(`## ${c.domain}（${c.count} 条）`, '', c.paragraph, '')
   }
-  return { generated, week, path: generated ? mdPath : undefined, clusters, skipped }
+  lines.push(`安全忽略（hook.action=ignore）：${skipped} 条`, '')
+  await fs.writeFile(mdPath, lines.join('\n'), 'utf8')
+  await fs.writeFile(jsonPath, JSON.stringify({ week, clusters, skipped }, null, 2), 'utf8')
+  return { generated: true, week, path: mdPath, clusters, skipped }
 }
 
 /** 单簇 LLM 增强段：callLlm 强制 JSON 输出（response_format=json_object），故按 {"paragraph":"..."} 形态提取 */
