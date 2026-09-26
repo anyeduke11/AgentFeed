@@ -1,13 +1,13 @@
 # 注意力预算改造：评审结论与修订路线（基于真实基线）
 
-> 版本：v1.2 · 2026-09-26
-> 性质：**评审 + 修订方案**。上游 spec ×3：`AgentFeed注意力预算改造方案-元宝.md`（v2.0 草案）、`AgentFeed 改造方案 v1.0-豆包.md`、`agentfeed-refactor-plan-智谱清言.md`（AF-RFC-2026-001，均已在文头打评审标记）。
+> 版本：v1.3 · 2026-09-26
+> 性质：**评审 + 修订方案（终版排期）**。上游 spec ×3：`AgentFeed注意力预算改造方案-元宝.md`（v2.0 草案）、`AgentFeed 改造方案 v1.0-豆包.md`、`agentfeed-refactor-plan-智谱清言.md`（AF-RFC-2026-001，均已在文头打评审标记）。
 > 数据锚点：2026-09-26 从生产库 `app.db` 拉取的真实消化基线（见 §2）。
-> 排期状态：待评审方案队列 4 份中已评审 3 份，余 1 份（本文档只定路线，实施另行排期）。
+> 排期状态：三份方案评审完成（3/4，第 4 份待发；如无新机制将仅增量并入映射表，不再改路线）。**本版起 §6 为可开工的实施排期。**
 
 ---
 
-## 0. 三方案合成结论（v1.2 更新）
+## 0. 三方案合成结论
 
 三份方案共享同一诊断（注意力稀缺、门禁只有下限、压缩≠减量），能力分布互补：
 
@@ -189,12 +189,64 @@
 
 ---
 
-## 5. 待评审队列
+## 5. 待评审队列与开工口径
 
-本文档为 4 份待评审方案中的评审主文档：元宝 ✅（v1.0）、豆包 ✅（v1.1）、智谱清言 ✅（v1.2），余 1 份待发。后续评审沿用 §2 基线数据与统一口径（诊断真伪 / 与现状冲突 / 概念混淆 / 参数从数据出发），四份齐后统一出合并排期。
+三份方案评审完成：元宝 ✅（v1.0）、豆包 ✅（v1.1）、智谱清言 ✅（v1.2/v1.3）。第 4 份方案待发——**如无新机制，将仅增量并入 §4 映射表，路线与排期不再变更；P0 可即刻开工**。
+
+## 6. 实施排期（v1.3：落点到文件级，可开工）
+
+> 排期基于 2026-09-26 代码侦察锚点（feeder 入队/周目标 config/selectDailyPicks/read_history 索引与 MCP 记账路径均已核实），行号随代码演进需复核。全程遵守 §3「实施行为红线」与仓库 CLAUDE.md 硬规则。
+
+### P0 · 红线清理 + 生命周期基建（≈2 个会话）
+
+| # | 任务 | 落点 | 依据 |
+|---|---|---|---|
+| P0-1 | files 加列 `lifecycle` / `lifecycle_deadline` / `last_touched_at` / `touch_count` / `pinned`（ensureColumns 幂等） | `db.ts` getDb 迁移链 | 豆包 M5 + 智谱 C |
+| P0-2 | touch 回写：Web 打开（files.ts open 已写 read_history 处顺带 UPDATE files）+ MCP read_entry（mcpTools.ts `logMcpConsumption` 顺带）；存量 `last_touched_at` 回填 = read_history 首次 opened_at，无记录 = file_mtime | `routes/files.ts` L148 附近、`mcpTools.ts` L45-52 | 豆包 M5；read_history 已有 idx_read_hist_file 索引 |
+| P0-3 | 红线清理：下线 Overview 停滞提示（>14 天催更）与未读徽标类元素 | `web/src/views/Overview.vue` 周卡区块 | 智谱 P0 / 豆包 §5 |
+| P0-4 | 生命周期日批 job：90d 未触及且 touch≤1 → 降推荐可见性；180d → cold（搜索默认折叠）；pinned 豁免；先 dry_run 报告观测一周再启用 | 复用 `startDailyReportJob` 日批模式挂 `index.ts` | 豆包 M5 + 智谱 C |
+| P0-5 | 灰度开关 `attention.features.lifecycle`（默认 on）+ 全关对等回归跑全量测试 | config seed + 测试 | 智谱 §8.3 |
+
+### P1 · 冷却池 + 蒸馏前去重（≈2 个会话）
+
+| # | 任务 | 落点 | 依据 |
+|---|---|---|---|
+| P1-1 | 新表 `cooling_pool`（CREATE IF NOT EXISTS）+ config `attention.coolingHours`(48) + `attention.features.cooling`(默认 **off**，观测一周期后开) | `db.ts` | 元宝 T3 简化版 |
+| P1-2 | 入池闸门：llm feeder 捞取（llm/index.ts L253-258 的 pending 查询）追加条件——cooling 状态内不喂蒸馏（冷却与蒸馏解耦：文件照常入库，蒸馏延迟）；豁免：webclip 来源 / 路径白名单 / filenameWhitelist | `llm/index.ts` feeder | 元宝；豁免清单见 §3 |
+| P1-3 | 蒸馏前廉价去重：入队前对 30 天窗 embedding 余弦 ≥0.92 → 判 duplicate 落 cold（可检索），不进蒸馏；embedding 未启用降级标题+关键词近似（标 degraded） | `llm/index.ts` feeder（hasFile 去重旁） | 智谱 A-1 |
+| P1-4 | daily 精选接入冷却：`selectDailyPicks`（recommend.ts L184-222）排除 cooling 中条目；精选数量暂不设配额（P3 再限） | `routes/recommend.ts` | 元宝 |
+| P1-5 | suppression_metrics 日表 + daily report 追加抑制段落（collected/deduped/cooling_died/delivered/digested） | `db.ts` + `reports.ts` | 元宝 T6 简化版 + 智谱观测仪表（含「若配额 30 生效今日超额」模拟值） |
+
+### P2 · 三层摘要 + 消化信号 + 周度聚合（≈2~3 个会话）
+
+| # | 任务 | 落点 | 依据 |
+|---|---|---|---|
+| P2-1 | hook 并入蒸馏调用：llmWorker 蒸馏 prompt 追加输出 `{importance, hook{text,verdict,action}}`（超长后处理截断）；存 wiki_entries_meta | `llm/llmWorker.ts` | 智谱 B（零新增调用） |
+| P2-2 | brief 懒生成：首次打开触发异步任务（复用 assess 任务形态），生成中先返 hook | `routes/files.ts` content 或新端点 | 智谱 B |
+| P2-3 | 轻量消化动作：`POST /api/reading/digest`（conclusion 或 one_line_use 二选一 ≥10 字 / minutes / drop）；reading_feedback 兼容并存（stars 打分保留，digest 是新信号） | `routes/reading.ts` | 元宝 T5 + 智谱 E 合并 |
+| P2-4 | 读毕弹层加「留一句消化」；Overview 周卡加消化计数 | `Reader.vue` / `Overview.vue` | 信号飞轮 |
+| P2-5 | 周度一页纸：周日日批，本周 hook-action∈{keep,act_now} 条目按领域聚类 3-5 簇 → LLM 每簇 ≤150 字 | 新 job 挂 `reports.ts` 模式 | 豆包 M4 |
+| P2-6 | 安全忽略报告：与一页纸同期，数字口径对账（collected − read − ignored ≈ 冷却/门禁/下沉/去重之和） | 同上 | 豆包 M6（复用既有数据，不建分类器） |
+
+### P3 · 配额 + 评分参照系 + MCP 熵减（≥50 条消化信号后启动）
+
+| # | 任务 | 说明 |
+|---|---|---|
+| P3-1 | `attention_budget` + daily 精选硬上限（初始配额 = 近 14 天日均消化 ×1.5，clamp 1~10）+ 首屏配额条 | 前置：P2 累计 ≥50 条信号 |
+| P3-2 | marginal 替代全库 novelty 进排序（已读集 Top-K 参照，≥0.85 打「已掌握」）；score_breakdown 随推荐返回 | 智谱 D |
+| P3-3 | MCP 熵减：get_summary（800 字上限/单指针）、read_entry 加 purpose、search_knowledge 加 token_budget 与 include_cold | 豆包 M7 + 智谱 |
+| P3-4 | 自适应调额（digestion_rate 驱动；改配置次日生效，禁即时加额） | 三案合成 |
+
+### 排期原则
+
+1. **P0/P1 不依赖任何用户行为数据**——立刻对 74k 存量减负，随时可开工
+2. **P2 是信号飞轮**——验收只看「日均消化 ≥1 条」，算法参数全部等数据
+3. **P3 有硬门槛**（≥50 条信号）——防止把休眠机器提前上线
+4. 每阶段收尾：`npm test -w server` 全绿 + features 全关对等回归 + `npm run build -w web` 零错
 
 ## 变更日志
 
 - 2026-09-26 v1.0：初稿。基于生产库真实基线（消化率≈0.1、推送面空转、信号源为零）完成元宝方案评审，产出三阶段修订路线。
 - 2026-09-26 v1.1：合并豆包方案评审。新增 §0 双方案合成结论；§3 阶段①吸收 M5 使用侧衰减、阶段②吸收 M4 周度一页纸 + M6 安全忽略报告 + L0/L1/L2 呈现层、阶段③吸收 M7 熵减工具族；新增「实施行为红线」节（豆包 §5 收编）；否决清单扩至 8 项。已评审 2/4。
 - 2026-09-26 v1.2：合并智谱清言方案评审。§0 升三方案结论；阶段①吸收 A-1 蒸馏前去重/pinned/touch/红线清理先行/daily_quota 改观测仪表/灰度开关对等验收；阶段②吸收三层摘要（hook 并蒸馏调用零新增成本）+ marginal 已读集参照系 + one_line_use；阶段③吸收 score_breakdown 与「配额改配置次日生效」；实施行为红线升版为智谱 §11 四域为主；否决清单扩至 10 项（新增：入库配额拦截、MCP 快照-only、deep_read/冷层占比验收值）。已评审 3/4。
+- 2026-09-26 v1.3：新增 §6 文件级实施排期（P0 红线清理+生命周期 / P1 冷却池+蒸馏前去重 / P2 三层摘要+消化信号+周度聚合 / P3 配额+marginal+MCP 熵减，共 20 任务，每项带代码落点与方案依据），排期锚点经代码侦察核实（feeder 入队点 / 周目标 config 键 / selectDailyPicks / read_history 索引与 MCP 记账）。P3 设 ≥50 条消化信号硬门槛。P0 可即刻开工。
