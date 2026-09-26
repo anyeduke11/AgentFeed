@@ -125,6 +125,21 @@ app.listen(PORT, async () => {
   // 每日推式出口：boot 补当天日报（已存在幂等跳过），此后每 5 分钟跨天检查自动生成
   startDailyReportJob()
 
+  // attention P0：生命周期下沉日批——每 6h 检查一次（decay 开关默认关，先靠手动 dry_run 观测；
+  // 开启后每日首跑实际下沉）。挂在日报 job 之后复用 boot 延迟错峰
+  setInterval(() => {
+    import('./attention.js').then(async ({ backfillLastTouched, planDecay, applyDecay }) => {
+      try {
+        await backfillLastTouched()
+        const plan = await planDecay()
+        if (plan.warmIds.length + plan.coldIds.length > 0) {
+          const r = await applyDecay(plan)
+          console.log(`attention decay: ${r.warm} warm / ${r.cold} cold`)
+        }
+      } catch (e) { console.error('attention decay job failed', e) }
+    }).catch(() => {})
+  }, 6 * 60 * 60 * 1000)
+
   // G1 日预算闸：boot 即检 + 每 5 分钟巡检（蒸馏入队时另有 30s 节流即时巡检）；跨天自动复位昨日因预算暂停的队列
   const budgetCheck = () => { enforceDailyBudget(llmQueue).catch((e) => console.error('daily budget check failed', e)) }
   setTimeout(budgetCheck, 10 * 1000)
