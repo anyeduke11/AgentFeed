@@ -4,6 +4,7 @@
 // 即可被 server/test 无副作用验证。既有 7 工具经 mcp.ts import 复用，行为零变化。
 import type { SqliteDatabase } from '@homeofthings/sqlite3'
 import { getDb } from './db.js'
+import { touchFiles } from './attention.js'
 import { aggregateDomainContext, estimateTokens } from './context.js'
 import { getActiveProfile, projectProfile, type ProfileClaim } from './profile/model.js'
 
@@ -48,6 +49,8 @@ export async function logMcpConsumption(kind: 'mcp' | 'mcp_read' | 'mcp_src', fi
     await (await db.prepare(
       'INSERT INTO read_history (file_id, path, source, query) VALUES (?, ?, ?, ?)'
     )).run([fileId, String(filePath || ''), kind, query ?? null])
+    // attention P0：agent 消费即 touch，与 Web 出口同链路（lifecycle 灰度关闭时内部 no-op）
+    await touchFiles([fileId])
   } catch { /* 落账失败不影响工具调用 */ }
 }
 
