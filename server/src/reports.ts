@@ -158,13 +158,18 @@ export function startDailyReportJob() {
       const db = await getDb()
       const r = await generateDailyReport(db, localDateStr(new Date()))
       if (r.generated) console.log(`daily report generated: ${r.date} -> ${r.path}`)
-      // P2-5/2-6：周日顺带触发周度一页纸（幂等由周文件存在性保证；非周日零开销）
-      if (new Date().getDay() === 0) {
-        const w = await buildWeeklyDigest(new Date())
-        if (w.generated) console.log(`weekly digest generated: ${w.week} -> ${w.path}`)
-      }
     } catch (e) {
       console.error('daily report job failed', e)
+    }
+    // P2-5/2-6：周日顺带触发周度一页纸（幂等前置在 buildWeeklyDigest 顶部；非周日零开销）。
+    // 独立 try/catch（review Minor 4）：周报失败记自己的日志，不伪装成日报失败，也不被日报失败连坐跳过
+    if (new Date().getDay() === 0) {
+      try {
+        const w = await buildWeeklyDigest(new Date())
+        if (w.generated) console.log(`weekly digest generated: ${w.week} -> ${w.path}`)
+      } catch (e) {
+        console.error('weekly digest job failed', e)
+      }
     }
   }
   setTimeout(() => { ensure() }, 10 * 1000)

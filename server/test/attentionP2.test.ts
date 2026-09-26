@@ -151,8 +151,19 @@ describe('P2 周度一页纸', () => {
     assert.equal(j.clusters.length, d.clusters.length)
     assert.equal(j.skipped, 1)
     const mtime1 = (await fsp.stat(mdPath)).mtimeMs
-    await buildWeeklyDigest(sunday)
+    // 幂等前置契约（review Important）：缓存命中不重跑聚类/LLM，结果读自同伴 json——
+    // 防回归为「先算后丢」的旧实现（周日每个 ensure() tick 都重调 LLM）
+    const d2 = await buildWeeklyDigest(sunday)
     assert.equal((await fsp.stat(mdPath)).mtimeMs, mtime1, '幂等：周文件已存在不重写')
+    assert.equal(d2.generated, false, '缓存命中 generated=false')
+    assert.equal(d2.path, mdPath, '缓存命中 path 指向既有 md')
+    assert.equal(d2.clusters.length, d.clusters.length, '缓存命中返回同伴 json 的簇')
+    assert.equal(d2.skipped, 1, '缓存命中返回同伴 json 的 skipped')
+    // 同伴 json 缺失/损坏 → 缓存命中仍返回（空簇语义，md 本身是完整一页纸）
+    await fsp.rm(mdPath.replace(/\.md$/, '.json'))
+    const d3 = await buildWeeklyDigest(sunday)
+    assert.deepEqual(d3.clusters, [], '同伴 json 缺失时缓存命中返回空簇')
+    assert.equal(d3.skipped, 0)
   })
 
   test('buildWeeklyDigest：空周返回空簇零忽略', async () => {
