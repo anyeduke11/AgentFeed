@@ -230,6 +230,9 @@ llmQueue.setExecutor(async (job) => {
 const FEED_WATERMARK = 8
 /** 每次从 DB 补充的任务数 */
 const FEED_BATCH = 16
+/** 闸 2（蒸馏前去重）tick 互斥护栏：embedding 慢（分钟级）时 3s tick 会重叠堆叠、
+ *  每个候选串行 embed 近邻——busy 期间后续 tick 跳过闸 2 且不入队（候选留待下个 tick），防饿死 */
+let attentionDedupBusy = false
 
 /**
  * DB 驱动的队列调度器：周期性把 llm_state='pending' 的文件喂入内存队列。
@@ -265,15 +268,25 @@ export async function startLlmFeeder() {
         LIMIT ${FEED_BATCH}
       `)).all() as any[]
       let fed = 0
+      let dedupDeferred = false
       for (const r of rows) {
         if (llmQueue.hasFile(r.id)) continue
         // P1 双闸：任何异常不得中断 feeder——fail-open 放行走原流程（与 findDuplicates 内部 fail-closed 一致）
         try {
           if (await isCooling(r.id)) continue // 闸 1：冷却中不喂蒸馏
+          if (attentionDedupBusy) {           // 闸 2 互斥：上一 tick 查重未结束 → 本候选及本批后续整体留待下个 tick（不入队，防 tick 堆叠饿死）
+            if (!dedupDeferred) { dedupDeferred = true; console.log('llm feeder: gate2 busy, candidates deferred to next tick') }
+            continue
+          }
           if (fAttention.cooling) {           // 闸 2：蒸馏前廉价去重（统一由 cooling 总开关驱动）
-            const trow = await (await db.prepare("SELECT COALESCE(NULLIF(title, ''), name) AS t FROM files WHERE id = ?")).get(r.id) as any
-            const verdict = await findDuplicates(r.id, String(trow?.t || ''), embedTitle)
-            if (verdict.duplicate) { await markDuplicate(r.id, verdict.reason); continue }
+            attentionDedupBusy = true
+            try {
+              const trow = await (await db.prepare("SELECT COALESCE(NULLIF(title, ''), name) AS t FROM files WHERE id = ?")).get(r.id) as any
+              const verdict = await findDuplicates(r.id, String(trow?.t || ''), embedTitle)
+              if (verdict.duplicate) { await markDuplicate(r.id, verdict.reason); continue }
+            } finally {
+              attentionDedupBusy = false
+            }
           }
         } catch (e: any) {
           console.error('llm feeder attention gate error:', String(e?.message || e))

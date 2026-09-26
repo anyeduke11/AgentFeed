@@ -104,6 +104,28 @@ describe('P1 去重判定与 feeder 闸', () => {
     assert.equal(row.llm_state, 'skipped') // 枚举含 skipped（files 建表 CHECK），feeder 只拾 pending 不会死循环
   })
 
+  test('findDuplicates 快速路径：标题扩展名归一（feeder 传 name 含 .md，wiki 标题不含——不剥则快速路径不可达）', async () => {
+    const db = await getDb()
+    const { findDuplicates } = await import('../src/attention.js')
+    const embedThrows = async () => { throw new Error('embedding 未启用') }
+    const a = await mkFile('/p1/ext-a.md')
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at) VALUES (${a}, '/wiki/p1/ext-a.md', '一键部署完全指南', 'x', datetime('now'))`)
+    const b = await mkFile('/p1/ext-b.md')
+    // 候选带 .md、近邻不带：必须命中快速路径判重；若归一缺失则落 embed → 抛错 → ok_degraded 不判重，断言即失败
+    const v = await findDuplicates(b, '一键部署完全指南.md', embedThrows)
+    assert.equal(v.duplicate, true)
+    // 反向防御：近邻标题带扩展名、候选不带 → 剥除后仍判重（meta.file_id UNIQUE → 挂独立文件）
+    const a2 = await mkFile('/p1/ext-a2.md')
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, summary, distilled_at) VALUES (${a2}, '/wiki/p1/ext-a2.md', '一键部署完全指南.html', 'x', datetime('now'))`)
+    const c = await mkFile('/p1/ext-c.md')
+    const v2 = await findDuplicates(c, '一键部署完全指南', embedThrows)
+    assert.equal(v2.duplicate, true)
+    // 负例：剥扩展名后仍不同 → 不判重（快速路径未误伤）
+    const d = await mkFile('/p1/ext-d.md')
+    const v3 = await findDuplicates(d, '一键部署完全指南进阶.md', embedThrows)
+    assert.equal(v3.duplicate, false)
+  })
+
   test('feeder 闸：冷却中文件不喂蒸馏，released 后恢复', async () => {
     const db = await getDb()
     const { enterCooling, isCooling } = await import('../src/attention.js')

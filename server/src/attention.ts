@@ -133,8 +133,9 @@ export async function releaseExpired(): Promise<{ released: number }> {
 export interface DupVerdict { duplicate: boolean; reason: string; degraded: boolean }
 
 /** 蒸馏前去重：embedding 可用 → 与近 30 天已蒸馏条目标题向量比相似度（≥0.92 判重）；
- *  不可用 → 降级为标题精确匹配（degraded 标注）。近邻限 200 条防大产出自爆；
- *  标题精确匹配走零成本快速路径（命中即停），未命中才逐条 embed。
+ *  不可用 → 降级为标题精确匹配（degraded 标注）。近邻限 50 条（按 distilled_at 取最新）防大产出自爆；
+ *  标题精确匹配走零成本快速路径（命中即停；两侧剥 .md/.html 扩展名归一——feeder 传 COALESCE(title,name)
+ *  时 name 含扩展名而 wiki 标题不含，不归一则快速路径永不可达），未命中才逐条 embed。
  *  fail-closed：查重失败不判重，放行走原流程 */
 export async function findDuplicates(fileId: number, title: string, embed: (t: string) => Promise<number[]> = callEmbedding): Promise<DupVerdict> {
   const db = await getDb()
@@ -142,11 +143,11 @@ export async function findDuplicates(fileId: number, title: string, embed: (t: s
     SELECT m.file_id, m.title FROM wiki_entries_meta m
     JOIN files f ON f.id = m.file_id
     WHERE m.distilled_at >= datetime('now', '-30 days') AND f.id != ? AND COALESCE(m.title, '') != ''
-    ORDER BY m.distilled_at DESC LIMIT 200`)).all(fileId) as any[]
+    ORDER BY m.distilled_at DESC LIMIT 50`)).all(fileId) as any[]
   if (!rows.length) return { duplicate: false, reason: 'no_neighbors', degraded: false }
-  // 快速路径：标题精确匹配（大小写不敏感），零 embedding 成本
-  const norm = title.trim().toLowerCase()
-  const exact = norm ? rows.find(r => String(r.title).trim().toLowerCase() === norm) : undefined
+  // 快速路径：标题精确匹配（大小写不敏感 + 两侧剥 .md/.htm/.html 扩展名），零 embedding 成本
+  const normTitle = title.trim().replace(/\.(md|html?)$/i, '').toLowerCase()
+  const exact = normTitle ? rows.find(r => String(r.title).trim().replace(/\.(md|html?)$/i, '').toLowerCase() === normTitle) : undefined
   if (exact) return { duplicate: true, reason: `duplicate_of:${exact.file_id}`, degraded: true }
   try {
     const target = await embed(title)
