@@ -149,7 +149,7 @@ export interface ConvertResult {
 }
 
 /** 剪藏核心：URL → 抓取 → 限额/门禁 → md/html 落盘 → 扫描回填 file_id。deps 可注入（测试不触网）；记录写入留在路由层 */
-export async function convertCore(url: string, opts: { snapshot?: boolean; force?: boolean } = {}, deps: ConvertDeps = {}): Promise<ConvertResult> {
+export async function convertCore(url: string, opts: { snapshot?: boolean; force?: boolean; reuseBase?: string } = {}, deps: ConvertDeps = {}): Promise<ConvertResult> {
   const t0 = Date.now()
   const snapshot = opts.snapshot !== false
   const render = deps.renderPage ?? renderPage
@@ -175,7 +175,8 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   if (Buffer.byteLength(html) > limits.pageMaxMB * 1024 * 1024) throw new WebclipError('toolarge', `页面超过 ${limits.pageMaxMB}MB 限额`)
 
   const { title, markdown, images } = htmlToMarkdown(html, String(url), limits.imgMaxCount, imgFilter)
-  const base = reserveBase(storageRoot, buildDocBase(title))
+  // 重新剪藏（reuseBase）：复用原 base 直接覆盖原文件（scanner 按 path upsert → 同 file_id、重蒸馏）；新剪藏走冲突安全的 reserveBase
+  const base = opts.reuseBase || reserveBase(storageRoot, buildDocBase(title))
   const mdPath = path.join(storageRoot, `${base}.md`)
   const htmlPath = path.join(storageRoot, `${base}.html`)
   // 落盘边界（红线 1 写侧对偶）：目标必须在已启用扫描根内（先于任何磁盘写入）
@@ -283,6 +284,24 @@ async function markRetryFailed(recordId: number, code: string, e: any) {
   }
 }
 
+/** 重新剪藏成功记录：复用原 base 直接覆盖原始 md/html 文件（同路径 → scanner upsert 同 file_id → 重蒸馏），原行原地更新 */
+export async function reclipRecord(recordId: number, deps: ConvertDeps = {}): Promise<ConvertResult> {
+  const db = await getDb()
+  const row = await (await db.prepare('SELECT * FROM webclip_records WHERE id = ?')).get(recordId) as any
+  if (!row) throw new WebclipError('config', '记录不存在')
+  if (row.status !== 'success') throw new WebclipError('config', '仅成功记录支持重新剪藏，失败记录请用「重试」')
+  if (!row.slug_ts) throw new WebclipError('config', '记录缺少原文件标识，无法覆盖（请改用新剪藏）')
+  const r = await convertCore(String(row.url), { snapshot: !!row.snapshot, force: true, reuseBase: String(row.slug_ts) }, deps)
+  await db.exec(`UPDATE webclip_records SET
+    title = '${esc(r.title || '')}',
+    md_file_id = ${r.mdFileId ?? 'NULL'},
+    html_file_id = ${r.htmlFileId ?? 'NULL'},
+    snapshot = ${r.snapshot ? 1 : 0},
+    duration_ms = ${r.durationMs}
+    WHERE id = ${recordId}`)
+  return r
+}
+
 webclipRouter.post('/convert', async (req, res) => {
   const { url, snapshot = true, force = false } = req.body as { url?: string; snapshot?: boolean; force?: boolean }
   if (!url) return res.status(400).json({ success: false, message: 'url 必填' })
@@ -313,6 +332,23 @@ webclipRouter.post('/records/:id/retry', async (req, res) => {
   } catch (e: any) {
     const code = e instanceof WebclipError ? e.code : 'fetch'
     if (code !== 'dup' && code !== 'config') await markRetryFailed(id, code, e) // 重试再失败：原行置 failed（code 同步落库）
+    res.status(STATUS_BY_CODE[code] ?? 500).json({ success: false, code, message: e?.message || String(e) })
+  } finally {
+    clipBusy = false
+  }
+})
+
+/** 重新剪藏：覆盖原文件重蒸馏。任何失败不改原行（原产物仍可用） */
+webclipRouter.post('/records/:id/reclip', async (req, res) => {
+  const id = parseInt(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'id 非法' })
+  if (clipBusy) return res.status(429).json({ success: false, code: 'busy', message: '已有剪藏任务执行中，请稍后再试' })
+  clipBusy = true
+  try {
+    const r = await reclipRecord(id)
+    res.json(r)
+  } catch (e: any) {
+    const code = e instanceof WebclipError ? e.code : 'fetch'
     res.status(STATUS_BY_CODE[code] ?? 500).json({ success: false, code, message: e?.message || String(e) })
   } finally {
     clipBusy = false
