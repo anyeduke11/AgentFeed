@@ -3,7 +3,7 @@ import { getDb } from '../db.js'
 import { llmQueue } from '../llm/index.js'
 import { getProviders, getDefaultModel } from '../llm/llmClient.js'
 import { ensureTag } from '../llm/tagGovernance.js'
-import { attentionFeatures } from '../attention.js'
+import { attentionFeatures, applyBudget } from '../attention.js'
 
 export const recommendRouter = Router()
 
@@ -233,7 +233,9 @@ recommendRouter.get('/daily', async (req, res) => {
   try {
     const db = await getDb()
     const items = await selectDailyPicks(db)
-    res.json({ items, date: localDateStr(new Date()) })
+    // P3 配额双上限：默认 disabled 原样透传；响应同时补 success（红线 4 对齐）
+    const budgeted = await applyBudget(items)
+    res.json({ success: true, ...budgeted, date: localDateStr(new Date()) })
   } catch (e: any) {
     console.error('recommend daily failed', e)
     res.status(500).json({ success: false, message: String(e) })

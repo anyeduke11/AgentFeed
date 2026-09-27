@@ -173,7 +173,7 @@ export const api = {
     remove: (id: number) => del(`${base}/recommend/${id}`),
     curated: () => getJSON<{ items: any[]; lastAt: string | null }>(`${base}/recommend/curated`),
     curate: () => post(`${base}/recommend/curate`),
-    daily: () => getJSON<{ items: any[]; date: string }>(`${base}/recommend/daily`)
+    daily: () => getJSON<{ success: boolean; items: any[]; softCapped?: boolean; hardCapped?: boolean; hiddenTotal?: number; date: string }>(`${base}/recommend/daily`)
   },
   // 日报/周报出口（daily 落 read_history 埋点走 files open 语义，此处仅拉取）
   reports: {

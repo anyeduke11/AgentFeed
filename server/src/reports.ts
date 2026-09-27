@@ -64,6 +64,7 @@ function renderMarkdown(date: string, stats: { count: number; avgQuality: number
   if (supText) {
     lines.push('## 安全忽略')
     lines.push(`- ${supText}`)
+    if (sup && Number(sup.hidden_total) > 0) lines.push(`- 另有 ${sup.hidden_total} 条已入库未消费`)
     lines.push('')
   }
   lines.push('## 值得看 3 篇')
@@ -84,7 +85,8 @@ function renderMarkdown(date: string, stats: { count: number; avgQuality: number
 function renderHtml(date: string, stats: { count: number; avgQuality: number | null }, picks: any[], sup?: Record<string, number>): string {
   const avg = stats.avgQuality != null ? `（平均质量分 ${escapeHtml(stats.avgQuality.toFixed(1))}）` : ''
   const supText = suppressionText(sup)
-  const supHtml = supText ? `<h2>安全忽略</h2>\n<p>${escapeHtml(supText)}</p>\n` : ''
+  const supHidden = supText && sup && Number(sup.hidden_total) > 0 ? `\n<p>${escapeHtml(`另有 ${sup.hidden_total} 条已入库未消费`)}</p>` : ''
+  const supHtml = supText ? `<h2>安全忽略</h2>\n<p>${escapeHtml(supText)}</p>${supHidden}\n` : ''
   const itemsHtml = picks.length
     ? picks.map(p => `
     <li>

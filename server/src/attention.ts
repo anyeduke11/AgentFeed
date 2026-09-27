@@ -191,7 +191,8 @@ export async function markDuplicate(fileId: number, dupOf?: string): Promise<voi
  *  （lifecycle=cold + llm_state=skipped，按 updated_at 日）；cooling_alive/cooling_died=池内
  *  状态机快照（death_reason 当前无写入方，P2 起有值）；delivered 预留 0（recommendations 无
  *  交付时间字段）；digested=当日已消化行（digest_text 非空，P2 起不含 /rate 打分行）；simulated_quota_overflow=max(0, collected-30)
- *  ——智谱观测仪表：若配额 30 生效今日超额多少，只记不拦 */
+ *  ——智谱观测仪表：若配额 30 生效今日超额多少，只记不拦；hidden_total=collected−digested（下限 0，
+ *  P3 观测口径：入库了但没消费的） */
 export async function suppressionToday(): Promise<Record<string, number>> {
   const db = await getDb()
   const cnt = async (sql: string): Promise<number> => {
@@ -214,5 +215,45 @@ export async function suppressionToday(): Promise<Record<string, number>> {
     delivered,
     digested,
     simulated_quota_overflow: Math.max(0, collected - 30),
+    hidden_total: Math.max(0, collected - digested),
+  }
+}
+
+/* ---- P3 每日配额双上限（千问形态：80% soft 部分呈现 / 100% hard 即停 + hidden_total 内联） ---- */
+
+export interface BudgetConfig { enabled: boolean; dailyLimit: number; softPct: number }
+export interface Budgeted<T> { items: T[]; softCapped: boolean; hardCapped: boolean; hiddenTotal: number }
+
+const BUDGET_DEFAULT: BudgetConfig = { enabled: false, dailyLimit: 5, softPct: 80 }
+
+/** P3 配额读侧（缺省兜底：坏 JSON / 缺键 / 非法数值 → 默认关闭。INSERT OR IGNORE 对既有库不回填新键，读侧不得依赖 seed） */
+export async function getBudget(): Promise<BudgetConfig> {
+  const db = await getDb()
+  const row = await (await db.prepare("SELECT value FROM config WHERE key = 'attention.budget'")).get() as any
+  try {
+    const b = JSON.parse(String(row?.value || '{}'))
+    return {
+      enabled: b.enabled === true,
+      dailyLimit: Number.isFinite(b.dailyLimit) && b.dailyLimit >= 1 ? Math.floor(b.dailyLimit) : BUDGET_DEFAULT.dailyLimit,
+      softPct: Number.isFinite(b.softPct) && b.softPct > 0 && b.softPct <= 100 ? b.softPct : BUDGET_DEFAULT.softPct,
+    }
+  } catch { return { ...BUDGET_DEFAULT } }
+}
+
+/** 千问双上限：softLimit=ceil(dailyLimit×softPct/100)，超过则截到 softLimit 标 softCapped（部分呈现）；
+ *  截到 softLimit 后仍达到 dailyLimit（softPct=100 或小 limit 圆整到上限时）→ hardCapped 同真——
+ *  hard wins 标注但切片维持 softLimit 不二次收紧；hiddenTotal = 原长 − 切片长。
+ *  注意 hard 判定用切片后长度（测试 r1 钉死：6 条 limit5 soft80 → 截 4，4<5 不标 hard）；
+ *  disabled 原样透传零标注（默认关闭 = 行为与改造前完全一致） */
+export async function applyBudget<T extends { file_id: number }>(items: T[]): Promise<Budgeted<T>> {
+  const b = await getBudget()
+  if (!b.enabled) return { items, softCapped: false, hardCapped: false, hiddenTotal: 0 }
+  const softLimit = Math.ceil(b.dailyLimit * b.softPct / 100)
+  const sliced = items.length > softLimit ? items.slice(0, softLimit) : items
+  return {
+    items: sliced,
+    softCapped: sliced.length < items.length,
+    hardCapped: sliced.length >= b.dailyLimit,
+    hiddenTotal: items.length - sliced.length,
   }
 }
