@@ -38,7 +38,7 @@
       </div>
       <div v-if="!records.length" class="cap sect-empty">还没有剪藏记录 · 粘贴一个链接试试</div>
       <table v-else class="rtable">
-        <thead><tr><th>时间</th><th>标题</th><th>URL</th><th>状态</th><th>耗时</th><th>文件</th><th style="text-align:right">错误</th></tr></thead>
+        <thead><tr><th>时间</th><th>标题</th><th>URL</th><th>状态</th><th>耗时</th><th>文件</th><th style="text-align:right">错误</th><th style="text-align:right">处理</th></tr></thead>
         <tbody>
           <tr v-for="r in records" :key="r.id">
             <td class="c-dim mono">{{ fmtTime(r.created_at) }}</td>
@@ -50,11 +50,16 @@
               <template v-if="r.status === 'success'">
                 <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">md</button>
                 <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id, 'webclip')">html</button>
-                <button class="btn xs" style="margin-left:4px" :disabled="submitting" title="重新抓取并覆盖原文件（同路径重蒸馏）" @click="reclipOne(r)">重剪</button>
               </template>
               <button v-else-if="r.status === 'failed'" class="btn xs" :disabled="submitting" @click="retryOne(r)">重试</button>
             </td>
             <td style="text-align:right"><span class="c-dim cap mono">{{ r.error ? r.error.slice(0, 60) : '' }}</span></td>
+            <td style="text-align:right;white-space:nowrap">
+              <template v-if="r.status === 'success'">
+                <button class="btn xs" :disabled="submitting || deletingId === r.id" title="重新抓取并覆盖原文件（同路径重蒸馏）" @click="reclipOne(r)">{{ deletingId === r.id ? '…' : '重剪' }}</button>
+                <button class="btn xs" style="margin-left:4px" :disabled="submitting || deletingId === r.id" title="删除记录及其 md/html/资产文件（蒸馏产物保留在库中）" @click="deleteOne(r)">删除</button>
+              </template>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -126,6 +131,7 @@ async function submit() {
 const codeLabel = (c: string) => ({ ssrf: 'SSRF拦截', dup: '重复', fetch: '网络', notready: '未就绪', toolarge: '超大', config: '配置', busy: '忙' }[c] || c)
 
 const copiedId = ref<number | null>(null)
+const deletingId = ref<number | null>(null)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 async function copyUrl(r: any) {
   try {
@@ -149,6 +155,24 @@ async function reclipOne(r: any) {
     lastResult.value = { ok: false, msg: `重新剪藏请求失败：${e?.message || e}` }
   } finally {
     submitting.value = false
+    await loadRecords(page.value)
+  }
+}
+
+async function deleteOne(r: any) {
+  if (submitting.value || deletingId.value) return
+  if (!confirm(`确认删除剪藏「${r.title || r.url}」？\n将删除记录及其 md/html/图片资产文件（库中已蒸馏的摘要/标签保留）。`)) return
+  deletingId.value = r.id
+  lastResult.value = null
+  try {
+    const res = await api.webclip.remove(r.id)
+    lastResult.value = res.success
+      ? { ok: true, msg: `已删除：${(res.removed || []).join('、') || '记录'}（文件与资产已清理）` }
+      : { ok: false, msg: res.message || '删除失败' }
+  } catch (e: any) {
+    lastResult.value = { ok: false, msg: `删除请求失败：${e?.message || e}` }
+  } finally {
+    deletingId.value = null
     await loadRecords(page.value)
   }
 }

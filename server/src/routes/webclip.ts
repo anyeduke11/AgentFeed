@@ -371,6 +371,40 @@ webclipRouter.post('/records/:id/reclip', async (req, res) => {
   }
 })
 
+/** 删除成功记录：记录行 + md/html 文件 + assets 目录一并清理。蒸馏产物（wiki 词条/摘要）保留在库中不回溯。
+ *  落盘边界（红线 1 删侧对偶）：删除目标必须逐一落在已启用扫描根内 */
+webclipRouter.delete('/records/:id', async (req, res) => {
+  const id = parseInt(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ success: false, message: 'id 非法' })
+  try {
+    const db = await getDb()
+    const row = await (await db.prepare('SELECT * FROM webclip_records WHERE id = ?')).get(id) as any
+    if (!row) return res.status(404).json({ success: false, message: '记录不存在' })
+    if (row.status !== 'success') return res.status(409).json({ success: false, message: '仅成功记录支持删除（失败记录可直接忽略或等重试）' })
+    const targets = [row.md_path, row.html_path].filter(Boolean) as string[]
+    for (const t of targets) {
+      if (!(await withinScanRoots(db, String(t)))) return res.status(400).json({ success: false, message: `删除目标不在已启用扫描根内：${t}` })
+    }
+    let removed: string[] = []
+    for (const t of targets) {
+      try { await fs.rm(String(t), { force: true }); removed.push(path.basename(String(t))) } catch { /* 单个失败不阻断 */ }
+    }
+    // assets 目录：md_path 对应 base 的资产目录整体删除（含可能残留的孤儿）
+    if (row.md_path) {
+      const base = path.basename(String(row.md_path)).replace(/\.(md|html)$/, '')
+      const assetsDir = path.join(path.dirname(String(row.md_path)), 'assets', base)
+      if (await withinScanRoots(db, assetsDir)) {
+        try { await fs.rm(assetsDir, { recursive: true, force: true }) } catch { /* 目录不存在或占用：忽略 */ }
+      }
+    }
+    await db.exec(`DELETE FROM webclip_records WHERE id = ${id}`)
+    res.json({ success: true, removed })
+  } catch (e: any) {
+    console.error('webclip /records/:id delete failed', e)
+    res.status(500).json({ success: false, message: e?.message || String(e) })
+  }
+})
+
 webclipRouter.put('/limits', async (req, res) => {
   try {
     const body = (req.body || {}) as Record<string, unknown>
