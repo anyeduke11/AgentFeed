@@ -876,9 +876,20 @@ chatRouter.post('/sessions/:id/distill', async (req, res) => {
     const db = await getDb()
     const markdown = String(req.body?.markdown ?? '')
     const sessionId = String(req.params.id || '').trim()
-    const filePath = await writeSessionExport(db, sessionId, markdown, req.body?.dir)
+    const dir = await resolveExportDir(db, req.body?.dir) // 红线 1：无论复用与否，落盘目录先过扫描根边界校验
+    const title = markdownTitle(markdown, sessionId)
+    // 幂等落盘：同会话同标题复用既有文件路径。秒级时间戳文件名使「already 幂等」只能靠同秒路径碰撞偶然
+    // 触发——跨秒重复蒸馏会产生重复文件 + 重复词条（全量测试并发下曾偶发暴露此真实缺陷）。
+    // 复用后 import 内核按 entry_path 稳定判 already：蒸馏语义 = 每会话每标题至多一条词条（重蒸馏覆盖文件内容）。
+    const priorRows = await (await db.prepare(
+      "SELECT file_path FROM chat_export_logs WHERE kind = 'distill' AND session_id = ? AND title = ? ORDER BY id DESC LIMIT 20"
+    )).all([sessionId, title.slice(0, 120)]) as any[]
+    const prior = priorRows.map(r => String(r.file_path)).find(p => path.dirname(p) === dir)
+    const filePath = prior ?? path.join(dir, `${title}-${stampNow()}.md`)
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(filePath, markdown, 'utf8')
     const mount = await importMarkdownFile(db, filePath)
-    await logExport(db, 'distill', sessionId, markdownTitle(markdown, sessionId), filePath, { match: mount.match, entryId: mount.entryId, chars: markdown.length })
+    await logExport(db, 'distill', sessionId, title, filePath, { match: mount.match, entryId: mount.entryId, chars: markdown.length })
     res.json({ success: mount.ok, path: filePath, match: mount.match, entryId: mount.entryId })
   } catch (e: any) {
     res.status(400).json({ success: false, message: String(e?.message || e) })

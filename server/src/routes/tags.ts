@@ -32,12 +32,21 @@ tagsRouter.get('/', wrap(async (req, res) => {
   const orderSql = sort === 'name'
     ? 't.name'
     : "CASE t.level WHEN 'primary' THEN 0 WHEN 'secondary' THEN 1 ELSE 2 END, file_count DESC, t.name"
+  // 挂载计数口径（修复「一级标签挂载 ≠ 分拣区领域成员数」失真）：
+  // - 一级锚定标签（领域化身）→ 直接取领域 active 成员数。「领域 ≡ 同名一级标签」不变式的成员半边：
+  //   标签挂载（蒸馏自由打标）与领域归属（蒸馏精确匹配 + 手动）是两条独立写入链路，展示层各数各的
+  //   必然失真（曾现 72 vs 13,989 的 194 倍倒挂）；与分拣区同为 active 口径后两视图天然一致。
+  // - 其余标签 → 只数 active 文件的挂载（删除文件不清理 file_tags，raw 计数曾混入 7k+ 死挂载）
   const items = await (await db.prepare(`
-    SELECT t.*, pt.name AS parent_name, d.color AS domain_color, COUNT(ft.file_id) AS file_count FROM tags t
-    LEFT JOIN file_tags ft ON ft.tag_id = t.id
+    SELECT t.*, pt.name AS parent_name, d.color AS domain_color,
+      CASE WHEN t.level = 'primary' AND t.domain_id IS NOT NULL
+        THEN (SELECT COUNT(*) FROM files f WHERE f.domain_id = t.domain_id AND f.status = 'active')
+        ELSE (SELECT COUNT(*) FROM file_tags x JOIN files f2 ON f2.id = x.file_id AND f2.status = 'active' WHERE x.tag_id = t.id)
+      END AS file_count
+    FROM tags t
     LEFT JOIN tags pt ON pt.id = t.parent_tag_id
     LEFT JOIN domains d ON d.id = t.domain_id${whereSql}
-    GROUP BY t.id ORDER BY ${orderSql} LIMIT ${lim} OFFSET ${off}
+    ORDER BY ${orderSql} LIMIT ${lim} OFFSET ${off}
   `)).all(params) as any[]
   const totalRow = await (await db.prepare(`
     SELECT COUNT(DISTINCT t.id) AS n FROM tags t LEFT JOIN file_tags ft ON ft.tag_id = t.id${whereSql}
