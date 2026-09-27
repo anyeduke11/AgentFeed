@@ -114,7 +114,7 @@ test('P1-①b 尾部斜杠扫描根下的文件不得被孤儿清理误伤（生
   // WHY: scan_roots.path 允许带尾斜杠（POST /api/roots 原样存），而 walk() 用 path.join 产出的
   // 文件路径永远没有尾斜杠 → 「path = root OR path LIKE root || '/%'」对这类根永久失配，
   // 该根下所有 active 文件都会被孤儿判定误认为是无主文件。实测生产库存在此形态根
-  // /Users/duke/Documents/，其下 24116 个 active 文件占全库 48435 个的 49.8%。
+  // /Users/demo/Documents/，其下 24116 个 active 文件占全库 48435 个的 49.8%。
   // 正确期望：覆盖判断前先归一化根路径，带尾斜杠的根与其子文件一样保持 active。
   const root = await makeRoot({ 'note.md': LONG, 'sub/deep.md': LONG })
   await mountRoot(root + '/') // 故意带尾斜杠挂载

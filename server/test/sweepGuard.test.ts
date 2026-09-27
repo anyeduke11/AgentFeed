@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { planTombstoneSweep, SWEEP_TOMBSTONE_CAP } from '../src/scanner.js'
 
-// 软删配额护栏（2026-09-20 实机事故）：/Users/duke/Documents/lingxi-claw 下若干目录是
+// 软删配额护栏（2026-09-20 实机事故）：/Users/demo/Documents/<agent-project> 下若干目录是
 // 指向 WPS 安装目录的符号链接，而 walk() 用 entry.isDirectory() 判断、不进符号链接目录，
 // 于是那轮增量扫描把「本次没走到」当成「已从磁盘删除」，一次性墓碑化 13,673 个仍在磁盘上的
 // 文件（至今未自愈）。个人电脑上宁可慢：一轮自动扫描不得整批清空一个根。

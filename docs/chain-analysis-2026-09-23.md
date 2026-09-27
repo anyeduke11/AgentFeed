@@ -1,9 +1,9 @@
 # AgentFeed 采集、门禁、蒸馏、消费链路结构化分析报告
 
 - **报告时间**: 2026-09-23 14:55
-- **项目路径**: `/Users/duke/Documents/AgentFeed`
+- **项目路径**: `~/Documents/AgentFeed`
 - **分析对象**: AgentFeed 全仓代码、设计文档、前后端实现、当前运行数据库、自动化测试
-- **数据库快照**: `/Users/duke/Documents/AgentFeed/server/data/app.db`
+- **数据库快照**: `~/Documents/AgentFeed/server/data/app.db`
 - **报告性质**: 只读分析 + 验证报告；本报告不包含业务代码修复
 - **验证命令**:
   - `npm test -w server`：通过，346 tests passed，0 failed
@@ -55,77 +55,77 @@ AgentFeed 当前已经形成一条较完整的本地知识生产和消费管线�
 
 #### 后端核心链路
 
-- `/Users/duke/Documents/AgentFeed/server/src/index.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/scanner.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/watcher.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/gate.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/extractor.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/db.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/knowledge.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/context.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/mcp.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/mcpTools.ts`
+- `~/Documents/AgentFeed/server/src/index.ts`
+- `~/Documents/AgentFeed/server/src/scanner.ts`
+- `~/Documents/AgentFeed/server/src/watcher.ts`
+- `~/Documents/AgentFeed/server/src/gate.ts`
+- `~/Documents/AgentFeed/server/src/extractor.ts`
+- `~/Documents/AgentFeed/server/src/db.ts`
+- `~/Documents/AgentFeed/server/src/knowledge.ts`
+- `~/Documents/AgentFeed/server/src/context.ts`
+- `~/Documents/AgentFeed/server/src/mcp.ts`
+- `~/Documents/AgentFeed/server/src/mcpTools.ts`
 
 #### LLM、蒸馏、向量与检索
 
-- `/Users/duke/Documents/AgentFeed/server/src/llm/index.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmQueue.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmWorker.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmClient.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/embeddings.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/hybrid.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/ftsIndex.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/chunkEmbed.ts`
+- `~/Documents/AgentFeed/server/src/llm/index.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmQueue.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmWorker.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmClient.ts`
+- `~/Documents/AgentFeed/server/src/llm/embeddings.ts`
+- `~/Documents/AgentFeed/server/src/search/hybrid.ts`
+- `~/Documents/AgentFeed/server/src/search/ftsIndex.ts`
+- `~/Documents/AgentFeed/server/src/search/chunkEmbed.ts`
 
 #### HTTP API
 
-- `/Users/duke/Documents/AgentFeed/server/src/routes/files.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/scan.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/gate.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/llm.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/wiki.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/search.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/chat.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/recommend.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/reading.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/stats.ts`
+- `~/Documents/AgentFeed/server/src/routes/files.ts`
+- `~/Documents/AgentFeed/server/src/routes/scan.ts`
+- `~/Documents/AgentFeed/server/src/routes/gate.ts`
+- `~/Documents/AgentFeed/server/src/routes/llm.ts`
+- `~/Documents/AgentFeed/server/src/routes/wiki.ts`
+- `~/Documents/AgentFeed/server/src/routes/search.ts`
+- `~/Documents/AgentFeed/server/src/routes/chat.ts`
+- `~/Documents/AgentFeed/server/src/routes/recommend.ts`
+- `~/Documents/AgentFeed/server/src/routes/reading.ts`
+- `~/Documents/AgentFeed/server/src/routes/stats.ts`
 
 #### 前端消费界面
 
-- `/Users/duke/Documents/AgentFeed/web/src/api.ts`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Overview.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Pipeline.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Library.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Entry.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Reader.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Chat.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Supply.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/stores/useFilesStore.ts`
-- `/Users/duke/Documents/AgentFeed/web/src/stores/useLlmStore.ts`
-- `/Users/duke/Documents/AgentFeed/web/src/stores/useWikiStore.ts`
+- `~/Documents/AgentFeed/web/src/api.ts`
+- `~/Documents/AgentFeed/web/src/views/Overview.vue`
+- `~/Documents/AgentFeed/web/src/views/Pipeline.vue`
+- `~/Documents/AgentFeed/web/src/views/Library.vue`
+- `~/Documents/AgentFeed/web/src/views/Entry.vue`
+- `~/Documents/AgentFeed/web/src/views/Reader.vue`
+- `~/Documents/AgentFeed/web/src/views/Chat.vue`
+- `~/Documents/AgentFeed/web/src/views/Supply.vue`
+- `~/Documents/AgentFeed/web/src/stores/useFilesStore.ts`
+- `~/Documents/AgentFeed/web/src/stores/useLlmStore.ts`
+- `~/Documents/AgentFeed/web/src/stores/useWikiStore.ts`
 
 #### 设计文档
 
-- `/Users/duke/Documents/AgentFeed/docs/gate-design.md`
-- `/Users/duke/Documents/AgentFeed/docs/knowledge-flywheel-design.md`
-- `/Users/duke/Documents/AgentFeed/docs/dual-consumer-exits-design.md`
-- `/Users/duke/Documents/AgentFeed/docs/context-kernel.md`
-- `/Users/duke/Documents/AgentFeed/docs/feedback-loop-design.md`
-- `/Users/duke/Documents/AgentFeed/docs/llm-failure-attribution.md`
-- `/Users/duke/Documents/AgentFeed/docs/reading-recommendation-prd.md`
-- `/Users/duke/Documents/AgentFeed/docs/v0.1.5-prd.md`
-- `/Users/duke/Documents/AgentFeed/docs/privacy-boundary.md`
-- `/Users/duke/Documents/AgentFeed/docs/search-baseline-2026-10.md`
+- `~/Documents/AgentFeed/docs/gate-design.md`
+- `~/Documents/AgentFeed/docs/knowledge-flywheel-design.md`
+- `~/Documents/AgentFeed/docs/dual-consumer-exits-design.md`
+- `~/Documents/AgentFeed/docs/context-kernel.md`
+- `~/Documents/AgentFeed/docs/feedback-loop-design.md`
+- `~/Documents/AgentFeed/docs/llm-failure-attribution.md`
+- `~/Documents/AgentFeed/docs/reading-recommendation-prd.md`
+- `~/Documents/AgentFeed/docs/v0.1.5-prd.md`
+- `~/Documents/AgentFeed/docs/privacy-boundary.md`
+- `~/Documents/AgentFeed/docs/search-baseline-2026-10.md`
 
 ### 1.2 当前工作区状态说明
 
-分析时项目处于已有大量未提交修改状态，且本轮执行 `npm run build -w web` 会刷新 `/Users/duke/Documents/AgentFeed/server/public/` 下的前端构建产物。报告不对这些已有改动做清理或回滚。
+分析时项目处于已有大量未提交修改状态，且本轮执行 `npm run build -w web` 会刷新 `~/Documents/AgentFeed/server/public/` 下的前端构建产物。报告不对这些已有改动做清理或回滚。
 
 ---
 
 ## 2. 当前运行数据库快照
 
-> 以下数据来自 `/Users/duke/Documents/AgentFeed/server/data/app.db`，服务运行中，数字会随后台任务继续变化。
+> 以下数据来自 `~/Documents/AgentFeed/server/data/app.db`，服务运行中，数字会随后台任务继续变化。
 
 ### 2.1 核心表规模
 
@@ -209,9 +209,9 @@ AgentFeed 当前已经形成一条较完整的本地知识生产和消费管线�
 
 对应代码：
 
-- `/Users/duke/Documents/AgentFeed/server/src/index.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/watcher.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/scanner.ts`
+- `~/Documents/AgentFeed/server/src/index.ts`
+- `~/Documents/AgentFeed/server/src/watcher.ts`
+- `~/Documents/AgentFeed/server/src/scanner.ts`
 
 ### 3.2 单文件采集流程
 
@@ -258,7 +258,7 @@ files.status = deleted
 
 ### 3.5 墓碑化护栏
 
-`/Users/duke/Documents/AgentFeed/server/src/scanner.ts` 中定义：
+`~/Documents/AgentFeed/server/src/scanner.ts` 中定义：
 
 ```text
 SWEEP_TOMBSTONE_CAP = 200
@@ -309,13 +309,13 @@ SWEEP_TOMBSTONE_CAP = 200
 
 设计文档：
 
-- `/Users/duke/Documents/AgentFeed/docs/gate-design.md`
+- `~/Documents/AgentFeed/docs/gate-design.md`
 
 实现代码：
 
-- `/Users/duke/Documents/AgentFeed/server/src/gate.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/gate.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/scanner.ts`
+- `~/Documents/AgentFeed/server/src/gate.ts`
+- `~/Documents/AgentFeed/server/src/routes/gate.ts`
+- `~/Documents/AgentFeed/server/src/scanner.ts`
 
 ### 4.2 门禁优先级
 
@@ -406,7 +406,7 @@ gate_records
 历史归档：
 
 - 当前月保留在数据库。
-- 历史月份归档到 `/Users/duke/Documents/AgentFeed/server/data/gate-archives/YYYY-MM.csv`。
+- 历史月份归档到 `~/Documents/AgentFeed/server/data/gate-archives/YYYY-MM.csv`。
 
 ### 4.6 当前门禁数据
 
@@ -467,9 +467,9 @@ gate_records
 
 核心代码：
 
-- `/Users/duke/Documents/AgentFeed/server/src/llm/index.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmWorker.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmQueue.ts`
+- `~/Documents/AgentFeed/server/src/llm/index.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmWorker.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmQueue.ts`
 
 ### 5.2 调度流程
 
@@ -512,10 +512,10 @@ files.llm_state='pending'
 
 一个文件蒸馏成功后通常会产生：
 
-- `/Users/duke/Documents/AgentFeed/server/data/wiki/entries/<fileId>/entry.md`
-- `/Users/duke/Documents/AgentFeed/server/data/wiki/entries/<fileId>/points.json`
-- `/Users/duke/Documents/AgentFeed/server/data/wiki/entries/<fileId>/entities.json`
-- `/Users/duke/Documents/AgentFeed/server/data/wiki/entries/<fileId>/relations.json`
+- `~/Documents/AgentFeed/server/data/wiki/entries/<fileId>/entry.md`
+- `~/Documents/AgentFeed/server/data/wiki/entries/<fileId>/points.json`
+- `~/Documents/AgentFeed/server/data/wiki/entries/<fileId>/entities.json`
+- `~/Documents/AgentFeed/server/data/wiki/entries/<fileId>/relations.json`
 - `wiki_entries_meta` 行
 - `files.summary`
 - LLM 标签
@@ -526,7 +526,7 @@ files.llm_state='pending'
 
 ### 5.5 LLM 失败历史与当前状态
 
-`/Users/duke/Documents/AgentFeed/docs/llm-failure-attribution.md` 已经记录过 H1 根因：
+`~/Documents/AgentFeed/docs/llm-failure-attribution.md` 已经记录过 H1 根因：
 
 - 大文档导致 JSON 输出截断。
 - flash 模型短响应拒答。
@@ -603,20 +603,20 @@ files.llm_state = done
 
 检索内核：
 
-- `/Users/duke/Documents/AgentFeed/server/src/knowledge.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/hybrid.ts`
+- `~/Documents/AgentFeed/server/src/knowledge.ts`
+- `~/Documents/AgentFeed/server/src/search/hybrid.ts`
 
 HTTP 出口：
 
-- `/Users/duke/Documents/AgentFeed/server/src/routes/search.ts`
+- `~/Documents/AgentFeed/server/src/routes/search.ts`
 
 MCP 出口：
 
-- `/Users/duke/Documents/AgentFeed/server/src/mcp.ts`
+- `~/Documents/AgentFeed/server/src/mcp.ts`
 
 Chat 出口：
 
-- `/Users/duke/Documents/AgentFeed/server/src/routes/chat.ts`
+- `~/Documents/AgentFeed/server/src/routes/chat.ts`
 
 ### 6.2 三路混合检索
 
@@ -725,7 +725,7 @@ Owner 视角影响：
 
 ### 7.2 Web 看板
 
-`/Users/duke/Documents/AgentFeed/web/src/views/Overview.vue` 已能看到：
+`~/Documents/AgentFeed/web/src/views/Overview.vue` 已能看到：
 
 - 今日流量
 - 收件数量
@@ -741,7 +741,7 @@ Owner 视角影响：
 
 ### 7.3 Reader 阅读链路
 
-`/Users/duke/Documents/AgentFeed/web/src/views/Reader.vue` 与 `/Users/duke/Documents/AgentFeed/server/src/routes/files.ts`、`/Users/duke/Documents/AgentFeed/server/src/routes/reading.ts` 配合实现：
+`~/Documents/AgentFeed/web/src/views/Reader.vue` 与 `~/Documents/AgentFeed/server/src/routes/files.ts`、`~/Documents/AgentFeed/server/src/routes/reading.ts` 配合实现：
 
 ```text
 打开 reader/:id
@@ -768,9 +768,9 @@ Owner 视角影响：
 
 相关文件：
 
-- `/Users/duke/Documents/AgentFeed/server/src/routes/recommend.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/reading.ts`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Supply.vue`
+- `~/Documents/AgentFeed/server/src/routes/recommend.ts`
+- `~/Documents/AgentFeed/server/src/routes/reading.ts`
+- `~/Documents/AgentFeed/web/src/views/Supply.vue`
 
 支持能力：
 
@@ -788,7 +788,7 @@ Owner 视角影响：
 
 ### 7.5 MCP 工具链路
 
-当前 `/Users/duke/Documents/AgentFeed/server/src/mcp.ts` 中注册的工具包括：
+当前 `~/Documents/AgentFeed/server/src/mcp.ts` 中注册的工具包括：
 
 | 工具 | 作用 |
 |---|---|
@@ -828,7 +828,7 @@ get_source: 2
 
 ### 7.7 Chat 链路
 
-`/Users/duke/Documents/AgentFeed/server/src/routes/chat.ts` 实现：
+`~/Documents/AgentFeed/server/src/routes/chat.ts` 实现：
 
 ```text
 用户问题
@@ -850,7 +850,7 @@ get_source: 2
 
 - 普通问答外发用户问题和检索摘要，不直接外发完整原文。
 - 会话复盘会外发会话消息全文。
-- 相关说明见 `/Users/duke/Documents/AgentFeed/docs/privacy-boundary.md`。
+- 相关说明见 `~/Documents/AgentFeed/docs/privacy-boundary.md`。
 
 ### 7.8 消费链路评价
 
@@ -881,19 +881,19 @@ get_source: 2
 
 | 文档 | 对照结论 |
 |---|---|
-| `/Users/duke/Documents/AgentFeed/docs/gate-design.md` | 门禁三层结构、恢复、归档、配置项和结构化 rule_id 已基本实现。 |
-| `/Users/duke/Documents/AgentFeed/docs/llm-failure-attribution.md` | H1 截断容错和失败分类已落地到代码。 |
-| `/Users/duke/Documents/AgentFeed/docs/privacy-boundary.md` | 外发链路描述与代码整体一致，门禁本地执行、不外发。 |
-| `/Users/duke/Documents/AgentFeed/docs/v0.1.5-prd.md` | 大部分 v0.1.5 能力已有实现，包括混合检索、Chat、Reader、画像、MCP args。 |
+| `~/Documents/AgentFeed/docs/gate-design.md` | 门禁三层结构、恢复、归档、配置项和结构化 rule_id 已基本实现。 |
+| `~/Documents/AgentFeed/docs/llm-failure-attribution.md` | H1 截断容错和失败分类已落地到代码。 |
+| `~/Documents/AgentFeed/docs/privacy-boundary.md` | 外发链路描述与代码整体一致，门禁本地执行、不外发。 |
+| `~/Documents/AgentFeed/docs/v0.1.5-prd.md` | 大部分 v0.1.5 能力已有实现，包括混合检索、Chat、Reader、画像、MCP args。 |
 
 ### 8.2 部分实现或需要重新标注状态
 
 | 文档 | 差异 |
 |---|---|
-| `/Users/duke/Documents/AgentFeed/docs/context-kernel.md` | 文档中仍有“待接线”表述，但代码中 `getContext` 和 Chat 已经接入聚合内核。 |
-| `/Users/duke/Documents/AgentFeed/docs/dual-consumer-exits-design.md` | 第一、二期部分能力已实现，但真实消费验收数据还不足。 |
-| `/Users/duke/Documents/AgentFeed/docs/feedback-loop-design.md` | 消费信号回流仍主要是蓝本，尚未成为排序核心。 |
-| `/Users/duke/Documents/AgentFeed/docs/knowledge-flywheel-design.md` | 产品 thesis 仍依赖 agent 消费数据验证，目前数据不足。 |
+| `~/Documents/AgentFeed/docs/context-kernel.md` | 文档中仍有“待接线”表述，但代码中 `getContext` 和 Chat 已经接入聚合内核。 |
+| `~/Documents/AgentFeed/docs/dual-consumer-exits-design.md` | 第一、二期部分能力已实现，但真实消费验收数据还不足。 |
+| `~/Documents/AgentFeed/docs/feedback-loop-design.md` | 消费信号回流仍主要是蓝本，尚未成为排序核心。 |
+| `~/Documents/AgentFeed/docs/knowledge-flywheel-design.md` | 产品 thesis 仍依赖 agent 消费数据验证，目前数据不足。 |
 
 ### 8.3 建议的文档治理方式
 
@@ -1186,42 +1186,42 @@ search_knowledge
 
 ### 14.1 采集
 
-- `/Users/duke/Documents/AgentFeed/server/src/scanner.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/watcher.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/scan.ts`
+- `~/Documents/AgentFeed/server/src/scanner.ts`
+- `~/Documents/AgentFeed/server/src/watcher.ts`
+- `~/Documents/AgentFeed/server/src/routes/scan.ts`
 
 ### 14.2 门禁
 
-- `/Users/duke/Documents/AgentFeed/server/src/gate.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/gate.ts`
-- `/Users/duke/Documents/AgentFeed/docs/gate-design.md`
+- `~/Documents/AgentFeed/server/src/gate.ts`
+- `~/Documents/AgentFeed/server/src/routes/gate.ts`
+- `~/Documents/AgentFeed/docs/gate-design.md`
 
 ### 14.3 蒸馏
 
-- `/Users/duke/Documents/AgentFeed/server/src/llm/index.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmWorker.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/llm/llmQueue.ts`
-- `/Users/duke/Documents/AgentFeed/docs/llm-failure-attribution.md`
+- `~/Documents/AgentFeed/server/src/llm/index.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmWorker.ts`
+- `~/Documents/AgentFeed/server/src/llm/llmQueue.ts`
+- `~/Documents/AgentFeed/docs/llm-failure-attribution.md`
 
 ### 14.4 检索
 
-- `/Users/duke/Documents/AgentFeed/server/src/knowledge.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/hybrid.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/ftsIndex.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/search/chunkEmbed.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/search.ts`
+- `~/Documents/AgentFeed/server/src/knowledge.ts`
+- `~/Documents/AgentFeed/server/src/search/hybrid.ts`
+- `~/Documents/AgentFeed/server/src/search/ftsIndex.ts`
+- `~/Documents/AgentFeed/server/src/search/chunkEmbed.ts`
+- `~/Documents/AgentFeed/server/src/routes/search.ts`
 
 ### 14.5 消费
 
-- `/Users/duke/Documents/AgentFeed/server/src/mcp.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/mcpTools.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/chat.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/files.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/recommend.ts`
-- `/Users/duke/Documents/AgentFeed/server/src/routes/reading.ts`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Reader.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Chat.vue`
-- `/Users/duke/Documents/AgentFeed/web/src/views/Supply.vue`
+- `~/Documents/AgentFeed/server/src/mcp.ts`
+- `~/Documents/AgentFeed/server/src/mcpTools.ts`
+- `~/Documents/AgentFeed/server/src/routes/chat.ts`
+- `~/Documents/AgentFeed/server/src/routes/files.ts`
+- `~/Documents/AgentFeed/server/src/routes/recommend.ts`
+- `~/Documents/AgentFeed/server/src/routes/reading.ts`
+- `~/Documents/AgentFeed/web/src/views/Reader.vue`
+- `~/Documents/AgentFeed/web/src/views/Chat.vue`
+- `~/Documents/AgentFeed/web/src/views/Supply.vue`
 
 下一阶段建议优先做一个“链路健康审计”而不是继续加新功能，输出以下四张表：
 
