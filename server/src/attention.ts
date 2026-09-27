@@ -270,3 +270,13 @@ export async function applyBudget<T extends { file_id: number }>(items: T[]): Pr
     hiddenTotal: items.length - sliced.length,
   }
 }
+
+/* ---- P3 MCP 出口熵减：read_entry 单次返回字符预算 ---- */
+
+/** MCP read_entry 预算截断（纯函数无 IO，预算值由调用方从 config 读）：maxChars<=0 = 不限制原样透传；
+ *  超长截到 maxChars 并追加尾注指回完整词条（wiki/entries/<id>/entry.md 或站内阅读器） */
+export function truncateForMcp(text: string, maxChars: number): { text: string; truncated: boolean } {
+  if (!(maxChars > 0) || text.length <= maxChars) return { text, truncated: false }
+  const TAIL_NOTE = '\n\n[内容已按注意力预算截断，完整词条见 wiki/entries/<id>/entry.md 或站内阅读器]'
+  return { text: text.slice(0, maxChars) + TAIL_NOTE, truncated: true }
+}

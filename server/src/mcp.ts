@@ -7,6 +7,7 @@ import { getDb } from './db.js'
 import { searchKnowledgeCore } from './knowledge.js'
 import { cleanTitle, cleanSummary } from './formatter.js'
 import { disabledResponse, getContextHandler, getUserContextHandler, isMcpEnabled, logToolCall, logMcpConsumption, logMcpSearchHits, buildSearchToolResponse, wrapUntrustedText } from './mcpTools.js'
+import { truncateForMcp } from './attention.js'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const WIKI_DIR = path.join(DATA_DIR, 'wiki', 'entries')
@@ -87,7 +88,12 @@ server.registerTool(
     }
     const entryPath = path.join(WIKI_DIR, String(args.id), 'entry.md')
     try {
-      const text = await fs.readFile(entryPath, 'utf8')
+      const full = await fs.readFile(entryPath, 'utf8')
+      // P3 出口熵减：单次返回按字符预算截断（config attention.mcpTokenBudget；缺省/坏值/负值 → 16000，0=不限）
+      const cfg = await (await db.prepare("SELECT value FROM config WHERE key = 'attention.mcpTokenBudget'")).get() as any
+      const raw = Number(cfg?.value)
+      const maxChars = String(cfg?.value ?? '').trim() !== '' && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 16000
+      const { text } = truncateForMcp(full, maxChars)
       // M4 消费落账：深读是漏斗第二级（query NULL 与浅消费命中区分）
       await logMcpConsumption('mcp_read', args.id, row.path)
       // 批次②：正文是不可信源产物（最大的提示注入载体），声明头 + 分界线包装

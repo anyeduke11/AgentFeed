@@ -611,7 +611,8 @@ export async function seedDefaults(db: SqliteDatabase) {
     { key: 'attention.features', value: '{"lifecycle":true,"decay":false,"cooling":false}', type: 'json', description: '注意力预算灰度开关（v0.1.6 方案定稿 §6 P0-5/P1）：lifecycle=touch 回写与生命周期分层；decay=下沉日批（默认关，dry_run 观测后开）；cooling=冷却池（新条目静置 coolingHours 再进蒸馏/推荐，默认关先观测一周期）。全关=行为与改造前完全一致' },
     { key: 'attention.decayDays', value: '{"demoteDays":90,"archiveDays":180}', type: 'json', description: '生命周期下沉阈值：90d 未触及且 touch≤1 降推荐可见性（lifecycle=warm）；180d 未触及归 cold（搜索默认折叠）。pinned 永不下沉' },
     { key: 'attention.coolingHours', value: '48', type: 'number', description: '冷却时长（小时）：新条目入库后静置该时长才进入蒸馏/推荐' },
-    { key: 'attention.budget', value: '{"enabled":false,"dailyLimit":5,"softPct":80}', type: 'json', description: '每日投喂配额（千问双上限形态）：enabled 关闭时不截断；softPct 达到后仅呈现部分（softCapped），达到 dailyLimit 硬上限即停（hardCapped）' }
+    { key: 'attention.budget', value: '{"enabled":false,"dailyLimit":5,"softPct":80}', type: 'json', description: '每日投喂配额（千问双上限形态）：enabled 关闭时不截断；softPct 达到后仅呈现部分（softCapped），达到 dailyLimit 硬上限即停（hardCapped）' },
+    { key: 'attention.mcpTokenBudget', value: '16000', type: 'number', description: 'MCP read_entry 单次返回的字符预算（超出截断并标注 truncated；0=不限制）' }
   ]
 
   await db.transactionalize(async () => {
