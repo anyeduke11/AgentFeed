@@ -121,3 +121,28 @@ describe('P3 marginal 已读参照系', () => {
     assert.equal(v2.duplicate, true)
   })
 })
+
+describe('P3 MCP 出口熵减', () => {
+  test('truncateForMcp：超预算截断 + 尾注；短文原样；maxChars=0 不限制', async () => {
+    const { truncateForMcp } = await import('../src/attention.js')
+    // 超预算：截到 maxChars + 尾注（100 字符余量容尾注），truncated 标注——MCP 单次返回有界是熵减的本意
+    const long = '字'.repeat(20000)
+    const r = truncateForMcp(long, 16000)
+    assert.equal(r.truncated, true)
+    assert.ok(r.text.length <= 16000 + 100, '截断结果不得超出预算 + 尾注余量')
+    assert.ok(r.text.startsWith('字'.repeat(100)), '截断保留正文开头前缀')
+    assert.ok(r.text.includes('已按注意力预算截断'), '尾注标注存在（指引回完整词条）')
+    // 短文：原样透传零改动
+    const short = truncateForMcp('短文本', 16000)
+    assert.equal(short.truncated, false)
+    assert.equal(short.text, '短文本')
+    // 精确边界：len == maxChars 不截
+    const exact = truncateForMcp('a'.repeat(16000), 16000)
+    assert.equal(exact.truncated, false)
+    // maxChars=0（及负值）= 不限制，长文原样透传
+    const un = truncateForMcp(long, 0)
+    assert.equal(un.truncated, false)
+    assert.equal(un.text.length, 20000)
+    assert.equal(truncateForMcp(long, -1).truncated, false)
+  })
+})
