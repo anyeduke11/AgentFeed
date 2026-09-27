@@ -295,6 +295,29 @@ describe('webclip 套件（用例间共享临时库，串行执行）', () => {
     await assert.rejects(() => reclipRecord(failId, deps2), (e: any) => e instanceof WebclipError && e.code === 'config')
   })
 
+  test('webclip/reclip: 孤儿资产清理——重剪后未引用的旧图片删除、目录空则移除', async () => {
+    const db = await getDb()
+    const rootRow = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.storageRoot'")).get() as any
+    const root = String(rootRow.value)
+    // 第一版：带 1 张图（占位图由 htmlToMarkdown 采集，注入 fetcher 无法真下载——预先手写资产模拟第一版产物）
+    const fake1 = async () => ({ html: '<html><head><title>孤儿清理页</title></head><body><article><p>正文</p><img src="https://img.example/a.png" alt="图A"></article></body></html>', finalUrl: 'https://core.example/' })
+    const r1 = await convertCore('https://core.example/orphan', { snapshot: false, force: true }, { renderPage: fake1, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} })
+    const assetsDir = path.join(root, 'assets', r1.base)
+    // 第一版的图片下载会失败（img.example 不可达，deps 未注入 fetch→走全局 fetch 失败降级），手动补一个旧资产模拟历史产物
+    await fsp.mkdir(assetsDir, { recursive: true })
+    await fsp.writeFile(path.join(assetsDir, 'img-0.png'), 'old-bytes')
+    await db.exec(`INSERT INTO webclip_records (url, title, slug_ts, md_path, md_file_id, status, snapshot, duration_ms)
+      VALUES ('https://core.example/orphan', '孤儿清理页', '${r1.base}', '${r1.mdPath.replace(/'/g, "''")}', ${r1.mdFileId}, 'success', 0, 100)`)
+    const recRow = await (await db.prepare("SELECT id FROM webclip_records WHERE url = 'https://core.example/orphan' ORDER BY id DESC LIMIT 1")).get() as any
+    // 重剪：无图页面 → relMap 空 → keep 空 → img-0.png 应被删、assets/<base>/ 目录应被移除
+    const fake2 = async () => ({ html: '<html><head><title>孤儿清理页·修订</title></head><body><article><p>无图正文</p></article></body></html>', finalUrl: 'https://core.example/' })
+    const r2 = await reclipRecord(Number(recRow.id), { renderPage: fake2, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} })
+    assert.equal(r2.success, true)
+    let dirGone = false
+    try { await fsp.access(assetsDir); dirGone = false } catch { dirGone = true }
+    assert.ok(dirGone, '孤儿资产清理后 assets/<base>/ 目录应被移除')
+  })
+
   test('webclip/limits: 默认限额 seed + getLimits 合并', async () => {
     const db = await getDb()
     const row = await (await db.prepare("SELECT value, type FROM config WHERE key = 'webclip.limits'")).get() as any
