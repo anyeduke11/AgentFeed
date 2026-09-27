@@ -96,3 +96,28 @@ describe('P3 配额双上限', () => {
     assert.equal(s4.hidden_total, s3.hidden_total, 'digested > collected 时下限钳 0')
   })
 })
+
+describe('P3 marginal 已读参照系', () => {
+  test('findDuplicates 近邻并入已读条目（read_history 全量 ∪ 近30天蒸馏，各 50 去重）', async () => {
+    const db = await getDb()
+    const { findDuplicates } = await import('../src/attention.js')
+    const read = await mkFile('/p3/read.md')
+    const cand = await mkFile('/p3/cand.md')
+    // 已读 + 已蒸馏 60 天前（超出 30 天窗）——只有 marginal 已读分支能命中，钉死新参照系
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, distilled_at) VALUES (${read}, '/p3/read', '完全相同的已读标题', datetime('now', '-60 days'))`)
+    await db.exec(`INSERT INTO read_history (file_id, path, source) VALUES (${read}, '/p3/read.md', 'reader')`)
+    const v = await findDuplicates(cand, '完全相同的已读标题', async () => { throw new Error('no embedding') })
+    assert.equal(v.duplicate, true)
+    assert.equal(v.degraded, true, '标题快速路径命中（embedding 抛错也不走到慢路径）')
+    // 对照组：60 天前已蒸馏但未读 → 不参与近邻（「我看过」才进参照系，不是所有旧蒸馏都算）
+    const old = await mkFile('/p3/old.md')
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, distilled_at) VALUES (${old}, '/p3/old', '六十天前的旧标题', datetime('now', '-60 days'))`)
+    const vOld = await findDuplicates(await mkFile('/p3/c3.md'), '六十天前的旧标题', async () => { throw new Error('no embedding') })
+    assert.equal(vOld.duplicate, false)
+    // 回归 P1：近 30 天已蒸馏未读仍参与近邻（防同批内容重复入库的原口径不变）
+    const distilled = await mkFile('/p3/distilled.md')
+    await db.exec(`INSERT INTO wiki_entries_meta (file_id, entry_path, title, distilled_at) VALUES (${distilled}, '/p3/distilled', '近30天蒸馏标题', datetime('now'))`)
+    const v2 = await findDuplicates(await mkFile('/p3/c2.md'), '近30天蒸馏标题', async () => { throw new Error('no embedding') })
+    assert.equal(v2.duplicate, true)
+  })
+})

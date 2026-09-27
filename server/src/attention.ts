@@ -146,18 +146,31 @@ export async function releaseExpired(): Promise<{ released: number }> {
 
 export interface DupVerdict { duplicate: boolean; reason: string; degraded: boolean }
 
-/** 蒸馏前去重：embedding 可用 → 与近 30 天已蒸馏条目标题向量比相似度（≥0.92 判重）；
- *  不可用 → 降级为标题精确匹配（degraded 标注）。近邻限 50 条（按 distilled_at 取最新）防大产出自爆；
+/** 蒸馏前去重（P3 marginal 参照系）：近邻 = 近 30 天已蒸馏条目（P1 口径，防同批内容重复入库）
+ *  ∪ 已读条目（read_history 全量不限期——「我看过」的智谱 marginal 本义；JOIN 模板同
+ *  backfillLastTouched，daily-report 埋点行 file_id IS NULL 天然不命中）。两支各取最新 50 条
+ *  （按 distilled_at）按 file_id 去重，总量 ≤100。注：SQLite compound SELECT 各支不能自带
+ *  ORDER BY/LIMIT，故两条 SQL 取回后合并去重，语义等价单条 UNION。
+ *  embedding 可用 → 近邻标题向量比相似度（≥0.92 判重）；不可用 → 降级为标题精确匹配（degraded 标注）。
  *  标题精确匹配走零成本快速路径（命中即停；两侧剥 .md/.html 扩展名归一——feeder 传 COALESCE(title,name)
  *  时 name 含扩展名而 wiki 标题不含，不归一则快速路径永不可达），未命中才逐条 embed。
  *  fail-closed：查重失败不判重，放行走原流程 */
 export async function findDuplicates(fileId: number, title: string, embed: (t: string) => Promise<number[]> = callEmbedding): Promise<DupVerdict> {
   const db = await getDb()
-  const rows = await (await db.prepare(`
+  const neighborSql = (cond: string) => `
     SELECT m.file_id, m.title FROM wiki_entries_meta m
     JOIN files f ON f.id = m.file_id
-    WHERE m.distilled_at >= datetime('now', '-30 days') AND f.id != ? AND COALESCE(m.title, '') != ''
-    ORDER BY m.distilled_at DESC LIMIT 50`)).all(fileId) as any[]
+    WHERE ${cond} f.id != ? AND COALESCE(m.title, '') != ''
+    ORDER BY m.distilled_at DESC LIMIT 50`
+  const recent = await (await db.prepare(neighborSql("m.distilled_at >= datetime('now', '-30 days') AND "))).all([fileId]) as any[]
+  const read = await (await db.prepare(neighborSql('EXISTS (SELECT 1 FROM read_history rh WHERE rh.file_id = f.id) AND '))).all([fileId]) as any[]
+  const rows: any[] = []
+  const seen = new Set<number>()
+  for (const r of [...recent, ...read]) {
+    if (seen.has(r.file_id)) continue
+    seen.add(r.file_id)
+    rows.push(r)
+  }
   if (!rows.length) return { duplicate: false, reason: 'no_neighbors', degraded: false }
   // 快速路径：标题精确匹配（大小写不敏感 + 两侧剥 .md/.htm/.html 扩展名），零 embedding 成本
   const normTitle = title.trim().replace(/\.(md|html?)$/i, '').toLowerCase()
