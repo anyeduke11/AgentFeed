@@ -41,3 +41,9 @@ server/data/
 agent/
 .vscode/
 .DS_Store
+
+# 本地私有数据与分析产物（个人剪藏/会话/编辑历史/分析报告——禁止入库）
+.history/
+server/conversation/
+AgentFeed–WebClips/
+*_横纵分析报告.*

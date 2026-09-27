@@ -11,7 +11,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-8A2BE2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
-![Tests](https://img.shields.io/badge/tests-400%2B_passing-3FB950)
+![Tests](https://img.shields.io/badge/tests-450%2B_passing-3FB950)
 
 </div>
 
@@ -19,7 +19,8 @@
 
 AgentFeed 把散落在各个 AI Agent 数据目录（Claude Code、Trae、Qoder、Coze、Workbuddy……）里的
 Markdown / HTML 产物统一采集入库为**热知识缓存**：经**门禁过滤 → 领域分拣**完成分拣入库，**LLM 蒸馏**按队列增量补充摘要/标签等增强信息，Wiki 词条支持导入挂载，
-最终通过 **Web 看板** 与 **MCP Server** 双出口，供人和任意 Agent 按关键词（LIKE）检索消费。
+最终通过 **Web 看板** 与 **MCP Server** 双出口，供人和任意 Agent 按关键词 / 全文 / 语义混合检索消费；
+**注意力预算**在库内做冷却、去重与配额，抑制信息过载——只让你看到值得看的。
 与 DataMind 类 data plane 错位竞争：data plane 管**会话内记忆**（边聊边写、下一句即用）；
 AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经门禁与蒸馏沉淀，跨会话持续复利。
 采集与存储全部在本机完成；LLM 环节默认未启用，启用后仅发往你自行配置的服务商——外发边界见下方[「数据与隐私边界」](#-数据与隐私边界)一节。
@@ -32,8 +33,12 @@ AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经�
 - **📡 实时 + 周期双通道采集** — chokidar watcher 秒级响应文件新增/变更/删除；启动兜底 + 每 30 分钟周期增量扫描，补齐停机窗口
 - **⚡ mtime+size 缓存快路径** — 未变更文件免读盘、免哈希、免门禁重评，万级文件重扫从 22s 降至 2s
 - **🚧 内容门禁** — 体积/内容规则过滤低质文件，skipped 记录按月归档 CSV，支持白名单与手动恢复豁免
-- **🗂 领域分拣** — 树形领域体系（支持父子级联），文件按领域归类，配色贯穿全站
+- **🗂 领域分拣** — 树形领域体系（支持父子级联），文件按领域归类，配色贯穿全站；标签三态治理（一级 = 领域锚定 / 二级 / 普通），同名一级标签与领域成员数同源对齐，中文按拼音排序
+- **🌐 网页剪藏** — 粘贴 URL 一键转 md + html 双入库（Playwright 快照可选），SSRF 防护 + 体积/图片限额；图片质量过滤默认开启（二维码 / 关注引导横幅 / 小图标）；历史支持重剪覆盖、删除清理（含孤儿资产）、失败重试
 - **🧠 LLM 蒸馏管线** — 队列化蒸馏（摘要/标签/实体/要点/关系），嵌入向量 + 规则评分双排序，失败自动重试回填
+- **🎯 注意力预算** — 文件生命周期（热/冷却/冷）与触及回写；冷却池静默期 + 蒸馏前近邻去重，抑制重复投喂；周度一页纸复盘消化率；推荐配额 soft/hard 双上限与 MCP 字符预算，反 FOMO 全程可解释
+- **🔍 混合检索** — 关键词 LIKE + FTS 全文 + 向量语义三通道，结果供看板与 MCP 共用
+- **💬 对话问答** — 检索增强的领域陪练对话，会话可一键蒸馏为 Wiki 词条回库
 - **📊 调度总览 + 数据看板** — 双 Tab 看板：今日流量/趋势/来源占比一屏尽览；Agent 生产卡可下钻二级目录，领域占比以彩色气泡图呈现
 - **📚 阅读推荐闭环** — 规则分 + LLM 质量分双排序推荐池，每日精选零成本轮转；阅读进度手动挡 + 滚动自动记录，续读自动回位；两维打分入执行队列，周目标环与薄弱领域/停滞提示复盘
 - **📖 站内阅读器** — md/html 沙箱渲染（双保险：服务端白名单清洗 + iframe 禁脚本，内容零脚本执行），目录侧栏、字号与夜间主题，图片资源经扫描根边界代理
@@ -72,25 +77,29 @@ flowchart LR
         A1[ClaudeCode] ; A2[Trae] ; A3[Qoder] ; A4[LingxiClaw] ; A5[...20+]
     end
     subgraph 采集层
-        W[chokidar Watcher<br/>实时增量] 
+        W[chokidar Watcher<br/>实时增量]
         S[Scanner<br/>周期兜底 + mtime/size 缓存]
+        CL[网页剪藏<br/>URL → md/html]
         G[Gate 门禁<br/>过滤 + 归档]
     end
     subgraph 存储与服务
-        DB[(SQLite<br/>19 表：files / wiki /<br/>recommendations…)]
+        DB[(SQLite<br/>23 表：files / wiki /<br/>cooling_pool…)]
         API[Express :5188<br/>REST API]
         LLM[蒸馏队列<br/>摘要 · 标签 · 嵌入]
+        ATT[注意力预算<br/>冷却 · 去重 · 配额]
     end
     subgraph 消费出口
-        WEB[Vue 3 看板<br/>总览 · 看板 · 库 · 阅读闭环]
+        WEB[Vue 3 看板<br/>总览 · 供给 · 阅读 · 对话]
         MCP[MCP Server stdio<br/>9 个知识工具]
     end
     A1 & A2 & A3 & A4 & A5 --> W
     A1 & A2 & A3 & A4 & A5 --> S
+    CL --> S
     W --> G --> DB
     S --> G
     DB <--> API
     API --> LLM --> DB
+    LLM -.冷却/去重.-> ATT
     API --> WEB
     DB --> MCP
 ```
@@ -138,8 +147,10 @@ flowchart LR
 AgentFeed/
 ├── service.sh            # 一键启停/构建脚本（端口 5188）
 ├── server/               # Express + SQLite 后端
-│   ├── src/routes/       #   REST API（files/reading/recommend/scan/stats/llm/wiki…）
+│   ├── src/routes/       #   REST API（files/reading/recommend/scan/stats/llm/wiki/webclip…）
 │   ├── src/llm/          #   蒸馏队列 / 嵌入 / 清洗 / 标签治理
+│   ├── src/webclip/      #   网页剪藏管线（SSRF 防护 / 正文转换 / 清洗 / 抓取）
+│   ├── src/attention.ts  #   注意力预算（生命周期 / 冷却池 / 近邻去重 / 配额）
 │   ├── src/reader.ts     #   站内阅读器管线（渲染/白名单清洗/TOC/图片代理）
 │   ├── src/ruleScore.ts  #   规则评分引擎
 │   ├── src/opener.ts     #   外部打开（扫描根边界校验）
