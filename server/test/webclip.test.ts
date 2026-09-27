@@ -17,7 +17,7 @@ process.env.AGENTFEED_DATA_DIR = DATA_TMP
 const { getDb, closeDb } = await import('../src/db.js')
 // 注意：getImageFilter 走动态 import——routes/webclip.js 静态引用 db.ts，后者在模块顶层读 AGENTFEED_DATA_DIR，
 // ESM 静态 import 会被提升到 env 赋值之前执行，导致测试连上生产 server/data/app.db（已被污染过一次，勿回退）。
-const { convertCore, retryRecord, reclipRecord, getLimits, validateStorageRoot, WebclipError, getImageFilter } = await import('../src/routes/webclip.js')
+const { convertCore, retryRecord, reclipRecord, deleteRecord, getLimits, validateStorageRoot, WebclipError, getImageFilter } = await import('../src/routes/webclip.js')
 
 after(async () => {
   try { await closeDb() } catch { /* 临时库句柄未全部 finalize，进程退出自然释放 */ }
@@ -316,6 +316,41 @@ describe('webclip 套件（用例间共享临时库，串行执行）', () => {
     let dirGone = false
     try { await fsp.access(assetsDir); dirGone = false } catch { dirGone = true }
     assert.ok(dirGone, '孤儿资产清理后 assets/<base>/ 目录应被移除')
+  })
+
+  test('webclip/delete: 失败记录可删——仅移除记录行不触磁盘，处理列对失败历史开放删除能力', async () => {
+    const db = await getDb()
+    // 前置：失败记录无产物（md_path/html_path 为 NULL），删除不应碰任何文件
+    const id = await createFailedRecord('https://core.example/del-fail', 'fetch', '模拟失败待删')
+    const r = await deleteRecord(id)
+    assert.deepEqual(r.removed, [], '失败记录无产物文件，removed 必须为空')
+    const row = await (await db.prepare('SELECT id FROM webclip_records WHERE id = ?')).get(id)
+    assert.equal(row, undefined, '失败记录行应被删除')
+    // 不存在的记录：config 错误（路由层映射 400），不是静默成功
+    await assert.rejects(() => deleteRecord(999999), (e: any) => e instanceof WebclipError && e.code === 'config')
+  })
+
+  test('webclip/delete: 成功记录删除清理 md/html 与 assets 目录，记录行同步移除', async () => {
+    const db = await getDb()
+    const rootRow = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.storageRoot'")).get() as any
+    const root = String(rootRow.value)
+    const fake = async () => ({ html: '<html><head><title>待删页</title></head><body><article><p>正文</p></article></body></html>', finalUrl: 'https://core.example/' })
+    const r1 = await convertCore('https://core.example/delete-me', { snapshot: true }, { renderPage: fake, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} })
+    await db.exec(`INSERT INTO webclip_records (url, title, slug_ts, md_path, html_path, md_file_id, status, snapshot)
+      VALUES ('https://core.example/delete-me', '待删页', '${r1.base}', '${r1.mdPath.replace(/'/g, "''")}', '${(r1.htmlPath || '').replace(/'/g, "''")}', ${r1.mdFileId}, 'success', 1)`)
+    const recRow = await (await db.prepare("SELECT id FROM webclip_records WHERE url = 'https://core.example/delete-me' ORDER BY id DESC LIMIT 1")).get() as any
+    const assetsDir = path.join(root, 'assets', r1.base)
+    await fsp.mkdir(assetsDir, { recursive: true }) // 模拟已存在的资产目录
+    const r = await deleteRecord(Number(recRow.id))
+    assert.equal(r.removed.length, 2, 'md + html 两个文件应被清理')
+    let mdGone = false
+    try { await fsp.access(r1.mdPath!) } catch { mdGone = true }
+    assert.ok(mdGone, 'md 文件应被删除')
+    let dirGone = false
+    try { await fsp.access(assetsDir) } catch { dirGone = true }
+    assert.ok(dirGone, 'assets 目录应被整体删除')
+    const row = await (await db.prepare('SELECT id FROM webclip_records WHERE id = ?')).get(Number(recRow.id))
+    assert.equal(row, undefined, '成功记录行应被删除')
   })
 
   test('webclip/limits: 默认限额 seed + getLimits 合并', async () => {

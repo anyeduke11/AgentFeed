@@ -51,13 +51,16 @@
                 <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">md</button>
                 <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id, 'webclip')">html</button>
               </template>
-              <button v-else-if="r.status === 'failed'" class="btn xs" :disabled="submitting" @click="retryOne(r)">重试</button>
             </td>
             <td style="text-align:right"><span class="c-dim cap mono">{{ r.error ? r.error.slice(0, 60) : '' }}</span></td>
             <td style="text-align:right;white-space:nowrap">
               <template v-if="r.status === 'success'">
                 <button class="btn xs" :disabled="submitting || deletingId === r.id" title="重新抓取并覆盖原文件（同路径重蒸馏）" @click="reclipOne(r)">{{ deletingId === r.id ? '…' : '重剪' }}</button>
                 <button class="btn xs" style="margin-left:4px" :disabled="submitting || deletingId === r.id" title="删除记录及其 md/html/资产文件（蒸馏产物保留在库中）" @click="deleteOne(r)">删除</button>
+              </template>
+              <template v-else>
+                <button class="btn xs" :disabled="submitting" title="重新尝试剪藏该链接" @click="retryOne(r)">重试</button>
+                <button class="btn xs" style="margin-left:4px" :disabled="submitting || deletingId === r.id" title="删除该失败记录（无产物文件，仅移除记录）" @click="deleteOne(r)">{{ deletingId === r.id ? '…' : '删除' }}</button>
               </template>
             </td>
           </tr>
@@ -161,7 +164,10 @@ async function reclipOne(r: any) {
 
 async function deleteOne(r: any) {
   if (submitting.value || deletingId.value) return
-  if (!confirm(`确认删除剪藏「${r.title || r.url}」？\n将删除记录及其 md/html/图片资产文件（库中已蒸馏的摘要/标签保留）。`)) return
+  const hint = r.status === 'success'
+    ? `将删除记录及其 md/html/图片资产文件（库中已蒸馏的摘要/标签保留）。`
+    : `该记录无产物文件，仅移除记录行。`
+  if (!confirm(`确认删除剪藏「${r.title || r.url}」？\n${hint}`)) return
   deletingId.value = r.id
   lastResult.value = null
   try {
