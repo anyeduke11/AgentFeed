@@ -219,6 +219,22 @@ export async function convertCore(url: string, opts: { snapshot?: boolean; force
   }
   md = md.replace(/__WEBCLIP_IMG_\d+__/g, '') // 兜底清残留占位符
 
+  // 孤儿资产清理（重剪场景）：写入完成后，assets/base 下不在本次引用集内的旧图片删除；目录空则一并移除。
+  // 仅当本次成功保存了至少一张图（relMap 非空）或本次无图可下（md 不引用任何本目录资产）时才可安全判定引用集，
+  // 引用集 = relMap.values()（即最终 md 里真实出现的 assets/<base>/ 路径）
+  if (opts.reuseBase) {
+    try {
+      const referenced = new Set(relMap.values())
+      const keep = new Set([...referenced].map(rel => path.basename(rel)))
+      for (const f of await fs.readdir(assetsDir)) {
+        if (!keep.has(f)) await fs.rm(path.join(assetsDir, f), { force: true })
+      }
+      if ((await fs.readdir(assetsDir)).length === 0) await fs.rmdir(assetsDir)
+    } catch (e) {
+      console.error('webclip orphan asset cleanup failed', e) // 清理失败不中断剪藏（孤儿无害，下次重剪再清）
+    }
+  }
+
   assertDeadline()
   const clippedAt = new Date().toISOString()
   const fm = ['---', 'agent: webclip', `source_url: ${yamlSafe(String(url))}`, `clipped_at: ${clippedAt}`, ...(snapshot ? [`snapshot: ./${base}.html`] : []), '---', ''].join('\n')
