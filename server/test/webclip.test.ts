@@ -17,7 +17,7 @@ process.env.AGENTFEED_DATA_DIR = DATA_TMP
 const { getDb, closeDb } = await import('../src/db.js')
 // 注意：getImageFilter 走动态 import——routes/webclip.js 静态引用 db.ts，后者在模块顶层读 AGENTFEED_DATA_DIR，
 // ESM 静态 import 会被提升到 env 赋值之前执行，导致测试连上生产 server/data/app.db（已被污染过一次，勿回退）。
-const { convertCore, retryRecord, getLimits, validateStorageRoot, WebclipError, getImageFilter } = await import('../src/routes/webclip.js')
+const { convertCore, retryRecord, reclipRecord, getLimits, validateStorageRoot, WebclipError, getImageFilter } = await import('../src/routes/webclip.js')
 
 after(async () => {
   try { await closeDb() } catch { /* 临时库句柄未全部 finalize，进程退出自然释放 */ }
@@ -256,6 +256,43 @@ describe('webclip 套件（用例间共享临时库，串行执行）', () => {
     assert.equal(r.success, true)
     const row = await (await db.prepare('SELECT status, md_file_id, error FROM webclip_records WHERE id = ?')).get(id) as any
     assert.equal(row.status, 'success'); assert.ok(row.md_file_id); assert.equal(row.error, null)
+  })
+
+  test('webclip/reclip: 成功记录重剪复用原 base 覆盖原文件（同路径同 file_id，原行原地更新）', async () => {
+    const db = await getDb()
+    const rootRow = await (await db.prepare("SELECT value FROM config WHERE key = 'webclip.storageRoot'")).get() as any
+    const root = String(rootRow.value)
+    // 造一条真实成功记录（磁盘有 md/html 对）
+    const fake1 = async () => ({ html: '<html><head><title>重剪目标页</title></head><body><article><p>第一版正文</p></article></body></html>', finalUrl: 'https://core.example/' })
+    const deps = { renderPage: fake1, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} }
+    const r1 = await convertCore('https://core.example/reclip', { snapshot: true }, deps)
+    await db.exec(`INSERT INTO webclip_records (url, title, slug_ts, md_path, html_path, md_file_id, html_file_id, status, snapshot, duration_ms)
+      VALUES ('https://core.example/reclip', '${(r1.title || '').replace(/'/g, "''")}', '${r1.base}', '${r1.mdPath.replace(/'/g, "''")}', '${(r1.htmlPath || '').replace(/'/g, "''")}', ${r1.mdFileId}, ${r1.htmlFileId}, 'success', 1, 100)`)
+    const recRow = await (await db.prepare("SELECT id FROM webclip_records WHERE url = 'https://core.example/reclip' AND status = 'success' ORDER BY id DESC LIMIT 1")).get() as any
+    const recId = Number(recRow.id)
+    // 快照：覆盖前的磁盘文件清单与 files 行
+    const before = fs.readdirSync(root).filter((f: string) => f.startsWith(r1.base)).sort()
+    assert.equal(before.length, 2) // md + html
+    // 重剪：换正文内容，复用原 base
+    const fake2 = async () => ({ html: '<html><head><title>重剪目标页·修订</title></head><body><article><p>第二版正文（更新）</p></article></body></html>', finalUrl: 'https://core.example/' })
+    const deps2 = { renderPage: fake2, runScan: async () => { await fakeScanIntoFiles(root) }, assertPublicUrl: async () => {} }
+    const r2 = await reclipRecord(recId, deps2)
+    assert.equal(r2.success, true)
+    assert.equal(r2.base, r1.base, '重剪必须复用原 base（覆盖语义）')
+    // 磁盘：仍是同一对文件（无新增第二对）
+    const after = fs.readdirSync(root).filter((f: string) => f.startsWith(r1.base)).sort()
+    assert.deepEqual(after, before)
+    const mdOnDisk = await fsp.readFile(r1.mdPath!, 'utf8')
+    assert.ok(mdOnDisk.includes('第二版正文（更新）'), '原 md 文件应被新内容覆盖')
+    // 记录行：原地更新（同 id、同 md_path、file_id 不变——scanner 按 path upsert）
+    const upd = await (await db.prepare('SELECT id, md_path, md_file_id, title FROM webclip_records WHERE id = ?')).get(recId) as any
+    assert.equal(upd.id, recId)
+    assert.equal(upd.md_path, r1.mdPath)
+    assert.equal(upd.md_file_id, r1.mdFileId)
+    assert.ok(String(upd.title).includes('修订'), '标题应更新为新抓取结果')
+    // 失败记录不支持重剪（config 错误，指引去重试）
+    const failId = await createFailedRecord('https://core.example/reclip-fail', 'fetch', 'x')
+    await assert.rejects(() => reclipRecord(failId, deps2), (e: any) => e instanceof WebclipError && e.code === 'config')
   })
 
   test('webclip/limits: 默认限额 seed + getLimits 合并', async () => {

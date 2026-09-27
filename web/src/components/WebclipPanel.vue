@@ -43,13 +43,14 @@
           <tr v-for="r in records" :key="r.id">
             <td class="c-dim mono">{{ fmtTime(r.created_at) }}</td>
             <td class="c-main"><button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">{{ r.title || '—' }}</button><template v-else>{{ r.title || '—' }}</template></td>
-            <td class="c-dim mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" :title="r.url">{{ r.url }}</td>
+            <td class="c-dim mono url-cell" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" :title="`${r.url}（点击复制）`" @click="copyUrl(r)">{{ copiedId === r.id ? '✓ 已复制' : r.url }}</td>
             <td><span v-if="r.status === 'success'" class="stb"><span class="dot dot-done"></span>成功</span><span v-else class="stb stb-del" :title="r.error">失败</span><span class="tagchip" style="margin-left:4px" v-if="r.status === 'failed' && r.code && r.code !== 'busy'">{{ codeLabel(r.code) }}</span></td>
             <td class="c-dim mono">{{ r.duration_ms ? (r.duration_ms / 1000).toFixed(1) + 's' : '—' }}</td>
             <td>
               <template v-if="r.status === 'success'">
                 <button v-if="r.md_file_id" class="btn xs" @click="files.openFile(r.md_file_id, 'webclip')">md</button>
                 <button v-if="r.html_file_id" class="btn xs" style="margin-left:4px" @click="files.openFile(r.html_file_id, 'webclip')">html</button>
+                <button class="btn xs" style="margin-left:4px" :disabled="submitting" title="重新抓取并覆盖原文件（同路径重蒸馏）" @click="reclipOne(r)">重剪</button>
               </template>
               <button v-else-if="r.status === 'failed'" class="btn xs" :disabled="submitting" @click="retryOne(r)">重试</button>
             </td>
@@ -123,6 +124,34 @@ async function submit() {
 }
 
 const codeLabel = (c: string) => ({ ssrf: 'SSRF拦截', dup: '重复', fetch: '网络', notready: '未就绪', toolarge: '超大', config: '配置', busy: '忙' }[c] || c)
+
+const copiedId = ref<number | null>(null)
+let copyTimer: ReturnType<typeof setTimeout> | null = null
+async function copyUrl(r: any) {
+  try {
+    await navigator.clipboard.writeText(String(r.url || ''))
+    copiedId.value = r.id
+    if (copyTimer) clearTimeout(copyTimer)
+    copyTimer = setTimeout(() => { copiedId.value = null }, 1500)
+  } catch { /* 剪贴板权限被拒：静默（title 已展示完整 URL 可手动复制） */ }
+}
+
+async function reclipOne(r: any) {
+  if (submitting.value) return
+  submitting.value = true
+  lastResult.value = null
+  try {
+    const res = await api.webclip.reclip(r.id)
+    lastResult.value = res.success
+      ? { ok: true, msg: `重新剪藏完成（${res.durationMs ? (res.durationMs / 1000).toFixed(1) : '?'}s · 图片 ${res.images ?? 0} 张），已覆盖原文件并重入蒸馏队列` }
+      : { ok: false, msg: res.message || '重新剪藏失败' }
+  } catch (e: any) {
+    lastResult.value = { ok: false, msg: `重新剪藏请求失败：${e?.message || e}` }
+  } finally {
+    submitting.value = false
+    await loadRecords(page.value)
+  }
+}
 
 async function retryOne(r: any) {
   if (submitting.value) return

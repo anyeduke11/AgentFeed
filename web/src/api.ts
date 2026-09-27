@@ -36,6 +36,7 @@ export const api = {
     putConfig: (storageRoot: string) => put(`${base}/webclip/config`, { storageRoot }),
     convert: (payload: { url: string; snapshot?: boolean; force?: boolean }) => post(`${base}/webclip/convert`, payload),
     retry: (id: number) => post(`${base}/webclip/records/${id}/retry`),
+    reclip: (id: number) => post(`${base}/webclip/records/${id}/reclip`),
     putLimits: (limits: Record<string, number>) => put(`${base}/webclip/limits`, limits),
     putImageFilter: (filter: Record<string, unknown>) => put(`${base}/webclip/imagefilter`, filter),
     records: (params?: Record<string, string>) => {
