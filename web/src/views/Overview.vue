@@ -112,7 +112,7 @@
     <div class="sect" style="margin-bottom:16px">
       <div class="sect-head">
         <span class="sq"></span><h2 class="stitle">每日精选</h2><span class="sect-en">Daily Picks</span>
-        <div class="sright"><span class="cap mono">{{ daily.date || '—' }} · 零成本轮转</span><router-link class="btn xs" to="/supply">推荐池</router-link></div>
+        <div class="sright"><span class="cap mono">{{ daily.date || '—' }} · 零成本轮转<template v-if="daily.hardCapped"> · 已达今日上限</template><template v-else-if="daily.softCapped"> · 仅显示部分</template><template v-if="(daily.hiddenTotal || 0) > 0"> · 另有 {{ daily.hiddenTotal }} 条未推送</template></span><router-link class="btn xs" to="/supply">推荐池</router-link></div>
       </div>
       <div v-if="daily.items?.length" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;padding:12px 14px">
         <div v-for="(it, i) in daily.items" :key="it.file_id" class="bcard" style="cursor:pointer" @click="openDaily(it)">
