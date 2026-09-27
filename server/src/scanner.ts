@@ -349,7 +349,7 @@ async function scanInner(options: ScanOptions): Promise<ScanResult> {
 
   // 存量扫描根路径归一化（幂等，仅在存在脏行时写）：尾斜杠根会让所有「path 是否位于该根之下」
   // 的判断永久失配（walk 产出的文件路径无尾斜杠），后果是该根的文件被孤儿清理误判为无主文件、
-  // 且其删除/排除规则永不生效。实测生产库 /~/Documents/ 一个尾斜杠根牵动 24116 个文件。
+  // 且其删除/排除规则永不生效。实测生产库 /Users/demo/Documents/ 一个尾斜杠根牵动 24116 个文件。
   const dirtyRoots = await (await db.prepare("SELECT id, path FROM scan_roots WHERE length(path) > 1 AND path LIKE '%/'")).all() as any[]
   for (const r of dirtyRoots) {
     await db.exec(`UPDATE scan_roots SET path = '${normalizeRootPath(r.path).replace(/'/g, "''")}' WHERE id = ${r.id}`)

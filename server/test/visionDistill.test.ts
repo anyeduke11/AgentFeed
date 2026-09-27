@@ -61,7 +61,7 @@ describe('视觉蒸馏：图片路径扫描根边界（防内容诱导任意文�
   })
 
   test('根外绝对路径丢弃（敏感文件不可达）', () => {
-    const refs = extractLocalImageRefs('<img src="/~/.ssh/id_rsa.png">', baseDir, 3, roots)
+    const refs = extractLocalImageRefs('<img src="/Users/demo/.ssh/id_rsa.png">', baseDir, 3, roots)
     assert.deepEqual(refs, [])
   })
 
@@ -76,7 +76,7 @@ describe('视觉蒸馏：图片路径扫描根边界（防内容诱导任意文�
   })
 
   test('allowedRoots 未传保持原行为（向后兼容）', () => {
-    const refs = extractLocalImageRefs('<img src="/~/.ssh/id_rsa.png">', baseDir)
-    assert.deepEqual(refs, ['/~/.ssh/id_rsa.png'])
+    const refs = extractLocalImageRefs('<img src="/Users/demo/.ssh/id_rsa.png">', baseDir)
+    assert.deepEqual(refs, ['/Users/demo/.ssh/id_rsa.png'])
   })
 })

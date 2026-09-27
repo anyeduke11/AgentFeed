@@ -87,7 +87,7 @@ AI 预标注小结（待人工复核）：21 条中 9 条偏 hit、9 条偏 part
 | 10 | 蒸馏 | #123337 AgentFeed README | #170817 本周收藏汇总（写作风格蒸馏） | hit | hit |
 | 11 | server | #123337 AgentFeed README | #85831 @cloudbase/agent-server 包 | hit | hit |
 | 12 | web | #123337 AgentFeed README | #86335 多维表格 Webhook API（web 子串噪声） | hit | partial ↓ |
-| 13 | README | #123337 AgentFeed README | #126396 vibecanon/README.md（path 查库核实命中 README 本身） | hit | hit |
+| 13 | README | #123337 AgentFeed README | #126396 <other-project>/README.md（path 查库核实命中 README 本身） | hit | hit |
 | 14 | docs | #86323 金山文档 Skill | #86401 金山文档 wps 工具集 | partial | partial |
 | 15 | config | #126344（摘要空，疑 path 命中） | #88212 ClickHouse 集群配置 API | partial | hit ↑ |
 | 16 | 前端 | #126477 前端 PRD 设计系统 | #85847 CloudBase 规则索引矩阵（path/摘要均无前端主题，已查库核实） | hit | partial ↓ |
@@ -110,7 +110,7 @@ AI 预标注小结（待人工复核）：21 条中 9 条偏 hit、9 条偏 part
 
 ### 人工复核记录（2026-09-21，复核人：维护者）
 
-复核方式：AI 分批呈交证据（P0 退步/归因/边界条目逐条查库 → 提升条目 → 持平抽查 3 条），逐批人工拍板确认。证据补齐两处：#90869 summary 含「SQLite 数据持久化」（instr=171/197）；#126396 path = `/~/Documents/vibecanon/README.md`（path 命中 README 文件本身，与旧口径一致）。
+复核方式：AI 分批呈交证据（P0 退步/归因/边界条目逐条查库 → 提升条目 → 持平抽查 3 条），逐批人工拍板确认。证据补齐两处：#90869 summary 含「SQLite 数据持久化」（instr=171/197）；#126396 path = `~/Documents/<other-project>/README.md`（path 命中 README 文件本身，与旧口径一致）。
 
 **结论：21/21 条维持 AI 预标注档位**——唯一争议点 #15「config」人工确认为 hit（Top-2 #85858 cloudbaserc 配置架构文档直接对应查询意图，按 Top-3 规则成立）。
 
