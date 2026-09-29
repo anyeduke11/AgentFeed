@@ -1,7 +1,7 @@
 <template>
-  <div v-if="ui.modal" class="modal-wrap">
+  <div v-if="ui.modal" class="modal-wrap" @keydown="onModalKey">
     <div class="modal-mask" @click="ui.closeModal()"></div>
-    <div class="modal">
+    <div class="modal" ref="modalEl" role="dialog" aria-modal="true" :aria-label="title">
       <div class="modal-head">{{ title }}</div>
       <div class="modal-body">
         <!-- 新增/编辑领域 -->
@@ -130,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import Icon from './Icon.vue'
 import { useUiStore } from '../stores/useUiStore'
 import { useDomainsStore } from '../stores/useDomainsStore'
@@ -142,6 +142,27 @@ const ui = useUiStore()
 const domains = useDomainsStore()
 const files = useFilesStore()
 const llm = useLlmStore()
+
+const modalEl = ref<HTMLElement | null>(null)
+
+/** 弹层打开即达键盘入口：优先聚焦首个表单控件，无表单则聚焦取消按钮 */
+watch(() => ui.modal, async (m) => {
+  if (!m) return
+  await nextTick()
+  const first = modalEl.value?.querySelector<HTMLElement>('input:not([disabled]), select:not([disabled]), .modal-foot .btn:not([disabled])')
+  first?.focus({ preventScroll: true })
+})
+
+/** 焦点圈闭（WAI-ARIA dialog 最低要求）：Tab/Shift+Tab 循环留在弹层内，不漏到背景页 */
+function onModalKey(e: KeyboardEvent) {
+  if (e.key !== 'Tab') return
+  const focusables = Array.from(modalEl.value?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])
+  if (!focusables.length) return
+  const first = focusables[0]
+  const last = focusables[focusables.length - 1]
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+}
 
 const SWATCHES = ['#C2402A', '#B4651A', '#C25E00', '#6B7A3E', '#1E8E5A', '#0E6E8C', '#2456A6', '#7A5AA8']
 

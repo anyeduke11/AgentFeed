@@ -1,7 +1,7 @@
 <template>
   <div>
     <header class="topbar" :class="{ paused: ui.queuePaused }">
-      <button class="btn ghost icon-btn menu-btn" @click="ui.toggleMenu()" aria-label="导航菜单" title="导航菜单">
+      <button class="btn ghost icon-btn menu-btn" @click="ui.toggleMenu()" aria-label="导航菜单" title="导航菜单" :aria-expanded="ui.menuOpen">
         <Icon name="menu" :size="18" />
       </button>
       <router-link to="/overview" class="brand">
@@ -27,7 +27,7 @@
       </div>
     </header>
 
-    <div class="menu-drawer" :class="{ on: ui.menuOpen }" aria-label="导航抽屉">
+    <div class="menu-drawer" :class="{ on: ui.menuOpen }" aria-label="导航抽屉" :aria-hidden="!ui.menuOpen">
       <div class="menu-head">
         <span class="brand-plate">调度站</span>
         <button class="btn ghost icon-btn" style="margin-left:auto" @click="ui.toggleMenu(false)" title="关闭" aria-label="关闭导航抽屉">
@@ -52,7 +52,7 @@
     <FileDrawer />
     <AppModal />
 
-    <div class="toast" :class="{ on: ui.toastOn }">
+    <div class="toast" :class="{ on: ui.toastOn }" role="status" aria-live="polite">
       <Icon name="check" :size="15" />
       <span>{{ ui.toastMsg }}</span>
     </div>
@@ -60,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import Icon from './components/Icon.vue'
 import FileDrawer from './components/FileDrawer.vue'
@@ -99,10 +99,23 @@ function onScrimClose() {
   ui.closeDrawer()
 }
 
+/** 全局 Esc 关闭链：弹层 → 文件抽屉 → 导航抽屉（同级一次只关一层，符合层叠直觉） */
+function onGlobalKey(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (ui.modal) ui.closeModal()
+  else if (ui.drawerFileId !== null) ui.closeDrawer()
+  else if (ui.menuOpen) ui.toggleMenu(false)
+}
+
 onMounted(async () => {
+  window.addEventListener('keydown', onGlobalKey)
   try {
     const q = await llm.fetchQueue()
     ui.queuePaused = !!q?.paused
   } catch { /* 后端未就绪时静默 */ }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onGlobalKey)
 })
 </script>
