@@ -41,7 +41,7 @@ async function refresh() {
   await Promise.all([
     treePanel.value?.refresh(),
     govPanel.value?.refresh(),
-    domains.fetchDomains()
+    domains.fetchDomains().catch(() => ui.toast('领域加载失败，请重试'))
   ])
 }
 </script>

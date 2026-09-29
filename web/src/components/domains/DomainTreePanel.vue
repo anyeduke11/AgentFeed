@@ -45,6 +45,9 @@
         </div>
       </div>
     </div>
+    <div v-else-if="domains.loading" class="domgrid" aria-busy="true">
+      <div v-for="i in 6" :key="i" class="domcard" style="min-height:110px"><div class="domband"></div><div class="dom-in"><div class="sk sk-line w60"></div><div class="sk sk-line w40"></div></div></div>
+    </div>
     <div v-else class="empty">
       <span class="e-ic"><Icon name="grid" :size="30" /></span>
       <div class="e-t">尚无领域</div>
@@ -96,7 +99,7 @@ function fmtN(n?: number) {
 }
 
 onMounted(() => {
-  domains.fetchDomains()
+  domains.fetchDomains().catch(() => ui.toast('领域加载失败，请点击刷新重试'))
   fetchSecTags()
 })
 

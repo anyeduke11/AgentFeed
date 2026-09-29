@@ -626,10 +626,12 @@ export async function seedDefaults(db: SqliteDatabase) {
   })
 }
 
-/** WAL 截断 checkpoint：best-effort。其他进程持锁时返回 busy=1 的行；异常向上抛，由调用方记录（fail loud） */
+/** WAL checkpoint：PASSIVE best-effort。不阻塞在线读写（有活跃 reader/writer 时本轮放弃，下轮再试），
+ *  WAL 回收由 journal_size_limit + autocheckpoint 兜底。
+ *  WHY 不用 TRUNCATE：TRUNCATE 需独占等待所有 reader 退场，同步驱动下曾把在线读请求阻塞至 90s+。 */
 export async function checkpointWal(): Promise<{ busy: number; frames: number; checkpointed: number }> {
   const d = db ?? (await getDb())
-  const row = await (await d.prepare('PRAGMA wal_checkpoint(TRUNCATE)')).get() as any
+  const row = await (await d.prepare('PRAGMA wal_checkpoint(PASSIVE)')).get() as any
   return { busy: Number(row?.busy ?? 0), frames: Number(row?.log ?? 0), checkpointed: Number(row?.checkpointed ?? 0) }
 }
 
