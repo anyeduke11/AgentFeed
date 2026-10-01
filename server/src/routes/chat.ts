@@ -211,13 +211,28 @@ export function buildSkillPrompt(skill: Skill, message: string, ctx: SkillContex
   }
   if (skill === 'quiz') {
     const entries = ctx.domainCtx?.topEntries || []
+    if (!entries.length) {
+      // 无素材出不了结构化题：保持自由文本如实说明（走通用 delta 回退路，不空转 LLM 契约）
+      return [
+        '任务：用户想自测，但当前领域没有可出题的库内词条——如实说明需先选择有词条的领域或先完成蒸馏，并建议先「领域速览」看看库里有什么。',
+        domainBlock,
+        '',
+        `【用户留言】${message}`,
+      ].join('\n')
+    }
+    // 结构化出题契约（题型混合 + 答案/解析/来源，前端渲染可交互答题卡）。
+    // callLlm 强制 json_object 模式 → LLM 直接回 JSON 对象本身（不再包 answer 信封）。
     return [
-      '任务：基于当前领域 top 词条要点出 3 道自测题（只出题不出答案，等用户作答后再评讲）。',
+      '任务：基于当前领域 top 词条出 5 道自测题，题型混合：至少 2 道单选（type=choice）、1 道判断（type=judge）、其余简答（type=short）。',
+      '每题必须给出：答案（choice 填选项字母如 "B"；judge 填 "对" 或 "错"；short 填参考答案要点）、一句话解析（explanation，说明为什么 + 记忆锚点）、来源词条 id 数组（sources，取自出题素材括号内的 id，便于用户跳原文深度学习）。',
       domainBlock,
       '【出题素材】（当前领域 top 词条）',
-      ...(entries.length
-        ? entries.map((e, i) => `- [${i + 1}] (id:${e.fileId ?? '-'}) ${e.title}${e.summary ? '：' + e.summary.slice(0, 120) : ''}`)
-        : ['（无领域词条——如实说明需先选择领域或先蒸馏词条）']),
+      ...entries.map((e, i) => `- [${i + 1}] (id:${e.fileId ?? '-'}) ${e.title}${e.summary ? '：' + e.summary.slice(0, 120) : ''}`),
+      '',
+      '输出格式：只输出一个 JSON 对象 {"questions":[...]}，不要代码围栏。每题结构：',
+      '单选 {"type":"choice","question":"题干","options":["A. …","B. …","C. …","D. …"],"answer":"B","explanation":"…","sources":[id]}',
+      '判断 {"type":"judge","question":"陈述句题干","answer":"对","explanation":"…","sources":[id]}',
+      '简答 {"type":"short","question":"开放题干","answer":"参考答案要点","explanation":"…","sources":[id]}',
       '',
       `【用户留言】${message}`,
     ].join('\n')
@@ -261,6 +276,50 @@ export function extractAnswer(text: string): string {
 
 function toRef(id: any, title: any): { id: number, title: string } {
   return { id: Number(id), title: cleanTitle(String(title ?? '')) }
+}
+
+// ---- 结构化出题（quiz 答题卡）----
+/** 题型：choice=单选（options + 字母答案）· judge=判断（对/错）· short=简答（参考答案） */
+export interface QuizQuestion {
+  type: 'choice' | 'judge' | 'short'
+  question: string
+  options?: string[]
+  answer: string
+  explanation?: string
+  sources?: number[]
+}
+
+/**
+ * 结构化出题解析：围栏剥离 → JSON.parse → 逐题结构校验（bad 题丢弃，全败返回 null）。
+ * WHY 不宽容拼凑：答题卡的判分/来源跳转依赖字段真实性——options 缺失的单选无法作答，
+ * 与其渲染残卡不如回退自由文本（格式漂移不炸 UI）。
+ */
+export function parseQuizQuestions(text: string): QuizQuestion[] | null {
+  const t = String(text ?? '').trim()
+  const m = t.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/)
+  let obj: any
+  try { obj = JSON.parse(m ? m[1] : t) } catch { return null }
+  const raw = Array.isArray(obj?.questions) ? obj.questions : null
+  if (!raw?.length) return null
+  const out: QuizQuestion[] = []
+  for (const q of raw) {
+    if (!q || typeof q.question !== 'string' || !q.question.trim()) continue
+    if (typeof q.answer !== 'string' || !q.answer.trim()) continue
+    const type = q.type === 'choice' || q.type === 'judge' || q.type === 'short' ? q.type : null
+    if (!type) continue
+    if (type === 'choice') {
+      const opts = Array.isArray(q.options) ? q.options.filter((o: any) => typeof o === 'string' && o.trim()) : []
+      if (opts.length < 2) continue
+      out.push({ type, question: q.question.trim(), options: opts, answer: q.answer.trim(), explanation: typeof q.explanation === 'string' ? q.explanation : '', sources: toSourceIds(q.sources) })
+    } else {
+      out.push({ type, question: q.question.trim(), answer: q.answer.trim(), explanation: typeof q.explanation === 'string' ? q.explanation : '', sources: toSourceIds(q.sources) })
+    }
+  }
+  return out.length ? out.slice(0, 8) : null
+}
+
+function toSourceIds(v: any): number[] {
+  return Array.isArray(v) ? v.map((x: any) => Number(x)).filter(n => Number.isFinite(n) && n > 0) : []
 }
 
 /** 检索 + 零命中放宽：POST 实时问答与回放回填共用，保证回答中 [n] 编号与引用清单口径一致。
@@ -378,14 +437,15 @@ chatRouter.post('/', async (req, res) => {
     send({ type: 'meta', refs })
 
     // 4) LLM 生成（非流式）→ SSE 模拟流式；失败降级 fallback（可用性优先，不落 assistant 消息）
+    // quiz 结构化出题：json_object 模式直接回 {"questions":[...]}，不套 answer 信封
     const provider = await getDefaultProvider()
     const model = await getDefaultModel()
-    const prompt = [systemPrompt, '', userPrompt, '', ENVELOPE_RULE].join('\n')
+    const prompt = [systemPrompt, '', userPrompt, '', ...(skill === 'quiz' ? [] : [ENVELOPE_RULE])].join('\n')
     const t0 = Date.now()
     let answer: string
     try {
       const r = await chatLlmFn(provider, model, prompt)
-      answer = extractAnswer(r.text)
+      answer = skill === 'quiz' ? String(r.text ?? '').trim() : extractAnswer(r.text)
       await saveCallLog({
         file_id: null,
         provider, model,
@@ -410,8 +470,16 @@ chatRouter.post('/', async (req, res) => {
     }
 
     // 5) 流式推送 + assistant 落库（含引用清单，回放可还原 chips）+ done（落库先于 done：客户端刷新会话列表时数据已就绪）
-    for (let i = 0; i < answer.length; i += DELTA_CHUNK) send({ type: 'delta', text: answer.slice(i, i + DELTA_CHUNK) })
-    await insertChatMessage(db, sessionId, 'assistant', answer, JSON.stringify(refs))
+    // quiz 结构化路：解析成功 → 逐题 quiz 事件（前端答题卡）；落库 content 带 QUIZ_JSON: 前缀供回放还原。
+    // 解析失败（格式漂移/无素材自由文本）→ 回退 delta 流式，答题卡不是硬依赖。
+    const quizQs = skill === 'quiz' ? parseQuizQuestions(answer) : null
+    if (quizQs) {
+      for (const q of quizQs) send({ type: 'quiz', q })
+      await insertChatMessage(db, sessionId, 'assistant', 'QUIZ_JSON:' + JSON.stringify(quizQs), JSON.stringify(refs))
+    } else {
+      for (let i = 0; i < answer.length; i += DELTA_CHUNK) send({ type: 'delta', text: answer.slice(i, i + DELTA_CHUNK) })
+      await insertChatMessage(db, sessionId, 'assistant', answer, JSON.stringify(refs))
+    }
     send({ type: 'done', sessionId })
     res.end()
   } catch (e: any) {

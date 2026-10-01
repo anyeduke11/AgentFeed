@@ -112,8 +112,50 @@
             <div v-else class="chat-row">
               <div class="chat-bubble assistant" :class="{ recap: m.recap }">
                 <span v-if="m.recap" class="chat-recap-tag">复盘</span>
-                <span class="chat-whitespace-pre">{{ m.content }}</span>
-                <span v-if="m.streaming" class="chat-caret"></span>
+                <!-- 结构化出题答题卡：单选/判断点选作答，简答自答；「查看答案与解析」统一揭晓 + 来源跳转深读 -->
+                <div v-if="m.quiz && m.quiz.length" class="chat-quiz">
+                  <div v-for="(q, qi) in m.quiz" :key="qi" class="chat-qcard">
+                    <div class="chat-qhead">
+                      <span class="chat-qtype" :class="'t-' + q.type">{{ qTypeLabel(q.type) }}</span>
+                      <span class="chat-qno mono">第 {{ qi + 1 }} 题 / 共 {{ m.quiz.length }} 题</span>
+                    </div>
+                    <div class="chat-qtext">{{ q.question }}</div>
+                    <div v-if="q.type === 'choice'" class="chat-qopts">
+                      <button v-for="opt in q.options" :key="opt" class="chat-qopt"
+                        :class="qoptClass(q, opt)" :disabled="q.revealed" @click="pickOpt(q, opt)">{{ opt }}</button>
+                    </div>
+                    <div v-else-if="q.type === 'judge'" class="chat-qopts">
+                      <button v-for="j in ['对', '错']" :key="j" class="chat-qopt chat-qjudge"
+                        :class="qoptClass(q, j)" :disabled="q.revealed" @click="pickOpt(q, j)">{{ j }}</button>
+                    </div>
+                    <textarea v-else class="chat-input chat-qshort" rows="2"
+                      placeholder="先自己作答，再对照参考答案" @input="q.picked = ($event.target as HTMLTextAreaElement).value" />
+                    <button class="chat-qreveal" @click="q.revealed = !q.revealed">
+                      {{ q.revealed ? '收起答案与解析' : '查看答案与解析' }}
+                    </button>
+                    <div v-if="q.revealed" class="chat-qans">
+                      <div class="chat-qans-row">
+                        <span class="chat-qans-k">答案</span>
+                        <span class="chat-qans-v" :class="judgePickedWrong(q) ? 'wrong' : ''">{{ q.answer }}</span>
+                        <span v-if="judgePickedWrong(q)" class="chat-qverdict wrong">你答错了</span>
+                        <span v-else-if="q.picked" class="chat-qverdict ok">答对了</span>
+                      </div>
+                      <div v-if="q.explanation" class="chat-qans-row"><span class="chat-qans-k">解析</span><span class="chat-qans-v">{{ q.explanation }}</span></div>
+                      <div v-if="q.sources && q.sources.length" class="chat-qans-row">
+                        <span class="chat-qans-k">来源</span>
+                        <span class="chat-qsrcs">
+                          <button v-for="sid in q.sources" :key="sid" class="chip sm" @click="jumpRef(sid)" :title="'阅读器打开 #' + sid + '（深读原文）'">
+                            <Icon name="file" :size="12" /> {{ refTitle(m, sid) }}
+                          </button>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <template v-else>
+                  <span class="chat-whitespace-pre">{{ m.content }}</span>
+                  <span v-if="m.streaming" class="chat-caret"></span>
+                </template>
                 <span v-if="m.error" class="chat-err">{{ m.error }}</span>
                 <!-- 引用词条 chips：跳站内阅读器 -->
                 <div v-if="m.refs && m.refs.length" class="chat-refs">
@@ -190,7 +232,9 @@ const ui = useUiStore()
 
 interface RefItem { id: number, title: string }
 interface FallbackItem { id: number, title: string, summary: string }
-interface Msg { role: 'user' | 'assistant', content: string, refs?: RefItem[], fallback?: FallbackItem[], error?: string, streaming?: boolean, recap?: boolean }
+/** 结构化出题（quiz 答题卡）：与后端 QuizQuestion 契约一致；picked/revealed 为前端交互态（不落库） */
+interface QuizQ { type: 'choice' | 'judge' | 'short', question: string, options?: string[], answer: string, explanation?: string, sources?: number[], picked?: string, revealed?: boolean }
+interface Msg { role: 'user' | 'assistant', content: string, refs?: RefItem[], fallback?: FallbackItem[], error?: string, streaming?: boolean, recap?: boolean, quiz?: QuizQ[] }
 /** 会话列表项：元数据来自 chat_sessions（老会话无行时 title 回退首问预览、其余缺省） */
 interface SessionItem { sessionId: string, title: string, domain: string | null, tags: string[], archived: boolean, preview: string, msgCount: number, lastAt: string }
 
@@ -228,6 +272,39 @@ async function loadHotPrompts() {
     const r = await api.chat.hotPrompts()
     hotPrompts.value = r?.items || []
   } catch { /* 引导是锦上添花，失败静默保留静态文案 */ }
+}
+
+// ---- 答题卡交互 ----
+const QTYPE_LABEL: Record<QuizQ['type'], string> = { choice: '单选', judge: '判断', short: '简答' }
+const qTypeLabel = (t: QuizQ['type']) => QTYPE_LABEL[t] || t
+
+/** 选项字母归一：兼容 "B" 与 "B." / "B、" 两种 LLM 形态 */
+function optLetter(opt: string): string {
+  const m = String(opt).trim().match(/^([A-Za-z])[.、．]?\s*/)
+  return m ? m[1].toUpperCase() : String(opt).trim().toUpperCase()
+}
+function isCorrectPick(q: QuizQ): boolean {
+  if (q.type === 'judge') return String(q.picked) === String(q.answer).trim()
+  if (q.type === 'choice') return optLetter(String(q.picked)) === optLetter(String(q.answer))
+  return String(q.picked || '').trim().length > 0
+}
+function pickOpt(q: QuizQ, opt: string) {
+  if (q.revealed) return
+  q.picked = opt
+}
+/** 揭晓后选项配色：正确项绿、错选红、其余中性 */
+function qoptClass(q: QuizQ, opt: string): Record<string, boolean> {
+  if (!q.revealed) return { picked: q.picked === opt }
+  const correct = q.type === 'choice' ? optLetter(opt) === optLetter(String(q.answer)) : opt === String(q.answer).trim()
+  return { correct, wrong: q.picked === opt && !correct }
+}
+function judgePickedWrong(q: QuizQ): boolean {
+  return !!q.revealed && !!q.picked && q.type !== 'short' && !isCorrectPick(q)
+}
+/** 来源标题：优先从消息引用清单取（有真标题），来源 id 不在引用内退 #id */
+function refTitle(m: Msg, id: number): string {
+  const hit = (m.refs || []).find(r => r.id === id)
+  return hit?.title || '#' + id
 }
 // 批次 A：搜索 / 归档视图 / 会话标记 / 行内重命名
 const searchQ = ref('')
@@ -412,15 +489,25 @@ function newChat() {
 }
 
 /** 回放消息映射：assistant 且 content 带 `[复盘] ` 前缀 → 剥前缀 + recap 标记（不同样式显示）；
- * refs 透传（新消息落库还原，存量消息由后端回放时回填），user 消息无引用 */
+ * QUIZ_JSON: 前缀 → 解析为答题卡（quiz 字段，content 留空）；refs 透传（新消息落库还原，存量消息由后端回放时回填），user 消息无引用 */
 function mapMessages(messages: Array<{ role: string, content: string, refs?: RefItem[] }>): Msg[] {
   return (messages || []).map(m => {
-    const recap = m.role !== 'user' && m.content.startsWith('[复盘]')
+    const isAssistant = m.role !== 'user'
+    const recap = isAssistant && m.content.startsWith('[复盘]')
+    let quiz: QuizQ[] | undefined
+    let content = m.content
+    if (isAssistant && content.startsWith('QUIZ_JSON:')) {
+      try {
+        const parsed = JSON.parse(content.slice('QUIZ_JSON:'.length))
+        if (Array.isArray(parsed) && parsed.length) { quiz = parsed; content = '' }
+      } catch { /* 前缀在但 JSON 坏：按原文显示（后端只写合法 JSON，防御性兜底） */ }
+    }
     return {
       role: m.role === 'user' ? 'user' : 'assistant',
-      content: recap ? m.content.replace(/^\[复盘\]\s*/, '') : m.content,
+      content: recap ? content.replace(/^\[复盘\]\s*/, '') : content,
       recap,
-      refs: m.role !== 'user' ? (m.refs || []) : undefined
+      quiz,
+      refs: isAssistant ? (m.refs || []) : undefined
     }
   })
 }
@@ -532,6 +619,11 @@ function handleEvent(ev: any, a: Msg) {
   } else if (ev.type === 'delta') {
     a.content += ev.text
     scrollBottom()
+  } else if (ev.type === 'quiz') {
+    // 结构化出题：逐题累积为答题卡（content 留空 = 不渲染文本气泡）
+    if (!a.quiz) a.quiz = []
+    a.quiz.push(ev.q)
+    scrollBottom()
   } else if (ev.type === 'done') {
     if (ev.sessionId) sessionId.value = ev.sessionId
   } else if (ev.type === 'fallback') {
@@ -616,6 +708,36 @@ onMounted(() => {
 
 /* 空态引导 */
 .chat-guide { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; max-width: 460px; padding: 24px 12px; }
+
+/* 结构化出题答题卡：题型徽标 + 点选作答 + 揭晓答案/解析/来源跳转（深度学习闭环） */
+.chat-quiz { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.chat-qcard { border: 1px solid var(--border); background: var(--card-2); border-radius: var(--r); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.chat-qhead { display: flex; align-items: center; gap: 8px; }
+.chat-qtype { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: var(--r); background: var(--ink); color: var(--on-ink); }
+.chat-qtype.t-judge { background: var(--run); }
+.chat-qtype.t-short { background: var(--ok); }
+.chat-qno { margin-left: auto; font-size: 10.5px; color: var(--text-3); }
+.chat-qtext { font-size: 13px; line-height: 1.65; font-weight: 600; }
+.chat-qopts { display: flex; flex-direction: column; gap: 6px; }
+.chat-qopt { text-align: left; font: inherit; font-size: 12.5px; line-height: 1.55; border: 1px solid var(--border); background: var(--card); border-radius: var(--r); padding: 6px 10px; cursor: pointer; transition: border-color .15s, background .15s; }
+.chat-qopt:hover:not(:disabled) { border-color: var(--ink); background: var(--hover); }
+.chat-qopt.picked { border-color: var(--ink); background: var(--active-soft); font-weight: 600; }
+.chat-qopt:disabled { cursor: default; }
+.chat-qopt.correct { border-color: var(--ok); background: rgba(30, 142, 90, .1); }
+.chat-qopt.wrong { border-color: var(--fail); background: var(--danger-soft); }
+.chat-qjudge { flex: 0 0 auto; align-self: flex-start; min-width: 72px; text-align: center; }
+.chat-qshort { font-size: 12.5px; resize: vertical; }
+.chat-qreveal { align-self: flex-start; font: inherit; font-size: 12px; font-weight: 600; border: 1px solid var(--border); background: var(--card); border-radius: var(--r); padding: 4px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+.chat-qreveal:hover { border-color: var(--ink); background: var(--hover); }
+.chat-qans { border-top: 1px dashed var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.chat-qans-row { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; line-height: 1.65; }
+.chat-qans-k { flex: none; font-size: 11px; color: var(--on-ink); background: var(--ink); padding: 1px 6px; border-radius: var(--r); font-family: var(--mono); letter-spacing: 1px; }
+.chat-qans-v { flex: 1; min-width: 0; white-space: pre-wrap; }
+.chat-qans-v.wrong { color: var(--fail); }
+.chat-qverdict { flex: none; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 9px; }
+.chat-qverdict.ok { color: var(--ok-ink); background: rgba(30, 142, 90, .12); }
+.chat-qverdict.wrong { color: var(--fail); background: rgba(194, 64, 42, .1); }
+.chat-qsrcs { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* 热门提示词（空态引导）：三张微卡 = 热度信号可直接消费的入口，非纯装饰 */
 .chat-hot { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 8px; width: 100%; }

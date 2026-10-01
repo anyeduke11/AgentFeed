@@ -238,9 +238,10 @@ test('skill=overview：透传 prompt 侧验证含 topEntries 标题；其余 3 �
     // connect：基于近 10 条打开记录
     const pConnect = buildSkillPrompt('connect', '串一下', { domainCtx: null, recentReads: [{ fileId: fHit, title: '混合检索怎么工作原理详解', domainName: 'chat-域甲' }] })
     assert.ok(pConnect.includes('最近打开记录') && pConnect.includes('混合检索怎么工作原理详解'))
-    // quiz：领域 top 词条出题
+    // quiz：领域 top 词条出题（结构化契约：题型混合 + 每题答案/解析/来源）
     const pQuiz = buildSkillPrompt('quiz', '考我', { domainCtx: await aggregateDomainContext('chat-域甲') })
-    assert.ok(pQuiz.includes('域甲陪练词条Alpha') && pQuiz.includes('3 道自测题'))
+    assert.ok(pQuiz.includes('域甲陪练词条Alpha') && pQuiz.includes('choice') && pQuiz.includes('judge') && pQuiz.includes('sources'), 'quiz 契约须含题型混合与来源字段')
+    assert.ok(pQuiz.includes('(id:' + fHit + ')'), '出题素材须带词条 id（sources 溯源依据）')
   } finally {
     setChatLlmFn(async () => ({ text: JSON.stringify({ answer: ANSWER_TEXT }) }))
   }
@@ -648,4 +649,81 @@ test('hot-prompts：零信号回退静态技能三问（空库引导不空转）
   // 种子文件无打开记录但有蒸馏摘要——回退前还有 touch_count 兜底路；两者 tag 均非「快捷技能」时说明信号路仍在工作。
   // 此处只断言不崩 + 恒有 3 条可点（业务承诺：引导永远可用）
   for (const it of items) assert.ok(it.prompt, '回退路径仍需完整 prompt')
+})
+
+// ---- 结构化出题（quiz 答题卡）契约 ----
+// WHY：出题从自由文本升级为可交互答题卡（单选/判断/简答 + 查看答案与解析 + 来源跳转），
+// 依赖三个不变式：① 解析器拒收残题（choice 无 options 无法作答，渲染残卡不如回退文本）
+// ② SSE 事件序列在 quiz 路仍是 meta→(quiz*)→done（前端按事件类型渲染，顺序错即 UI 撕裂）
+// ③ 落库 QUIZ_JSON: 前缀 + 合法 JSON（回放还原答题卡的唯一依据，坏 JSON = 会话历史丢失）。
+
+test('parseQuizQuestions：合法解析 + 围栏剥离 + 残题丢弃 + 非法整体回退 null', async () => {
+  const { parseQuizQuestions } = await import('../src/routes/chat.js')
+  const good = {
+    questions: [
+      { type: 'choice', question: '单选甲', options: ['A. 对', 'B. 错', 'C. 部分对', 'D. 未知'], answer: 'A', explanation: '解析甲', sources: [1, 2] },
+      { type: 'judge', question: '判断乙陈述', answer: '对', explanation: '解析乙', sources: [2] },
+      { type: 'short', question: '简答丙', answer: '要点一二', explanation: '解析丙', sources: [] },
+    ]
+  }
+  const r1 = parseQuizQuestions(JSON.stringify(good))
+  assert.ok(r1 && r1.length === 3)
+  assert.equal(r1![0].type, 'choice'); assert.equal(r1![0].options?.length, 4); assert.deepEqual(r1![0].sources, [1, 2])
+  // 围栏包裹（LLM 常见形态）
+  const r2 = parseQuizQuestions('```json\n' + JSON.stringify(good) + '\n```')
+  assert.ok(r2 && r2.length === 3, '代码围栏必须剥离')
+  // 残题丢弃：choice 缺 options / 缺 answer / 非法 type 全部拒收
+  const mixed = { questions: [
+    { type: 'choice', question: '无选项单选', answer: 'A' },
+    { type: 'choice', question: '无答案单选', options: ['A. x', 'B. y'] },
+    { type: 'essay', question: '未知题型', answer: 'x' },
+    { type: 'judge', question: '合法判断', answer: '错', sources: ['bad', 3] },
+  ] }
+  const r3 = parseQuizQuestions(JSON.stringify(mixed))
+  assert.ok(r3 && r3.length === 1, '残题必须丢弃、合法题保留')
+  assert.deepEqual(r3![0].sources, [3], '非数字来源 id 必须过滤、合法 id 保留')
+  // 整体非法：非 JSON / 空 questions / 全残 → null（调用方回退自由文本 delta 路）
+  assert.equal(parseQuizQuestions('不是 JSON'), null)
+  assert.equal(parseQuizQuestions('{"questions":[]}'), null)
+  assert.equal(parseQuizQuestions('{"questions":[{},{},{}]}'), null)
+})
+
+test('quiz SSE：结构化 LLM 回答 → quiz 事件流 + 落库 QUIZ_JSON: 前缀；自由文本回答 → delta 回退', async () => {
+  const db = await getDb()
+  const dom = await seedDomain('结构化出题域')
+  const qf1 = await seedFile(dom, '出题素材一', '素材一摘要：三路检索')
+  await seedFile(dom, '出题素材二', '素材二摘要：RRF 融合')
+  const quizJson = JSON.stringify({ questions: [
+    { type: 'choice', question: '检索三路不含哪路？', options: ['A. LIKE', 'B. FTS5', 'C. 向量', 'D. 图像'], answer: 'D', explanation: '无图像路', sources: [qf1] },
+    { type: 'judge', question: 'RRF 是融合排序方法', answer: '对', explanation: 'RRF 即倒数排名融合', sources: [qf1] },
+    { type: 'short', question: '简述检索放宽策略', answer: '零命中时降级更宽匹配', explanation: '保可用', sources: [] },
+  ] })
+  const sseQuiz = { status: 0, events: [] as any[], ended: false }
+  setChatLlmFn(async () => ({ text: quizJson }))
+  try {
+    Object.assign(sseQuiz, await sseCall({ message: '出题考我', domain: '结构化出题域', skill: 'quiz' }))
+    const types = sseQuiz.events.map(e => e.type)
+    assert.equal(types[0], 'meta', '首事件仍是 meta（引用 chips 先行）')
+    const quizEvents = sseQuiz.events.filter(e => e.type === 'quiz')
+    assert.equal(quizEvents.length, 3, '逐题 quiz 事件')
+    assert.equal(quizEvents[0].q.options?.length, 4, '单选题 options 透传')
+    assert.deepEqual(quizEvents[0].q.sources, [qf1], '来源 id 透传（前端跳原文依据）')
+    assert.equal(types[types.length - 1], 'done', '尾事件 done')
+    assert.ok(!types.includes('delta'), '结构化路不得再发 delta（避免答题卡与文本气泡重复）')
+    // 落库：QUIZ_JSON: 前缀 + 合法 JSON（回放还原依据）
+    const row = await (await db.prepare(
+      "SELECT content FROM chat_messages WHERE session_id = (SELECT session_id FROM chat_messages ORDER BY id DESC LIMIT 1) AND role = 'assistant' AND content LIKE 'QUIZ_JSON:%' ORDER BY id DESC LIMIT 1"
+    )).get() as any
+    assert.ok(row, 'assistant 消息必须以 QUIZ_JSON: 前缀落库')
+    const back = JSON.parse(String(row.content).slice('QUIZ_JSON:'.length))
+    assert.equal(back.length, 3, '落库 JSON 必须可无损还原答题卡')
+  } finally {
+    setChatLlmFn(async () => ({ text: JSON.stringify({ answer: ANSWER_TEXT }) }))
+  }
+  // 回退路：quiz skill 但 LLM 回了自由文本（格式漂移/无素材）→ delta 流式照旧
+  const sseFb = { status: 0, events: [] as any[], ended: false }
+  Object.assign(sseFb, await sseCall({ message: '出题考我回退', domain: '结构化出题域', skill: 'quiz' }))
+  const fbTypes = sseFb.events.map(e => e.type)
+  assert.ok(fbTypes.includes('delta'), '解析失败必须回退 delta 流式（答题卡不是硬依赖）')
+  assert.ok(!fbTypes.includes('quiz'), '回退路不得发半截 quiz 事件')
 })
