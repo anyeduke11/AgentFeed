@@ -96,6 +96,13 @@
             <span class="chat-guide-t">问你的知识库</span>
             <span class="chat-guide-s">回答只锚定库内已蒸馏的知识，超出范围会如实说明。引用词条可一键跳转站内阅读器。</span>
             <span class="chat-guide-s muted">· 上方选择领域，切换「领域陪练官」人格<br>· 快捷技能：解释这篇 / 串联我的阅读 / 考考我 / 领域速览</span>
+            <!-- 热门提示词：热度 = 库内采集 md/html 的消费信号（近30天打开/高星收藏/热门领域），每次刷新换一批 -->
+            <div v-if="hotPrompts.length" class="chat-hot">
+              <button v-for="(p, i) in hotPrompts" :key="i" class="chat-hot-item" :title="`${p.tag} · 点击直接提问`" @click="useHot(p)">
+                <span class="chat-hot-p">{{ p.prompt }}</span>
+                <span class="chat-hot-tag mono">{{ p.tag }}</span>
+              </button>
+            </div>
           </div>
 
           <template v-for="(m, i) in msgs" :key="i">
@@ -204,6 +211,24 @@ const recapping = ref(false)
 const domain = ref('')
 const domainOptions = ref<Array<{ id: number, name: string }>>([])
 const msgsEl = ref<HTMLElement | null>(null)
+// 热门提示词（空态引导）：后端按库内消费信号（近30天打开/高星收藏/热门领域）现算，每次刷新换一批
+interface HotPrompt { prompt: string, skill?: 'explain' | 'connect' | 'quiz' | 'overview', fileId?: number, domain?: string, tag: string }
+const hotPrompts = ref<HotPrompt[]>([])
+
+/** 点热门提示词 = 预填 + 直发；overview 类先切到目标领域（速览契约：无领域不生成） */
+function useHot(p: HotPrompt) {
+  if (sending.value) return
+  if (p.skill === 'overview' && p.domain) domain.value = p.domain
+  input.value = p.prompt
+  send(p.skill)
+}
+
+async function loadHotPrompts() {
+  try {
+    const r = await api.chat.hotPrompts()
+    hotPrompts.value = r?.items || []
+  } catch { /* 引导是锦上添花，失败静默保留静态文案 */ }
+}
 // 批次 A：搜索 / 归档视图 / 会话标记 / 行内重命名
 const searchQ = ref('')
 const showArchived = ref(false)
@@ -520,6 +545,7 @@ function handleEvent(ev: any, a: Msg) {
 onMounted(() => {
   loadSessions()
   loadDomains()
+  loadHotPrompts()
 })
 </script>
 
@@ -590,6 +616,15 @@ onMounted(() => {
 
 /* 空态引导 */
 .chat-guide { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; max-width: 460px; padding: 24px 12px; }
+
+/* 热门提示词（空态引导）：三张微卡 = 热度信号可直接消费的入口，非纯装饰 */
+.chat-hot { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 8px; width: 100%; }
+.chat-hot-item { flex: 1 1 140px; max-width: 170px; display: flex; flex-direction: column; gap: 4px; text-align: left; border: 1px solid var(--border); background: var(--card); border-radius: var(--r); padding: 8px 10px; cursor: pointer; font: inherit; transition: border-color .15s, background .15s, box-shadow .15s; }
+.chat-hot-item:hover { border-color: var(--ink); background: var(--hover); box-shadow: var(--shadow-1); }
+.chat-hot-item:active { transform: translateY(1px); }
+.chat-hot-p { font-size: 12.5px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.chat-hot-tag { font-size: 10.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 640px) { .chat-hot-item { flex: 1 1 100%; max-width: none; } }
 .chat-guide-ic { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: var(--ink); color: var(--on-ink); border-radius: var(--r); font-size: 18px; font-weight: 700; }
 .chat-guide-t { font-size: 15px; font-weight: 700; }
 .chat-guide-s { font-size: 12.5px; color: var(--text-2); line-height: 1.8; }

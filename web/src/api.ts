@@ -210,6 +210,7 @@ export const api = {
   },
 
   chat: {
+    hotPrompts: () => getJSON<{ success: boolean; items: Array<{ prompt: string; skill?: 'explain' | 'connect' | 'quiz' | 'overview'; fileId?: number; domain?: string; tag: string }> }>(`${base}/chat/hot-prompts`),
     sessions: (qs = '') => getJSON<{ success: boolean; sessions: Array<{ sessionId: string; title: string; domain: string | null; tags: string[]; archived: boolean; preview: string; msgCount: number; lastAt: string }> }>(`${base}/chat/sessions${qs}`),
     sessionDetail: (id: string) => getJSON<{ success: boolean; messages: Array<{ id: number; role: string; content: string; createdAt: string; refs?: Array<{ id: number; title: string }> }> }>(`${base}/chat/sessions/${encodeURIComponent(id)}`),
     patchSession: (id: string, payload: { title?: string; domain?: string | null; tags?: string[]; archived?: boolean }) => patch(`${base}/chat/sessions/${encodeURIComponent(id)}`, payload),
