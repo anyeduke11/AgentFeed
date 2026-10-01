@@ -867,6 +867,77 @@ chatRouter.post('/sessions/:id/export', async (req, res) => {
   }
 })
 
+// ---- 热门提示词（对话空态引导）：热度 = 库内采集 md/html 的真实消费信号，非拍脑袋静态文案 ----
+/** 三路热度源组池轮插抽 3，每次刷新重算（随机微变）：
+ *  ① 热门文章 = read_history 近 30 天打开次数（阅读器/推荐池/剪藏等出口埋点），零记录回退 touch_count（attention 触及回写）
+ *  ② 热门领域 = 近 30 天打开按 domain 聚合
+ *  ③ 高星收藏 = reading_feedback 近期 4~5 星（阅读闭环两维打分）
+ *  skill 映射贴合对话契约：文章→explain(带 fileId)；出题/串联→自由提问（检索锚定）；领域→overview（前端需先切领域） */
+interface HotPromptItem { prompt: string, skill?: 'explain' | 'connect' | 'quiz' | 'overview', fileId?: number, domain?: string, tag: string }
+
+chatRouter.get('/hot-prompts', async (_req, res) => {
+  try {
+    const db = await getDb()
+    const filePrompts: HotPromptItem[] = []
+    const hotFiles = await (await db.prepare(`
+      SELECT f.id, f.title, COUNT(r.id) AS opens
+      FROM read_history r JOIN files f ON f.id = r.file_id
+      WHERE f.status = 'active' AND f.summary IS NOT NULL AND f.title IS NOT NULL AND f.title != '' AND r.opened_at >= datetime('now', '-30 days')
+      GROUP BY r.file_id ORDER BY opens DESC, f.id DESC LIMIT 4
+    `)).all() as any[]
+    if (hotFiles.length) {
+      hotFiles.forEach((f, i) => {
+        const tag = `近30天打开 ${f.opens} 次`
+        if (i < 2) filePrompts.push({ prompt: `请解释「${f.title}」的核心要点与可执行项`, skill: 'explain', fileId: Number(f.id), tag })
+        filePrompts.push({ prompt: `就「${f.title}」出 3 道题考考我`, tag })
+      })
+    } else {
+      // 零打开记录：按触及次数兜底（attention P0 touch 回写——「热」不依赖打开埋点单一路径）
+      const touched = await (await db.prepare(`
+        SELECT id, title, touch_count FROM files
+        WHERE status = 'active' AND summary IS NOT NULL AND title IS NOT NULL AND title != '' AND touch_count > 0
+        ORDER BY pinned DESC, touch_count DESC LIMIT 4
+      `)).all() as any[]
+      for (const f of touched) filePrompts.push({ prompt: `请解释「${f.title}」的核心要点`, skill: 'explain', fileId: Number(f.id), tag: `高频触及 ${f.touch_count} 次` })
+    }
+    const domainPrompts: HotPromptItem[] = (await (await db.prepare(`
+      SELECT d.name, COUNT(r.id) AS opens
+      FROM read_history r
+      JOIN files f ON f.id = r.file_id AND f.status = 'active' AND f.domain_id IS NOT NULL
+      JOIN domains d ON d.id = f.domain_id
+      WHERE r.opened_at >= datetime('now', '-30 days')
+      GROUP BY d.id ORDER BY opens DESC LIMIT 3
+    `)).all() as any[]).map(d => ({ prompt: `给我一段「${d.name}」领域的速览`, skill: 'overview' as const, domain: String(d.name), tag: `热门领域 · 打开 ${d.opens} 次` }))
+    const starPrompts: HotPromptItem[] = (await (await db.prepare(`
+      SELECT f.id, f.title, MAX(rf.stars) AS stars
+      FROM reading_feedback rf JOIN files f ON f.id = rf.file_id
+      WHERE rf.stars >= 4 AND f.status = 'active' AND f.title IS NOT NULL AND f.title != ''
+      GROUP BY rf.file_id ORDER BY MAX(rf.created_at) DESC LIMIT 3
+    `)).all() as any[]).map(f => ({ prompt: `围绕「${f.title}」串联我最近的阅读，梳理成一条脉络`, skill: 'connect' as const, fileId: Number(f.id), tag: `收藏 ${f.stars} 星` }))
+    // 三源各自洗牌后轮插（保证三类信号在 3 个名额里尽量都有代表），截 3
+    const shuffle = <T,>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5)
+    const [fp, dp, sp] = [shuffle(filePrompts), shuffle(domainPrompts), shuffle(starPrompts)]
+    const interleaved: HotPromptItem[] = []
+    for (let i = 0; i < Math.max(fp.length, dp.length, sp.length); i++) {
+      if (fp[i]) interleaved.push(fp[i])
+      if (dp[i]) interleaved.push(dp[i])
+      if (sp[i]) interleaved.push(sp[i])
+    }
+    const items = interleaved.slice(0, 3)
+    if (!items.length) {
+      // 全空库回退：对齐工具条 4 个快捷技能中的 3 个（静态但可用）
+      items.push(
+        { prompt: '帮我串联最近的阅读', skill: 'connect', tag: '快捷技能' },
+        { prompt: '出 3 道题考考我', skill: 'quiz', tag: '快捷技能' },
+        { prompt: '给我一段领域速览', skill: 'overview', tag: '快捷技能' }
+      )
+    }
+    res.json({ success: true, items })
+  } catch (e: any) {
+    res.status(500).json({ success: false, message: e?.message || String(e) })
+  }
+})
+
 /**
  * POST /sessions/:id/distill——蒸馏入库：落盘（同 export）→ 复用 wiki import 单文件挂载内核
  * （解析行内元数据 → 与库内文件比对 → wiki_entries_meta + FTS 同步）。already = 同路径已入库幂等跳过。
