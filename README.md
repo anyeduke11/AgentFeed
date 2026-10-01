@@ -42,6 +42,7 @@ AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经�
 - **📊 调度总览 + 数据看板** — 双 Tab 看板：今日流量/趋势/来源占比一屏尽览；Agent 生产卡可下钻二级目录，领域占比以彩色气泡图呈现
 - **📚 阅读推荐闭环** — 规则分 + LLM 质量分双排序推荐池，每日精选零成本轮转；阅读进度手动挡 + 滚动自动记录，续读自动回位；两维打分入执行队列，周目标环与薄弱领域/停滞提示复盘
 - **📖 站内阅读器** — md/html 沙箱渲染（双保险：服务端白名单清洗 + iframe 禁脚本，内容零脚本执行），目录侧栏、字号与夜间主题，图片资源经扫描根边界代理
+- **♿ 可达性与体验细节** — 全键盘操作（Esc 关闭链、弹层焦点圈闭、focus-visible 焦点环）、读屏友好（aria-live 播报）、触控目标 ≥24px、跨平台字体栈（PingFang/HarmonyOS/MiSans/Noto）、prefers-reduced-motion 动画降级、移动端表格卡片化
 - **🔗 MCP Server** — stdio 方式暴露 `search_knowledge` / `read_entry` / `stats` / `getContext` / `get_user_context` 等 9 个工具，Trae / Claude Desktop / Cursor 直接挂载
 
 ## 🚀 快速开始
