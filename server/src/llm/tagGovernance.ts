@@ -153,7 +153,9 @@ async function proposalExists(db: any, kind: string, canonical: string, members:
 async function callLlmJson(prompt: string): Promise<any | null> {
   const provider = await getDefaultProvider()
   const model = await getDefaultModel()
-  const { text } = await callLlm(provider, model, prompt)
+  // maxTokens 4096：标签治理是分析型任务（对照领域清单/锚点词表再选型），模型思考与
+  // 复述会先于 JSON 出现——默认 2048 曾被耗尽致 llm_json_parse_failed（二级选拔实测）
+  const { text } = await callLlm(provider, model, prompt, undefined, undefined, { maxTokens: 4096 })
   const data = parseLlmJson(text)
   // 解析失败必须抛错（fail loud）：静默 null 会让扫描“0 提案 0 失败”地假成功
   if (data == null) throw new Error(`llm_json_parse_failed: ${String(text).slice(0, 200)}`)
@@ -188,7 +190,8 @@ async function semanticScanJob(batchSize: number) {
       const prompt = `你是内容管理系统的标签治理助手。下面是一批标签（JSON 数组，n 为名字，c 为使用次数）。
 找出其中语义相同或高度相近的重复标签组：中英文空格差异、单复数、别名、同义翻译、简写全称等变体应合并；仅仅主题相关或互相包含的不要合并。
 每组规范名 canonical 优先从该组成员中选出（优先使用次数最高、表达最通用的写法）；但若整组成员本质上都是下方锚点词表中某个词的同义/变体/从属表达，canonical 必须直接用该锚点名（此时 members 只含批内成员）。
-members 为全部组成员名字。输出 json：{"groups":[{"canonical":"规范名","members":["成员1","成员2"],"reason":"简短理由"}]}
+members 为全部组成员名字。
+输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"groups":[{"canonical":"规范名","members":["成员1","成员2"],"reason":"简短理由"}]}
 没有可合并的组时输出 {"groups":[]}
 
 高频锚点词表（全库挂载量最高，可作为合并目标）：
@@ -250,7 +253,11 @@ async function levelScanJob(minCount: number, batchSize: number) {
     scanState.message = `二级领域选拔：${tags.length} 个高频（≥${minCount} 次）普通标签分 ${batches.length} 批`
     let proposals = 0
     let failedBatches = 0
-    for (const batch of batches) {
+
+    /** 单批处理：失败重试 1 次 → 仍失败拆半各试（再一层）。WHY 拆半：flash 级混合推理模型
+     *  遇标签数多的批会先输出长思考再给 JSON（llm_json_parse_failed 两次重试实测同形态），
+     *  负载减半思考随之变短——比无脑放大 maxTokens 更可预期（窗口约束下输出预算不能无限加）。 */
+    const processBatch = async (batch: typeof tags, depth: number): Promise<void> => {
       const nameSet = new Set(batch.map(t => t.name))
       const prompt = `你是内容管理系统的标签分级助手。下面是普通标签列表（n 为名字，c 为使用次数）。
 从中挑出能代表「次要关键领域」的标签：应是一个有检索归类价值的主题领域概念（如技术方向、方法论、业务域），且语义不与已有的一级领域重复；过于细节、只对单篇内容有意义的标签不要选。
@@ -258,14 +265,13 @@ async function levelScanJob(minCount: number, batchSize: number) {
 1. 候选与现有一级领域同名、近义或为其子概念（如「前端」之于「前端开发」）→ 不要选，那属于重复而非补位；
 2. 候选应填补现有领域空白，优先使用次数高、概念泛化能力强的标签（量级是「重要标签」的依据）；
 3. 宁缺勿滥（不超过列表的一半）。
-输出 json：{"secondary":["标签名"],"reason":"整体说明"}
+输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"secondary":["标签名"],"reason":"整体说明"}
 
 现有的一级关键领域（名字，括号内为挂载次数）：
 ${primaryList}
 
 标签列表：
 ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
-      // 每批最多尝试 2 次：flash 级模型偶发空响应/输出截断（llm_json_parse_failed），重试通常可恢复
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           const data = await callLlmJson(prompt)
@@ -278,9 +284,17 @@ ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
               proposals++
             }
           }
-          break
+          scanState.lastError = '' // 成功即清错：残留旧错误会让前端「上次扫描出错」永久误导
+          return
         } catch (e: any) {
           if (attempt === 2) {
+            // 两次同形态失败 = 批负载过重的信号：拆半递归一层（≥2 个标签才拆得动），仍败才计入失败
+            if (depth < 1 && batch.length >= 2) {
+              const mid = Math.ceil(batch.length / 2)
+              await processBatch(batch.slice(0, mid), depth + 1)
+              await processBatch(batch.slice(mid), depth + 1)
+              return
+            }
             failedBatches++
             scanState.lastError = String(e?.message || e)
           } else {
@@ -288,8 +302,12 @@ ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
           }
         }
       }
+    }
+
+    for (const batch of batches) {
+      await processBatch(batch, 0)
       scanState.done++
-      await new Promise(r => setTimeout(r, 1000))
+      await new Promise(r => setTimeout(r, 1000)) // 批间节流，降低限流概率
     }
     scanState.lastResult = { proposals, failedBatches }
     scanState.message = `二级领域选拔完成：新增 ${proposals} 条分级建议${failedBatches ? `（${failedBatches} 批失败）` : ''}`
