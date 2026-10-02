@@ -176,8 +176,10 @@
                 <span class="chip on">{{ p.kind === 'semantic' ? '语义归组' : '二级选拔' }}</span>
                 <span class="cap mono">{{ p.created_at }}</span>
                 <span style="flex:1"></span>
-                <button class="btn xs primary" @click="acceptProposal(p)"><Icon name="check" :size="12" /> 接受</button>
-                <button class="btn xs" @click="rejectProposal(p)"><Icon name="x" :size="12" /> 驳回</button>
+                <button class="btn xs primary" :disabled="actingId !== null" @click="acceptProposal(p)">
+                  <Icon name="check" :size="12" /> {{ actingId === p.id ? '执行中…' : '接受' }}
+                </button>
+                <button class="btn xs" :disabled="actingId !== null" @click="rejectProposal(p)"><Icon name="x" :size="12" /> 驳回</button>
               </div>
               <div v-if="p.kind === 'semantic'" class="trow">
                 <span class="tagc"><span class="dot" style="background:var(--ok)"></span>{{ p.canonical }}</span>
@@ -508,13 +510,38 @@ function pMembers(m: string): string[] {
   try { return JSON.parse(m) || [] } catch { return [] }
 }
 
+// 提案操作执行态：服务高负载时请求可达十几秒——无反馈即「点了没反应」，按钮即时转执行中并锁其他提案
+const actingId = ref<number | null>(null)
+
 async function acceptProposal(p: any) {
-  const r: any = await api.tags.proposalAccept(p.id)
-  if (r.success === false) return ui.toast(r.message || '接受失败')
-  ui.toast(p.kind === 'semantic' ? `已合并，转移 ${r.moved} 处挂载` : `已设为次要 ${r.downgraded} 个标签`)
-  proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
-  loadTags(true)
-  loadGov()
+  if (actingId.value !== null) return
+  actingId.value = p.id
+  try {
+    const r: any = await api.tags.proposalAccept(p.id)
+    if (r.success === false) return ui.toast(r.message || '接受失败')
+    ui.toast(p.kind === 'semantic' ? `已合并，转移 ${r.moved} 处挂载` : `已设为次要 ${r.downgraded} 个标签`)
+    proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
+    loadTags(true)
+    loadGov()
+  } catch (e: any) {
+    ui.toast('接受失败：' + String(e?.message || e))
+  } finally {
+    actingId.value = null
+  }
+}
+
+async function rejectProposal(p: any) {
+  if (actingId.value !== null) return
+  actingId.value = p.id
+  try {
+    const r: any = await api.tags.proposalReject(p.id)
+    if (r.success === false) return ui.toast(r.message || '驳回失败')
+    proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
+  } catch (e: any) {
+    ui.toast('驳回失败：' + String(e?.message || e))
+  } finally {
+    actingId.value = null
+  }
 }
 
 const semanticPending = computed(() => proposals.value.filter((p: any) => p.kind === 'semantic').length)
@@ -532,12 +559,6 @@ async function acceptAllSemantic() {
   } finally {
     batchAccepting.value = false
   }
-}
-
-async function rejectProposal(p: any) {
-  const r: any = await api.tags.proposalReject(p.id)
-  if (r.success === false) return ui.toast(r.message || '操作失败')
-  proposals.value = proposals.value.filter((x: any) => x.id !== p.id)
 }
 
 function onOpsToggle(e: Event) {
