@@ -71,8 +71,10 @@ export function supportsVision(modelId: string): boolean {
   return /ocr|vision|image|(^|[-_.])vl($|[-_.\d])/i.test(modelId)
 }
 
-/** 调用选项：maxTokens 覆盖默认输出预算（分析型任务如标签治理需更大预算，见 callLlmJson） */
-export interface CallLlmOpts { maxTokens?: number }
+/** 调用选项：maxTokens 覆盖默认输出预算（分析型任务如标签治理需更大预算，见 callLlmJson）；
+ * thinkingDisabled 显式关闭混合推理模型的思考通道（sensenova 实测生效：大批治理任务思考
+ * 会吃满全部输出预算致 content 为空/JSON 缺失，禁思考后 35 标签批 55 tokens 即稳定出参） */
+export interface CallLlmOpts { maxTokens?: number; thinkingDisabled?: boolean }
 
 export async function callLlm(providerName: string, modelId: string, prompt: string, apiKey?: string, images?: LlmImage[], opts?: CallLlmOpts): Promise<{ text: string; usage?: { input?: number; output?: number }; stopReason?: string }> {
   const db = await getDb()
@@ -98,6 +100,9 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
     // 文档要求 prompt 中含 json 关键字——systemPrompt「outputs only JSON」已满足
     samplingParams: {
       response_format: { type: 'json_object' },
+      // opts.thinkingDisabled：治理类结构化任务显式关思考（请求体直传 thinking 字段，
+      // OpenAI 兼容网关普遍忽略未知字段；sensenova/GLM 系按 zhipu 语义禁用思考通道）
+      ...(opts?.thinkingDisabled ? { thinking: { type: 'disabled' } } : {}),
       // H1 修法④（2026-09-22 治愈验证复现）：pi-ai 不传 maxTokens 时请求体不带 max_tokens，
       // SenseNova 网关按自家默认上限（实测 ~250 tokens）硬掐输出——形态 A「无闭合 } 截断」的
       // 物理根源即此。蒸馏产物（title+summary+points+entities+relations）按输出预算上限

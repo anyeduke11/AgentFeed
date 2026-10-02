@@ -193,9 +193,11 @@
                   <span v-for="m in pMembers(p.members).filter(n => n !== p.canonical)" :key="m" class="tagc">{{ m }}</span>
                 </span>
               </div>
-              <div v-else class="trow">
+              <div v-else class="trow" style="flex-wrap:wrap">
                 <span class="cap">设为次要领域：</span>
-                <span v-for="m in pMembers(p.members)" :key="m" class="tagc">{{ m }}</span>
+                <span v-for="m in pMembers(p.members)" :key="m" class="tagc" :title="memberParentOf(p, m) ? `拟挂靠一级领域「${memberParentOf(p, m)}」` : '一级归属未定'">
+                  {{ m }}<template v-if="memberParentOf(p, m)"> <span class="cap mono">→ {{ memberParentOf(p, m) }}</span></template>
+                </span>
               </div>
               <div class="cap" v-if="p.reason">{{ p.reason }}</div>
             </div>
@@ -531,6 +533,27 @@ onUnmounted(stopPolling)
 
 function pMembers(m: string): string[] {
   try { return JSON.parse(m) || [] } catch { return [] }
+}
+
+/** 二级选拔提案的成员一级归属（按成员）：
+ * 1. 新提案 attach_map（落提案即挂靠时写入的成员→一级名映射）——每成员可挂不同一级；
+ * 2. 回退 reason 前缀/实际挂靠（存量提案只有提案级归属，整串显示） */
+function memberParentOf(p: any, m: string): string {
+  let am: Record<string, string> | null = null
+  try { am = p.attach_map ? JSON.parse(p.attach_map) : null } catch { am = null }
+  if (am && am[m]) return String(am[m])
+  return levelParentOf(p)
+}
+
+/** 存量提案的一级归属：优先查实际挂靠，回退解析 reason 前缀 */
+function levelParentOf(p: any): string {
+  const kids = pMembers(p.members)
+  for (const n of kids) {
+    const hit = treeTags.value.find((t: any) => t.name === n && t.level === 'secondary')
+    if (hit?.parent_name) return String(hit.parent_name)
+  }
+  const m = String(p.reason || '').match(/→ 挂靠到一级：(.+?)。/)
+  return m ? m[1] : ''
 }
 
 // 提案操作执行态：服务高负载时请求可达十几秒——无反馈即「点了没反应」，按钮即时转执行中并锁其他提案

@@ -155,6 +155,10 @@ export async function getDb(): Promise<SqliteDatabase> {
       { name: 'touch_count', ddl: 'touch_count INTEGER DEFAULT 0' },
       { name: 'pinned', ddl: 'pinned INTEGER DEFAULT 0' }
     ])
+    // 标签治理：level 提案的成员→一级挂靠映射（落提案即挂靠时写入），前端按成员显示归属
+    await ensureColumns(db, 'tag_proposals', [
+      { name: 'attach_map', ddl: 'attach_map TEXT' }
+    ])
     // 索引须在加列之后建（initTables 索引批量先于 ensureColumns 执行，列尚不存在会炸初始化）
     await db.exec('CREATE INDEX IF NOT EXISTS idx_files_touched ON files(last_touched_at)')
     await seedDefaults(db)
