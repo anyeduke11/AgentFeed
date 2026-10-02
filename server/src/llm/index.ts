@@ -71,7 +71,10 @@ export function supportsVision(modelId: string): boolean {
   return /ocr|vision|image|(^|[-_.])vl($|[-_.\d])/i.test(modelId)
 }
 
-export async function callLlm(providerName: string, modelId: string, prompt: string, apiKey?: string, images?: LlmImage[]): Promise<{ text: string; usage?: { input?: number; output?: number }; stopReason?: string }> {
+/** 调用选项：maxTokens 覆盖默认输出预算（分析型任务如标签治理需更大预算，见 callLlmJson） */
+export interface CallLlmOpts { maxTokens?: number }
+
+export async function callLlm(providerName: string, modelId: string, prompt: string, apiKey?: string, images?: LlmImage[], opts?: CallLlmOpts): Promise<{ text: string; usage?: { input?: number; output?: number }; stopReason?: string }> {
   const db = await getDb()
   const row = await (await db.prepare("SELECT value FROM config WHERE key = 'ai.providers'")).get() as any
   const providers: LlmProvider[] = row?.value ? JSON.parse(row.value) : []
@@ -100,7 +103,9 @@ export async function callLlm(providerName: string, modelId: string, prompt: str
       // 物理根源即此。蒸馏产物（title+summary+points+entities+relations）按输出预算上限
       // 约 1500 tokens，2048 已足够且给 8K 窗口输入侧多让 2K tokens（旧 4096 是压缩预算
       // 超窗的共因之一）；仍显著高于网关默认 250，防掐断语义保留。
-      maxTokens: 2048,
+      // opts.maxTokens：分析型任务（标签治理需先对照清单再选型）思考+复述会吃满 2048，
+      // JSON 载荷被截——由调用方按需放大（tagGovernance.callLlmJson 用 4096）。
+      maxTokens: opts?.maxTokens ?? 2048,
     },
     // 网络层快速重试（0.5-2s 退避）：覆盖 408/409/5xx 瞬时错误，尊重 retry-after 响应头
     maxRetries: 4,
