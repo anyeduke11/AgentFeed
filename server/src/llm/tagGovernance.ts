@@ -154,11 +154,21 @@ async function callLlmJson(prompt: string): Promise<any | null> {
   const provider = await getDefaultProvider()
   const model = await getDefaultModel()
   // maxTokens 4096：标签治理是分析型任务（对照领域清单/锚点词表再选型），模型思考与
-  // 复述会先于 JSON 出现——默认 2048 曾被耗尽致 llm_json_parse_failed（二级选拔实测）
-  const { text } = await callLlm(provider, model, prompt, undefined, undefined, { maxTokens: 4096 })
+  // 复述会先于 JSON 出现——默认 2048 曾被耗尽致 llm_json_parse_failed（二级选拔实测）。
+  // thinkingDisabled：混合推理模型（flash-lite 级）遇大批会先输出长思考，4096 也被烧光
+  // （finish=length、content 空，2026-10-02 真库复现：35 标签批 3 连败）——治理任务是
+  // 结构化选型而非开放式推理，禁思考后同批 55 tokens 即稳定出参（sensenova 直调实测）。
+  const { text } = await callLlm(provider, model, prompt, undefined, undefined, { maxTokens: 4096, thinkingDisabled: true })
   const data = parseLlmJson(text)
   // 解析失败必须抛错（fail loud）：静默 null 会让扫描“0 提案 0 失败”地假成功
   if (data == null) throw new Error(`llm_json_parse_failed: ${String(text).slice(0, 200)}`)
+  // 观测日志：secondary 元素形态（obj=新契约带 p / str=旧契约退化 / empty=合法零选）——
+  // 服务端无法回捞网关响应体，此行是线上输出形态的唯一观测面（service.log）
+  const sec = Array.isArray(data?.secondary) ? data.secondary : null
+  const shape = !sec ? 'missing' : sec.length === 0 ? 'empty' : (sec.some((x: any) => typeof x === 'object' && x) ? 'obj' : 'str')
+  console.log(`[tagGov] llm output shape=${shape} items=${sec?.length ?? 0} head=${String(text).slice(0, 120).replace(/\s+/g, ' ')}`)
+  // 旧契约（纯字符串数组）= 模型无视 p 规则的退化输出：抛错走上层重试，重试通常即恢复正常
+  if (shape === 'str') throw new Error('llm_level_contract_degraded: secondary 为字符串数组（缺 p），触发重试')
   return data
 }
 
@@ -244,8 +254,10 @@ export function buildLevelPrompt(primaryList: string, secondaryGrouped: string, 
 1. 候选与现有一级领域同名、近义或为其子概念（如「前端」之于「前端开发」）→ 不要选，那属于重复而非补位；
 2. 候选与现有二级领域（见下方清单）同名、近义、或本质可归入某个现有二级 → 不要选（它已经是二级/应整合进现有二级，而非新设）；
 3. 候选应填补现有领域空白，优先使用次数高、概念泛化能力强的标签（量级是「重要标签」的依据）；
-4. 宁缺勿滥（不超过列表的一半）。
-输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"secondary":["标签名"],"reason":"整体说明"}
+4. 宁缺勿滥（不超过列表的一半）；
+5. 每个入选标签必须同时给出 p = 最贴切的一级领域名（严格取自下方清单原样输出；跨多个一级 equally 贴切的选更聚焦的那个）。
+输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"secondary":[{"n":"标签名","p":"一级领域名"}],"reason":"整体说明"}
+正确示例：{"secondary":[{"n":"容器编排","p":"云原生"},{"n":"提示词工程","p":"人工智能"}],"reason":"…"}——每个元素都是含 n 和 p 两个字段的对象，禁止只给字符串数组。
 
 现有的一级关键领域（名字，括号内为挂载次数）：
 ${primaryList}
@@ -264,11 +276,15 @@ async function levelScanJob(minCount: number, batchSize: number) {
     const tags = await loadActiveTags({ level: 'normal', minFc: minCount })
     // 现有一级格局注入 prompt：AI 必须对照已有领域做重复/相近分析（此前不给清单，LLM 无从比对，「语义不与一级重复」形同虚设）
     const primaries = await (await db.prepare(`
-      SELECT t.name, COUNT(ft.file_id) AS mounts FROM tags t
+      SELECT t.id, t.name, COUNT(ft.file_id) AS mounts FROM tags t
       LEFT JOIN file_tags ft ON ft.tag_id = t.id
       WHERE t.status = 'active' AND t.level = 'primary'
       GROUP BY t.id ORDER BY mounts DESC`)).all() as any[]
     const primaryList = primaries.map(r => `${r.name}(${Number(r.mounts)})`).join('、') || '（暂无）'
+    // 一级名（归一）→ id：落提案时校验/解析 LLM 给的 p（幻觉父剥除，挂错比不挂危害大）。
+    // 注意 SELECT 必须带 t.id——Number(undefined)=NaN 不报错且 JSON.stringify 显示为 null，极难察觉
+    const primaryByKey = new Map<string, number>()
+    for (const p of primaries) primaryByKey.set(normalizeKey(String(p.name)), Number(p.id))
     // 现有二级格局注入（父级分组）：候选可归入现有二级的整合掉，不再另立新二级（用户裁决：整合优先于新增）
     const secRows = await (await db.prepare(`
       SELECT child.name AS name, parent.name AS parent_name FROM tags child
@@ -301,12 +317,31 @@ async function levelScanJob(minCount: number, batchSize: number) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           const data = await callLlmJson(prompt)
-          const names: string[] = (Array.isArray(data?.secondary) ? data.secondary : []).map(String).filter((n: string) => nameSet.has(n))
+          // 新契约 [{n,p}]；兼容旧字符串数组（p 缺省不挂靠）。p 幻觉父统一剥除（挂错比不挂危害大）
+          const rawPicks: Array<{ n: string, p: string }> = (Array.isArray(data?.secondary) ? data.secondary : [])
+            .map((x: any) => typeof x === 'string' ? { n: x, p: '' } : { n: String(x?.n ?? ''), p: String(x?.p ?? '') })
+          const picks = rawPicks
+            .filter(x => nameSet.has(x.n))
+            .map(x => ({ n: x.n, pid: primaryByKey.get(normalizeKey(x.p)) ?? null }))
+          const names = picks.map(x => x.n)
           if (names.length) {
             const key = JSON.stringify([...names].sort())
             if (!(await proposalExists(db, 'level', 'secondary', names))) {
-              await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, reason)
-                VALUES ('level', 'secondary', '${key.replace(/'/g, "''")}', '${String(data?.reason || '').replace(/'/g, "''")}')`)
+              // 落提案即挂靠（p 校验通过的）：消「软挂积压」根因；attach_map 存成员→一级名映射供前端按成员显示
+              const attachMap: Record<string, string> = {}
+              for (const x of picks) {
+                if (!x.pid) continue
+                await db.exec(`UPDATE tags SET parent_tag_id = ${x.pid} WHERE name = '${x.n.replace(/'/g, "''")}' AND status = 'active'`)
+                const parent = primaries.find(p => p.id === x.pid)
+                if (parent) attachMap[x.n] = String(parent.name)
+              }
+              const attachedNames = Object.keys(attachMap)
+              const attachNote = attachedNames.length
+                ? `→ 挂靠到一级：${[...new Set(attachedNames.map(n => attachMap[n]))].join('、')}。`
+                : '→ 一级归属未定（AI 拿不准，接受后可用「AI 自动挂靠」补挂）。'
+              const attachMapJson = JSON.stringify(attachMap).replace(/'/g, "''")
+              await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, reason, attach_map)
+                VALUES ('level', 'secondary', '${key.replace(/'/g, "''")}', '${(attachNote + ' ' + String(data?.reason || '')).replace(/'/g, "''")}', '${attachMapJson}')`)
               proposals++
             }
           }

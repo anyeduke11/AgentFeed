@@ -104,6 +104,7 @@ test('buildLevelPrompt：注入一级+二级清单与整合排除规则，批标
   assert.ok(p.includes('可归入某个现有二级'), '整合排除规则必须在场（候选近于现有二级不入选）')
   assert.ok(p.includes('"n":"项目管理","c":88'), '批标签按 n/c 契约进 payload')
   assert.ok(p.includes('第一个字符必须是'), '输出纪律条款在场（治 llm_json_parse_failed）')
+  assert.ok(p.includes('"p":"一级领域名"'), '新契约：每个入选标签须带一级归属 p（提案即挂靠）')
 })
 
 // ---- 孤儿二级 AI 批量挂靠 ----
