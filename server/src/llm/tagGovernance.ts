@@ -450,3 +450,76 @@ export async function importTags(items: Array<{ name?: string; color?: string }>
   })
   return { created, skipped }
 }
+
+// ---- 孤儿二级标签 AI 批量挂靠 ----
+// WHY：level 提案接受是「软挂不指父」（AI 不知该挂哪，留人工定），但 154 个积压证明
+// 人工补挂不会发生——领域卡（分拣区）只显示已挂靠二级，未挂靠 = 用户永远看不见。
+// 治理动作：一次 LLM 输出「二级 → 一级」映射，确定性校验（父必须 active primary）后挂靠。
+
+/** 挂靠 prompt 构建（导出供测试直测） */
+export function buildAttachPrompt(primaryList: string, orphans: string[]): string {
+  return `你是内容管理系统的标签治理助手。下面是一批「次要领域」标签（二级），它们尚未挂靠到任何「一级关键领域」。
+请为每个标签判断它最应隶属于哪个一级领域（按语义主题归属，如「云安全」→ 网络安全 或 云原生 取更贴切的）。
+判定要求：
+1. p 必须严格取自下方一级领域清单中的名字（原样输出，不要改写）；
+2. 拿不准、跨多个领域 equally 相关、或与任何一级都不贴合的 → 不要输出该标签（宁缺勿滥，保持未挂靠）。
+输出要求：不要输出任何分析过程或解释，第一个字符必须是 { ，只输出一行 json：{"attach":[{"n":"二级标签名","p":"一级领域名"}]}
+全部拿不准时输出 {"attach":[]}
+
+一级关键领域清单：
+${primaryList}
+
+待挂靠的二级标签：
+${JSON.stringify(orphans)}`
+}
+
+/**
+ * 孤儿二级批量挂靠（llmFn 可注入供测试）：分批（60/批）→ LLM 映射 → 确定性校验 → UPDATE。
+ * 返回 { attached, skipped, batches }；LLM 批失败计 skipped 不中断（治理可重跑，幂等）。
+ */
+export async function attachOrphanSecondary(
+  db: any,
+  llmFn: (prompt: string) => Promise<any> = (p) => callLlmJson(p),
+): Promise<{ attached: number; skipped: number; batches: number }> {
+  const primaries = await (await db.prepare(
+    "SELECT id, name FROM tags WHERE status = 'active' AND level = 'primary'"
+  )).all() as any[]
+  const primaryByKey = new Map<string, number>()
+  for (const p of primaries) primaryByKey.set(normalizeKey(String(p.name)), Number(p.id))
+  if (!primaryByKey.size) return { attached: 0, skipped: 0, batches: 0 }
+
+  const orphans = await (await db.prepare(
+    "SELECT id, name FROM tags WHERE status = 'active' AND level = 'secondary' AND parent_tag_id IS NULL ORDER BY name"
+  )).all() as any[]
+  if (!orphans.length) return { attached: 0, skipped: 0, batches: 0 }
+
+  const primaryList = primaries.map(p => p.name).join('、')
+  const BATCH = 60
+  let attached = 0
+  let skipped = 0
+  let batches = 0
+  for (let i = 0; i < orphans.length; i += BATCH) {
+    const chunk = orphans.slice(i, i + BATCH)
+    batches++
+    const nameById = new Map(chunk.map(t => [Number(t.id), String(t.name)]))
+    try {
+      const data = await llmFn(buildAttachPrompt(primaryList, chunk.map(t => String(t.name))))
+      const pairs: any[] = Array.isArray(data?.attach) ? data.attach : []
+      for (const pair of pairs) {
+        const n = String(pair?.n ?? '')
+        const hit = chunk.find(t => t.name === n)
+        const pid = primaryByKey.get(normalizeKey(String(pair?.p ?? '')))
+        // 确定性校验双闸：标签确在本批（防幻觉名）+ 父确是一级（防幻觉父），挂错比不挂危害大
+        if (!hit || !pid) { skipped++; continue }
+        await db.exec(`UPDATE tags SET parent_tag_id = ${pid} WHERE id = ${hit.id} AND parent_tag_id IS NULL`)
+        attached++
+        nameById.delete(hit.id)
+      }
+      skipped += nameById.size // LLM 未覆盖的（含拿不准）保持未挂靠
+    } catch {
+      skipped += chunk.length // 批失败整批跳过（治理幂等可重跑）
+    }
+  }
+  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('attach_secondary', '{"attached":${attached},"skipped":${skipped}}')`)
+  return { attached, skipped, batches }
+}

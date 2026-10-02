@@ -105,3 +105,43 @@ test('buildLevelPrompt：注入一级+二级清单与整合排除规则，批标
   assert.ok(p.includes('"n":"项目管理","c":88'), '批标签按 n/c 契约进 payload')
   assert.ok(p.includes('第一个字符必须是'), '输出纪律条款在场（治 llm_json_parse_failed）')
 })
+
+// ---- 孤儿二级 AI 批量挂靠 ----
+// WHY：level 提案软挂不指父 + 人工补挂不会发生（真实库积压 154 个）→ 领域卡只显示
+// 已挂靠二级 = 用户永远看不见。治理 = LLM 语义映射 + 确定性双闸校验：
+// 标签确在本批（防幻觉名）+ 父确是 active primary（防幻觉父）——挂错比不挂危害大。
+test('attachOrphanSecondary：合法映射挂靠、幻觉名/幻觉父拒绝、拿不准保持未挂靠、批失败不中断', async () => {
+  const { attachOrphanSecondary, buildAttachPrompt } = await import('../src/llm/tagGovernance.js')
+  const db = await getDb()
+  // 种：一级甲/乙 + 三个未挂靠二级
+  const mk = async (name: string, level: string, parent: number | null) => {
+    await db.exec(`INSERT INTO tags (name, level, parent_tag_id) VALUES ('${name}', '${level}', ${parent ?? 'NULL'})`)
+    return Number(((await (await db.prepare('SELECT id FROM tags WHERE name = ?')).get(name) as any).id))
+  }
+  const p1 = await mk('挂靠一级甲', 'primary', null)
+  await mk('挂靠一级乙', 'primary', null)
+  const s1 = await mk('挂靠二级甲', 'secondary', null)
+  const s2 = await mk('挂靠二级乙', 'secondary', null)
+  const s3 = await mk('挂靠二级丙', 'secondary', null)
+  // mock LLM：甲→一级甲（合法）；幻觉名（不在批）→拒；乙→幻觉父（不存在的一级）→拒；丙不提（拿不准）
+  const llm = async (prompt: string) => {
+    assert.ok(prompt.includes('挂靠一级甲') && prompt.includes('挂靠二级甲'), 'prompt 须注入一级清单与孤儿名单')
+    assert.ok(prompt.includes('"attach":[{"n":'), '输出契约须在 prompt 内')
+    return { attach: [
+      { n: '挂靠二级甲', p: '挂靠一级甲' },
+      { n: '不存在的标签', p: '挂靠一级乙' },
+      { n: '挂靠二级乙', p: '幻觉一级' },
+    ] }
+  }
+  const r = await attachOrphanSecondary(db, llm)
+  assert.equal(r.attached, 1, '仅合法映射挂靠')
+  assert.ok(r.skipped >= 2, '幻觉名/幻觉父/未提及均计 skipped')
+  const q = async (id: number) => ((await (await db.prepare('SELECT parent_tag_id AS p FROM tags WHERE id = ?')).get(id) as any).p)
+  assert.equal(await q(s1), p1, '合法映射挂到正确一级')
+  assert.equal(await q(s2), null, '幻觉父必须拒绝（保持未挂靠）')
+  assert.equal(await q(s3), null, 'LLM 未提及 = 拿不准，保持未挂靠')
+  // 空库路径：无孤儿时零调用
+  await db.exec(`UPDATE tags SET parent_tag_id = NULL WHERE id = ${s1}`)
+  const r2 = await attachOrphanSecondary(db, async () => { throw new Error('不应调用') })
+  assert.deepEqual({ a: r2.attached, b: r2.batches > 0 }, { a: 0, b: true }, '批失败整批跳过不中断')
+})
