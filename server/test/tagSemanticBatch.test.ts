@@ -87,3 +87,21 @@ test('批量接受：kind 非 semantic 返回 400', async () => {
   assert.equal(code, 400)
   assert.equal(body.success, false)
 })
+
+// ---- 二级选拔 prompt：现有二级格局注入（整合优先于新增） ----
+// WHY：选拔若看不到已有二级清单，会把「项目管理」这类已是二级的概念反复提为新二级
+// （真实库 10 条建议中 6 条与既有二级/一级重叠）。注入格局 + 规则 2 后，可归入现有
+// 二级的候选应被排除——整合优先于另立山头。
+test('buildLevelPrompt：注入一级+二级清单与整合排除规则，批标签入 payload', async () => {
+  const { buildLevelPrompt } = await import('../src/llm/tagGovernance.js')
+  const p = buildLevelPrompt(
+    '网络安全(4051)、数据安全(1045)',
+    '云原生 → 容器编排、服务 mesh\n人工智能 → 评估体系、RAG 落地',
+    [{ name: '项目管理', fc: 88 }, { name: 'RAG 工程', fc: 60 }]
+  )
+  assert.ok(p.includes('网络安全(4051)'), '一级清单必须注入（防重复补位）')
+  assert.ok(p.includes('云原生 → 容器编排、服务 mesh'), '二级分组清单必须注入（整合判断依据）')
+  assert.ok(p.includes('可归入某个现有二级'), '整合排除规则必须在场（候选近于现有二级不入选）')
+  assert.ok(p.includes('"n":"项目管理","c":88'), '批标签按 n/c 契约进 payload')
+  assert.ok(p.includes('第一个字符必须是'), '输出纪律条款在场（治 llm_json_parse_failed）')
+})

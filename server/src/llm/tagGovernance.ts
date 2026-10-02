@@ -234,6 +234,29 @@ ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
   }
 }
 
+/** 二级选拔 prompt 构建（导出供测试直测）：注入一级 + 二级现有格局。
+ *  一级清单：防重复补位；二级清单：候选已是/近于现有二级的不再入选（整合优先于新增）。
+ *  二级标签按父级分组呈现（父→子），AI 能判断候选可归入哪个现有二级而非另立山头。 */
+export function buildLevelPrompt(primaryList: string, secondaryGrouped: string, batch: Array<{ name: string, fc: number }>): string {
+  return `你是内容管理系统的标签分级助手。下面是普通标签列表（n 为名字，c 为使用次数）。
+从中挑出能代表「次要关键领域」的标签：应是一个有检索归类价值的主题领域概念（如技术方向、方法论、业务域），且语义不与已有的一级/二级领域重复；过于细节、只对单篇内容有意义的标签不要选。
+判定要求：
+1. 候选与现有一级领域同名、近义或为其子概念（如「前端」之于「前端开发」）→ 不要选，那属于重复而非补位；
+2. 候选与现有二级领域（见下方清单）同名、近义、或本质可归入某个现有二级 → 不要选（它已经是二级/应整合进现有二级，而非新设）；
+3. 候选应填补现有领域空白，优先使用次数高、概念泛化能力强的标签（量级是「重要标签」的依据）；
+4. 宁缺勿滥（不超过列表的一半）。
+输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"secondary":["标签名"],"reason":"整体说明"}
+
+现有的一级关键领域（名字，括号内为挂载次数）：
+${primaryList}
+
+现有的二级领域（「一级领域 → 其下二级标签」，候选与之重复/相近/可归入的都不要选）：
+${secondaryGrouped}
+
+标签列表：
+${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
+}
+
 /** AI 二级领域选拔（后台）：从普通标签中挑高频且具备领域概念的候选，产出「设为次要领域」提案 */
 async function levelScanJob(minCount: number, batchSize: number) {
   const db = await getDb()
@@ -246,6 +269,21 @@ async function levelScanJob(minCount: number, batchSize: number) {
       WHERE t.status = 'active' AND t.level = 'primary'
       GROUP BY t.id ORDER BY mounts DESC`)).all() as any[]
     const primaryList = primaries.map(r => `${r.name}(${Number(r.mounts)})`).join('、') || '（暂无）'
+    // 现有二级格局注入（父级分组）：候选可归入现有二级的整合掉，不再另立新二级（用户裁决：整合优先于新增）
+    const secRows = await (await db.prepare(`
+      SELECT child.name AS name, parent.name AS parent_name FROM tags child
+      LEFT JOIN tags parent ON parent.id = child.parent_tag_id
+      WHERE child.status = 'active' AND child.level = 'secondary'
+      ORDER BY COALESCE(parent.name, '未挂靠'), child.name`)).all() as any[]
+    const byParent = new Map<string, string[]>()
+    for (const r of secRows) {
+      const p = String(r.parent_name || '未挂靠')
+      if (!byParent.has(p)) byParent.set(p, [])
+      byParent.get(p)!.push(String(r.name))
+    }
+    const secondaryGrouped = byParent.size
+      ? [...byParent.entries()].map(([p, kids]) => `${p} → ${kids.join('、')}`).join('\n')
+      : '（暂无）'
     const batches: Array<typeof tags> = []
     for (let i = 0; i < tags.length; i += batchSize) batches.push(tags.slice(i, i + batchSize))
     scanState.total = batches.length
@@ -259,19 +297,7 @@ async function levelScanJob(minCount: number, batchSize: number) {
      *  负载减半思考随之变短——比无脑放大 maxTokens 更可预期（窗口约束下输出预算不能无限加）。 */
     const processBatch = async (batch: typeof tags, depth: number): Promise<void> => {
       const nameSet = new Set(batch.map(t => t.name))
-      const prompt = `你是内容管理系统的标签分级助手。下面是普通标签列表（n 为名字，c 为使用次数）。
-从中挑出能代表「次要关键领域」的标签：应是一个有检索归类价值的主题领域概念（如技术方向、方法论、业务域），且语义不与已有的一级领域重复；过于细节、只对单篇内容有意义的标签不要选。
-判定要求：
-1. 候选与现有一级领域同名、近义或为其子概念（如「前端」之于「前端开发」）→ 不要选，那属于重复而非补位；
-2. 候选应填补现有领域空白，优先使用次数高、概念泛化能力强的标签（量级是「重要标签」的依据）；
-3. 宁缺勿滥（不超过列表的一半）。
-输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"secondary":["标签名"],"reason":"整体说明"}
-
-现有的一级关键领域（名字，括号内为挂载次数）：
-${primaryList}
-
-标签列表：
-${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
+      const prompt = buildLevelPrompt(primaryList, secondaryGrouped, batch)
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
           const data = await callLlmJson(prompt)
