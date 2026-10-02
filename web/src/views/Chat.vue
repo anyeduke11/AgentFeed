@@ -153,7 +153,27 @@
                   </div>
                 </div>
                 <template v-else>
-                  <span class="chat-whitespace-pre">{{ m.content }}</span>
+                  <!-- 结构化排版：标题/章节/条目/行内强调按语义层级着色（纯插值渲染，零 v-html） -->
+                  <div class="cf-body">
+                    <template v-for="(b, bi) in parseChat(m.content)" :key="bi">
+                      <div v-if="b.kind === 'blank'" class="cf-blank"></div>
+                      <div v-else-if="b.kind === 'hr'" class="cf-hr"></div>
+                      <div v-else-if="b.kind === 'title'" class="cf-title">
+                        <template v-for="(x, xi) in b.inlines" :key="xi"><b v-if="x.t === 'bold'">{{ x.text }}</b><code v-else-if="x.t === 'code'" class="cf-code">{{ x.text }}</code><span v-else-if="x.t === 'bracket'" class="cf-bracket">{{ x.text }}</span><span v-else>{{ x.text }}</span></template>
+                      </div>
+                      <div v-else-if="b.kind === 'section'" class="cf-section">
+                        <span v-if="b.marker" class="cf-marker">{{ b.marker }}</span>
+                        <template v-for="(x, xi) in b.inlines" :key="xi"><b v-if="x.t === 'bold'">{{ x.text }}</b><code v-else-if="x.t === 'code'" class="cf-code">{{ x.text }}</code><span v-else-if="x.t === 'bracket'" class="cf-bracket">{{ x.text }}</span><span v-else>{{ x.text }}</span></template>
+                      </div>
+                      <div v-else-if="b.kind === 'item'" class="cf-item">
+                        <span class="cf-marker">{{ b.marker }}</span>
+                        <template v-for="(x, xi) in b.inlines" :key="xi"><b v-if="x.t === 'bold'">{{ x.text }}</b><code v-else-if="x.t === 'code'" class="cf-code">{{ x.text }}</code><span v-else-if="x.t === 'bracket'" class="cf-bracket">{{ x.text }}</span><span v-else>{{ x.text }}</span></template>
+                      </div>
+                      <div v-else class="cf-text">
+                        <template v-for="(x, xi) in b.inlines" :key="xi"><b v-if="x.t === 'bold'">{{ x.text }}</b><code v-else-if="x.t === 'code'" class="cf-code">{{ x.text }}</code><span v-else-if="x.t === 'bracket'" class="cf-bracket">{{ x.text }}</span><span v-else>{{ x.text }}</span></template>
+                      </div>
+                    </template>
+                  </div>
                   <span v-if="m.streaming" class="chat-caret"></span>
                 </template>
                 <span v-if="m.error" class="chat-err">{{ m.error }}</span>
@@ -224,6 +244,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { useUiStore } from '../stores/useUiStore'
 import { fmtTime } from '../utils/format'
+import { parseChat } from '../utils/chatFormat'
 import Icon from '../components/Icon.vue'
 
 const route = useRoute()
@@ -710,6 +731,21 @@ onMounted(() => {
 .chat-guide { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; max-width: 460px; padding: 24px 12px; }
 
 /* 结构化出题答题卡：题型徽标 + 点选作答 + 揭晓答案/解析/来源跳转（深度学习闭环） */
+
+/* 结构化排版（cf-*）：视觉层级映射语义层级——标题墨黑加大、章节墨黑+琥珀左线、
+   条目标记钢蓝、代码灰底 mono、【引导词】深琥珀；正文保持默认（着色只给语义，防噪音） */
+.cf-body { font-size: 13px; line-height: 1.75; display: flex; flex-direction: column; }
+.cf-blank { height: .45em; }
+.cf-hr { border: 0; border-top: 1px dashed var(--border); margin: 6px 0; }
+.cf-title { font-size: 14.5px; font-weight: 700; color: var(--ink); letter-spacing: .3px; padding: 2px 0 4px; }
+.cf-section { font-weight: 700; color: var(--ink); border-left: 3px solid var(--accent); padding-left: 8px; margin: 6px 0 2px; }
+.cf-item { padding-left: 2px; }
+.cf-marker { color: var(--steel); font-weight: 700; margin-right: 4px; }
+.cf-text { padding: 0; }
+.cf-body b { font-weight: 700; color: var(--ink); }
+.cf-code { font-family: var(--mono); font-size: 12px; background: var(--hover-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--run); white-space: pre-wrap; }
+.cf-bracket { color: var(--warn-ink); font-weight: 600; }
+
 .chat-quiz { display: flex; flex-direction: column; gap: 10px; width: 100%; }
 .chat-qcard { border: 1px solid var(--border); background: var(--card-2); border-radius: var(--r); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .chat-qhead { display: flex; align-items: center; gap: 8px; }
