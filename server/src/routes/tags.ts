@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { getDb, normalizeKey } from '../db.js'
 import {
   mergeTagsInto, runNormalizeScan, startSemanticScan, startLevelScan,
-  scanState, relatedTags, tagStats, exportTags, importTags, acceptSemanticProposal
+  scanState, relatedTags, tagStats, exportTags, importTags, acceptSemanticProposal, attachOrphanSecondary
 } from '../llm/tagGovernance.js'
 
 export const tagsRouter = Router()
@@ -298,6 +298,12 @@ tagsRouter.post('/scan/level', wrap(async (req, res) => {
   const ok = startLevelScan(parseInt(req.body?.minCount) || 50, parseInt(req.body?.batchSize) || 50)
   if (!ok) return res.json({ success: false, message: `已有扫描任务（${scanState.running}）进行中` })
   res.json({ success: true })
+}))
+
+/** 孤儿二级标签 AI 批量挂靠（同步，~1 批/10-20s）：未挂靠二级 → LLM 语义映射 → 挂到一级领域 */
+tagsRouter.post('/secondary/attach', wrap(async (_req, res) => {
+  const r = await attachOrphanSecondary(await getDb())
+  res.json({ success: true, ...r })
 }))
 
 tagsRouter.get('/scan/status', wrap(async (_req, res) => {

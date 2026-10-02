@@ -65,7 +65,12 @@
           </div>
         </div>
         <div class="tt-node" v-if="orphanSecondary.length">
-          <div class="tt-parent"><span class="tagc sec">未挂靠</span></div>
+          <div class="tt-parent">
+            <span class="tagc sec">未挂靠</span>
+            <button class="btn xs" style="margin-top:6px" :disabled="attaching || !!scan.running" title="AI 按语义把未挂靠二级批量挂到一级领域（拿不准的保持未挂靠，可重跑）" @click="attachOrphans">
+              {{ attaching ? '挂靠中…' : 'AI 自动挂靠' }}
+            </button>
+          </div>
           <div class="tt-children">
             <span v-for="c in orphanSecondary" :key="c.id" class="tagc sec tagpick" :title="`查看「${c.name}」详情，可在详情面板补挂父级`" @click="openTag(c)">{{ c.name }} <span class="cnt mono">{{ c.file_count ?? 0 }}</span></span>
           </div>
@@ -470,6 +475,24 @@ async function loadGov() {
   try { stats.value = await api.tags.stats() } catch { /* 保持现状 */ }
   try { proposals.value = await api.tags.proposals('pending') } catch { /* 保持现状 */ }
   try { treeTags.value = (await api.tags.list({ status: 'active', sort: 'name', limit: '5000' })).items || [] } catch { /* 保持现状 */ }
+}
+
+// 孤儿二级 AI 批量挂靠（同步端点，多批 LLM 可达 30-60s——按钮转态防「没反应」）
+const attaching = ref(false)
+async function attachOrphans() {
+  if (attaching.value) return
+  attaching.value = true
+  try {
+    const r: any = await api.tags.secondaryAttach()
+    if (r.success === false) return ui.toast(r.message || '挂靠失败')
+    ui.toast(r.attached ? `已挂靠 ${r.attached} 个二级标签${r.skipped ? `，${r.skipped} 个保持未挂靠（拿不准/批失败）` : ''}` : '没有可挂靠的二级标签')
+    loadGov()
+    loadTags(true)
+  } catch (e: any) {
+    ui.toast('挂靠失败：' + String(e?.message || e))
+  } finally {
+    attaching.value = false
+  }
 }
 
 async function runNormalize() {

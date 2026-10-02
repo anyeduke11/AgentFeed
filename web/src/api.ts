@@ -84,6 +84,7 @@ export const api = {
     scanNormalize: () => post(`${base}/tags/scan/normalize`),
     scanSemantic: (batchSize = 400) => post(`${base}/tags/scan/semantic`, { batchSize }),
     scanLevel: (minCount = 50, batchSize = 50) => post(`${base}/tags/scan/level`, { minCount, batchSize }),
+    secondaryAttach: () => post(`${base}/tags/secondary/attach`),
     scanStatus: () => getJSON<any>(`${base}/tags/scan/status`),
     stats: () => getJSON<any>(`${base}/tags/stats`),
     exportUrl: (format: 'json' | 'csv' = 'json') => `${base}/tags/export?format=${format}`,
