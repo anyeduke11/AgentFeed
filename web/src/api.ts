@@ -80,7 +80,10 @@ export const api = {
     proposals: (status = 'pending', kind?: string) => getJSON<any[]>(`${base}/tags/proposals?status=${status}${kind ? '&kind=' + kind : ''}`),
     proposalAccept: (id: number) => post(`${base}/tags/proposals/${id}/accept`),
     proposalAcceptBatch: () => post(`${base}/tags/proposals/accept-batch`, { kind: 'semantic' }),
+    proposalRejectOversized: () => post(`${base}/tags/proposals/reject-oversized`, { kind: 'semantic' }),
     proposalReject: (id: number) => post(`${base}/tags/proposals/${id}/reject`),
+    // 手动微调 level 提案成员的一级挂靠（改 tags.parent_tag_id + 同步提案 attach_map）
+    proposalReparent: (id: number, member: string, parentTagId: number) => post(`${base}/tags/proposals/${id}/reparent`, { member, parentTagId }),
     scanNormalize: () => post(`${base}/tags/scan/normalize`),
     scanSemantic: (batchSize = 400) => post(`${base}/tags/scan/semantic`, { batchSize }),
     scanLevel: (minCount = 50, batchSize = 50) => post(`${base}/tags/scan/level`, { minCount, batchSize }),

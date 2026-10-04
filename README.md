@@ -11,7 +11,7 @@
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-stdio-8A2BE2)
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
-![Tests](https://img.shields.io/badge/tests-450%2B_passing-3FB950)
+![Tests](https://img.shields.io/badge/tests-480%2B_passing-3FB950)
 
 </div>
 
@@ -31,9 +31,10 @@ AgentFeed 管**跨项目阅历**——自动捕获 Agent 工作排放物，经�
 
 - **🔌 多 Agent 自动接入** — 内置 20+ 主流 Agent 数据目录探测（ClaudeCode / Trae / Qoder / LingxiClaw / Coze / DoubaoWork / QwenWork / Cursor / CodexCLI…），一键挂载为扫描根
 - **📡 实时 + 周期双通道采集** — chokidar watcher 秒级响应文件新增/变更/删除；启动兜底 + 每 30 分钟周期增量扫描，补齐停机窗口
-- **⚡ mtime+size 缓存快路径** — 未变更文件免读盘、免哈希、免门禁重评，万级文件重扫从 22s 降至 2s
+- **⚡ mtime+size 缓存快路径** — 未变更文件免读盘、免哈希、免门禁重评，万级文件重扫从 22s 降至 2s；boot 重扫条件触发（间隔内重启不再全根遍历），连接级语句/事务卫生（busy 游标自愈 + 事务互斥）杜绝扫描轮 SQLITE_BUSY 整轮报废
 - **🚧 内容门禁** — 体积/内容规则过滤低质文件，skipped 记录按月归档 CSV，支持白名单与手动恢复豁免
 - **🗂 领域分拣** — 树形领域体系（支持父子级联），文件按领域归类，配色贯穿全站；标签三态治理（一级 = 领域锚定 / 二级 / 普通），同名一级标签与领域成员数同源对齐，中文按拼音排序
+- **🧹 标签治理管线** — 规则归一（确定性秒级）+ AI 语义归组 / 二级选拔（待审提案制，普通标签批量合并，超大组合并守卫 + 一键驳回，一级/二级归属始终人工裁决）；LLM 输出容错解析（裸引号自愈），领域成员「归类 ∪ 标签挂载」并集口径全站同源
 - **🌐 网页剪藏** — 粘贴 URL 一键转 md + html 双入库（Playwright 快照可选），SSRF 防护 + 体积/图片限额；图片质量过滤默认开启（二维码 / 关注引导横幅 / 小图标）；历史支持重剪覆盖、删除清理（含孤儿资产）、失败重试
 - **🧠 LLM 蒸馏管线** — 队列化蒸馏（摘要/标签/实体/要点/关系），嵌入向量 + 规则评分双排序，失败自动重试回填
 - **🎯 注意力预算** — 文件生命周期（热/冷却/冷）与触及回写；冷却池静默期 + 蒸馏前近邻去重，抑制重复投喂；周度一页纸复盘消化率；推荐配额 soft/hard 双上限与 MCP 字符预算，反 FOMO 全程可解释

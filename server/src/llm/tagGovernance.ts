@@ -79,15 +79,50 @@ export const scanState = {
   lastResult: null as any
 }
 
-function parseLlmJson(text: string): any | null {
-  try {
-    const cleaned = String(text).replace(/```json|```/g, '').trim()
-    const start = cleaned.indexOf('{')
-    if (start < 0) return null
-    return JSON.parse(cleaned.slice(start))
-  } catch {
-    return null
+/** 转义字符串值内未转义的裸引号：模型给术语加英文引号（reason 字段高发，2026-10-03 真库 12/121 批稳定复现）
+ * 会炸整批 JSON。前瞻终结引号后的首个非空白字符：结构性 token（, } ] :）→ 真终结符，否则视为值内字符补转义。
+ * 仅作 JSON.parse 失败后的兜底修复，正常输出不经过此路径 */
+function repairBareQuotes(text: string): string {
+  let out = ''
+  let inStr = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (!inStr) {
+      if (ch === '"') inStr = true
+      out += ch
+      continue
+    }
+    if (ch === '\\') { out += ch + (text[i + 1] ?? ''); i++; continue }
+    if (ch !== '"') { out += ch; continue }
+    let j = i + 1
+    while (j < text.length && /\s/.test(text[j])) j++
+    const next = text[j]
+    if (next === undefined || next === ',' || next === '}' || next === ']' || next === ':') {
+      inStr = false
+      out += ch
+    } else {
+      out += '\\"'
+    }
   }
+  return out
+}
+
+/** 导出仅为测试：解析是治理管线的单点故障面，失败形态必须钉死 */
+export function parseLlmJson(text: string): any | null {
+  const cleaned = String(text).replace(/```json|```/g, '').trim()
+  // 先整体解析（兼容顶层对象/数组——语义归组大批时模型常把组清单直接返回成数组）；失败再切首个 { 或 [ 起始的子串（兼容前后混入说明文字）
+  try { return JSON.parse(cleaned) } catch { /* 继续截取 */ }
+  const starts = [cleaned.indexOf('{'), cleaned.indexOf('[')].filter(i => i >= 0)
+  if (starts.length) {
+    try { return JSON.parse(cleaned.slice(Math.min(...starts))) } catch { /* 继续修复 */ }
+  }
+  // 两轮定位都失败 → 值内字符级违约（裸引号）：转义修复后重走同样两级；修复无效保持 null（fail loud 不假成功）
+  const repaired = repairBareQuotes(cleaned)
+  if (repaired === cleaned) return null
+  try { return JSON.parse(repaired) } catch { /* 继续截取 */ }
+  const rstarts = [repaired.indexOf('{'), repaired.indexOf('[')].filter(i => i >= 0)
+  if (!rstarts.length) return null
+  try { return JSON.parse(repaired.slice(Math.min(...rstarts))) } catch { return null }
 }
 
 /** 规则归一：归一 key 相同的 active 标签直接合并（确定性代码，秒级） */
@@ -202,6 +237,7 @@ async function semanticScanJob(batchSize: number) {
 每组规范名 canonical 优先从该组成员中选出（优先使用次数最高、表达最通用的写法）；但若整组成员本质上都是下方锚点词表中某个词的同义/变体/从属表达，canonical 必须直接用该锚点名（此时 members 只含批内成员）。
 members 为全部组成员名字。
 输出要求：不要输出任何分析过程、解释或对下方清单的复述，第一个字符必须是 { ，只输出一行 json：{"groups":[{"canonical":"规范名","members":["成员1","成员2"],"reason":"简短理由"}]}
+reason 字段禁用英文双引号 "（JSON 值内未转义的引号会使整批解析失败），引用术语一律用「」。
 没有可合并的组时输出 {"groups":[]}
 
 高频锚点词表（全库挂载量最高，可作为合并目标）：
@@ -211,7 +247,8 @@ ${anchorList}
 ${JSON.stringify(batch.map(t => ({ n: t.name, c: t.fc })))}`
       try {
         const data = await callLlmJson(prompt)
-        const groups: any[] = Array.isArray(data?.groups) ? data.groups : []
+        // 顶层数组（模型无视对象契约直接回组清单）与 {groups:[...]} 等价接受
+        const groups: any[] = Array.isArray(data) ? data : (Array.isArray(data?.groups) ? data.groups : [])
         for (const g of groups) {
           const members: string[] = (Array.isArray(g?.members) ? g.members : []).map(String).filter((m: string) => nameSet.has(m))
           const canonical = String(g?.canonical || '')

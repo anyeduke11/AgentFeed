@@ -209,3 +209,49 @@ test('accept_level：与领域同名的成员被跳过（领域锚点保护）�
   const b = await (await db.prepare("SELECT level FROM tags WHERE name = '待降级普通乙'")).get() as any
   assert.equal(b.level, 'secondary')
 })
+
+test('accept_level 保留挂靠：落提案即挂靠的 parent_tag_id 不被接受动作抹掉', async () => {
+  // 业务意图：挂靠在落提案/手动微调时已就位，接受只升格 level——曾置 NULL 会把挂靠成果清零，
+  // 标签全落「未挂靠」组，用户微调白做（2026-10-02 发现的静默回归）
+  const db = await getDb()
+  const accept = routerHandler(tagsRouter, 'post', '/proposals/:id/accept')
+  await db.exec(`INSERT INTO tags (name, level, status) VALUES ('保留挂靠父域', 'primary', 'active')`)
+  const parent = await (await db.prepare("SELECT id FROM tags WHERE name = '保留挂靠父域'")).get() as any
+  await db.exec(`INSERT INTO tags (name, level, status, parent_tag_id) VALUES ('已挂靠成员甲', 'normal', 'active', ${Number(parent.id)})`)
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('level', '', '["已挂靠成员甲"]')`)
+  const pid = Number((await (await db.prepare("SELECT id FROM tag_proposals WHERE kind = 'level' ORDER BY id DESC LIMIT 1")).get() as any).id)
+
+  const r = await call(accept, { id: String(pid) }, {})
+  assert.equal(r.body.success, true)
+  const t = await (await db.prepare("SELECT level, parent_tag_id FROM tags WHERE name = '已挂靠成员甲'")).get() as any
+  assert.equal(t.level, 'secondary', '成员升格为次要')
+  assert.equal(Number(t.parent_tag_id), Number(parent.id), '挂靠必须原样保留')
+})
+
+test('reparent：手动微调提案成员的一级挂靠（同步 parent_tag_id + attach_map），守卫拒绝非法目标', async () => {
+  // 业务意图：AI 拟的归属用户不一定认——点单个成员改挂一级，接受后即终态，不必接受后再手工补挂
+  const db = await getDb()
+  const reparent = routerHandler(tagsRouter, 'post', '/proposals/:id/reparent')
+  await db.exec(`INSERT INTO tags (name, level, status) VALUES ('微调目标一级', 'primary', 'active')`)
+  await db.exec(`INSERT INTO tags (name, level, status) VALUES ('微调非一级', 'normal', 'active')`)
+  await db.exec(`INSERT INTO tags (name, level, status) VALUES ('微调普通标签', 'normal', 'active')`)
+  const parent = await (await db.prepare("SELECT id, name FROM tags WHERE name = '微调目标一级'")).get() as any
+  const normal = await (await db.prepare("SELECT id FROM tags WHERE name = '微调非一级'")).get() as any
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members, attach_map) VALUES ('level', '', '["微调普通标签","微调成员乙"]', '{"微调成员乙":"微调目标一级"}')`)
+  const pid = Number((await (await db.prepare("SELECT id FROM tag_proposals WHERE kind = 'level' ORDER BY id DESC LIMIT 1")).get() as any).id)
+
+  // 守卫：父不是一级 / 成员不在提案里
+  const bad1 = await call(reparent, { id: String(pid) }, { member: '微调普通标签', parentTagId: Number(normal.id) })
+  assert.equal(bad1.code, 400, 'parentTagId 指向非一级必须拒绝')
+  const bad2 = await call(reparent, { id: String(pid) }, { member: '不在提案的标签', parentTagId: Number(parent.id) })
+  assert.equal(bad2.code, 400, '成员不在提案 members 内必须拒绝')
+
+  // 正路：改挂 + 既有 attach_map 键保留（不是整表覆盖）
+  const ok = await call(reparent, { id: String(pid) }, { member: '微调普通标签', parentTagId: Number(parent.id) })
+  assert.equal(ok.body.success, true)
+  const t = await (await db.prepare("SELECT parent_tag_id FROM tags WHERE name = '微调普通标签'")).get() as any
+  assert.equal(Number(t.parent_tag_id), Number(parent.id), 'tags.parent_tag_id 必须指向新父')
+  const am = JSON.parse((await (await db.prepare('SELECT attach_map FROM tag_proposals WHERE id = ?')).get(pid) as any).attach_map)
+  assert.equal(am['微调普通标签'], '微调目标一级', 'attach_map 必须同步新归属')
+  assert.equal(am['微调成员乙'], '微调目标一级', '其他成员的既有映射必须保留')
+})

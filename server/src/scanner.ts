@@ -319,6 +319,25 @@ async function loadRootBindings(db: any): Promise<RootBinding[]> {
   return rows.map(r => ({ path: r.path, agent: r.agent ?? null }))
 }
 
+/** boot 重扫闸：停机期间 watcher 失明，boot 轮的意义 = 补齐停机期间的文件变更；但距上次扫描
+ * 完成未超过扫描间隔阈值时，上一轮结果仍新鲜，全根遍历（真实库 42s~5.6min）在快速重启的
+ * 开发循环里会反复烧 CPU/阻塞 SQLite。停机 = now − (started_at + duration_ms)，≤ 阈值 → 跳过。
+ * fail-open：无台账/时间解析失败一律要求重扫——宁可多扫，不漏变更。 */
+export function planBootRescan(
+  lastJob: { started_at: string; duration_ms?: number } | undefined,
+  nowMs: number,
+  thresholdMs: number
+): { rescan: boolean; downtimeMs: number } {
+  if (!lastJob?.started_at) return { rescan: true, downtimeMs: Infinity }
+  // SQLite CURRENT_TIMESTAMP 是 UTC 的 'YYYY-MM-DD HH:MM:SS'；JS Date.parse 缺 Z 会按本地时区误读
+  // （+8 时区下会把停机时长低估/高估整 8 小时，闸门判定直接反转）
+  const raw = String(lastJob.started_at).trim().replace(' ', 'T')
+  const finishedMs = Date.parse(/[Zz]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : raw + 'Z') + (Number(lastJob.duration_ms) || 0)
+  if (!Number.isFinite(finishedMs)) return { rescan: true, downtimeMs: Infinity }
+  const downtimeMs = nowMs - finishedMs
+  return { rescan: downtimeMs > thresholdMs, downtimeMs }
+}
+
 /**
  * 扫描入口 + scan_jobs 台账：包装 scanInner，成功/失败各落一行台账
  * （来源/范围/full/计数/耗时/错误），供 GET /api/scan/jobs 观测。

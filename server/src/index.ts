@@ -28,7 +28,7 @@ import { webclipRouter } from './routes/webclip.js'
 import { startDailyReportJob } from './reports.js'
 import { startWatcher } from './watcher.js'
 import { archiveSkippedRecords } from './gate.js'
-import { scan, backfillRuleScores, backfillAliases, backfillAgentAttribution } from './scanner.js'
+import { scan, planBootRescan, backfillRuleScores, backfillAliases, backfillAgentAttribution } from './scanner.js'
 import { resolveAgentDirs, selectPeriodicRoots } from './agents.js'
 import { bindAgentRoots } from './routes/scan.js'
 import { ensureFtsPopulated } from './search/ftsIndex.js'
@@ -185,7 +185,26 @@ app.listen(PORT, async () => {
         scheduleRescan()
       }, ms))
   }
-  setTimeout(() => { agentRescan('boot').catch(e => console.error('agent rescan failed', e)) }, 15 * 1000)
+  // boot 轮条件触发（planBootRescan）：距上次扫描完成 ≤ 扫描间隔阈值 → 跳过（快速重启的
+  // 开发循环不再每次烧 42s~5.6min 全根遍历）；超阈值/无台账/闸门异常 → 照旧重扫。
+  // 闸门只裁 boot 轮，interval 排程（scheduleRescan）不受影响照常走。
+  setTimeout(() => {
+    ;(async () => {
+      try {
+        const db = await getDb()
+        const last = await (await db.prepare('SELECT started_at, duration_ms FROM scan_jobs WHERE error IS NULL ORDER BY id DESC LIMIT 1')).get() as any
+        const thresholdMs = await rescanDelayMs().catch(() => DEFAULT_RESCAN_MINUTES * 60 * 1000)
+        const plan = planBootRescan(last ? { started_at: String(last.started_at), duration_ms: Number(last.duration_ms) || 0 } : undefined, Date.now(), thresholdMs)
+        if (!plan.rescan) {
+          console.log(`agent rescan(boot): skipped · 距上次扫描完成 ${Math.max(0, Math.round(plan.downtimeMs / 60000))} 分钟 ≤ 阈值（interval 扫描照常排程）`)
+          return
+        }
+      } catch (e) {
+        console.error('boot rescan gate failed → fallback to rescan', e)
+      }
+      await agentRescan('boot')
+    })().catch(e => console.error('agent rescan failed', e))
+  }, 15 * 1000)
   scheduleRescan()
 
   // WAL 治理：boot 截断存量 WAL（排在 15s 重扫之前），此后每 10 分钟 best-effort 截断；

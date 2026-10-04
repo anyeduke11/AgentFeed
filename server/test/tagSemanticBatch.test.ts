@@ -88,6 +88,72 @@ test('批量接受：kind 非 semantic 返回 400', async () => {
   assert.equal(body.success, false)
 })
 
+test('批量接受：超大组（>12 成员）跳过保持 pending——防「同前缀全家桶」式过度合并', async () => {
+  // WHY：LLM 对大标签订单会把不同概念吞进一个组（真实库 GitHub 50 成员含 Actions/CLI/Copilot），
+  // 无人值守批量接受必须有尺寸红线；被拦的组是「需人工拆分」而非「已失效」，须与 skipped 分开计数
+  const db = await getDb()
+  const c13 = await makeTag(db, '超大组规范名')
+  const bigMembers = Array.from({ length: 13 }, (_, i) => `超大组成员${i}`)
+  for (const m of bigMembers) await makeTag(db, m)
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('semantic', '超大组规范名', '${JSON.stringify(bigMembers).replace(/'/g, "''")}')`)
+  // 对照组：12 成员（恰好达标线内）正常接受
+  const c12 = await makeTag(db, '临界组规范名')
+  const okMembers = Array.from({ length: 12 }, (_, i) => `临界组成员${i}`)
+  for (const m of okMembers) await makeTag(db, m)
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('semantic', '临界组规范名', '${JSON.stringify(okMembers).replace(/'/g, "''")}')`)
+
+  const { body } = await callBatch(batchHandler(), { kind: 'semantic' })
+  assert.equal(body.success, true)
+  assert.equal(body.oversized, 1, '13 成员组必须计入 oversized')
+  assert.ok(body.accepted >= 1, '12 成员组在达标线内正常接受')
+  assert.equal((await (await db.prepare("SELECT status FROM tags WHERE id = ?")).get(c13) as any).status, 'active', '超大组规范名不得被合并')
+  const c12Row = await (await db.prepare("SELECT status, merged_into FROM tags WHERE id = ?")).get(c12) as any
+  assert.equal(c12Row.status, 'active', '临界组规范名保持 active')
+  assert.equal(c12Row.merged_into, null, '临界组自身是规范名（无合并指向）')
+  const stillPending = (await (await db.prepare("SELECT COUNT(*) AS n FROM tag_proposals WHERE status = 'pending' AND canonical = '超大组规范名'")).get() as any).n
+  assert.equal(Number(stillPending), 1, '超大组建议必须保持 pending 留待人工')
+})
+
+// ---- 批量驳回超大组：accept-batch 永远跳过它们（同守卫口径），死库存需要显式出口 ----
+// WHY：271 条 pending 全 oversized 时「全部接受」按钮合法无事发生，用户没有清理通道；
+// 但驳回边界必须与 accept 守卫完全一致——只杀 >12 成员的 semantic pending，
+// 规范名失效的小组（人工判断项）与 level 提案（另一决策线）不得被误伤。
+test('批量驳回超大组：>12 成员的 semantic pending 置 rejected，小党/失效项/level 提案保留', async () => {
+  const db = await getDb()
+  // 超大组：应被驳回
+  const big = Array.from({ length: 13 }, (_, i) => `驳回超大组成员${i}`)
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('semantic', '驳回超大组', '${JSON.stringify(big).replace(/'/g, "''")}')`)
+  // 临界小组：必须保留（accept 守卫消化它们，不归驳回管）
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('semantic', '驳回小组', '["驳回小A","驳回小B"]')`)
+  // 规范名失效小组：人工判断项，不属于「超大组」
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('semantic', '不存在的驳回规范名', '["驳回小C"]')`)
+  // level 提案：另一条决策线，禁止误伤
+  const levelMembers = Array.from({ length: 20 }, (_, i) => `驳回level成员${i}`)
+  await db.exec(`INSERT INTO tag_proposals (kind, canonical, members) VALUES ('level', '驳回level规范名', '${JSON.stringify(levelMembers).replace(/'/g, "''")}')`)
+
+  const layer = (tagsRouter as any).stack.find((l: any) => l.route?.methods?.post && l.route?.path === '/proposals/reject-oversized')
+  assert.ok(layer, 'tags 路由必须存在 POST /proposals/reject-oversized')
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle
+  const { body } = await new Promise<any>((resolve, reject) => {
+    const res: any = { status(c: number) { this._code = c; return this }, json(b: any) { resolve({ code: this._code ?? 200, body: b }) } }
+    Promise.resolve(handler({ body: { kind: 'semantic' } }, res)).catch(reject)
+  })
+  assert.equal(body.success, true)
+  assert.ok(body.rejected >= 1, '超大组必须被驳回')
+
+  const bigStatus = (await (await db.prepare("SELECT status FROM tag_proposals WHERE canonical = '驳回超大组'")).get() as any).status
+  assert.equal(bigStatus, 'rejected', '>12 成员的 semantic pending 必须置 rejected')
+  const smallStatus = (await (await db.prepare("SELECT status FROM tag_proposals WHERE canonical = '驳回小组'")).get() as any).status
+  assert.equal(smallStatus, 'pending', '≤12 成员小组必须保留 pending（它们是 accept 按钮的正餐）')
+  const staleStatus = (await (await db.prepare("SELECT status FROM tag_proposals WHERE canonical = '不存在的驳回规范名'")).get() as any).status
+  assert.equal(staleStatus, 'pending', '规范名失效小组是人工判断项，不得被批量驳回误伤')
+  const levelStatus = (await (await db.prepare("SELECT status FROM tag_proposals WHERE canonical = '驳回level规范名'")).get() as any).status
+  assert.equal(levelStatus, 'pending', 'level 提案不在驳回范围（kind 过滤）')
+
+  const op = await (await db.prepare("SELECT detail FROM tag_ops WHERE op = 'reject_semantic_oversized' ORDER BY id DESC LIMIT 1")).get() as any
+  assert.ok(op, '批量驳回必须落 tag_ops 审计')
+})
+
 // ---- 二级选拔 prompt：现有二级格局注入（整合优先于新增） ----
 // WHY：选拔若看不到已有二级清单，会把「项目管理」这类已是二级的概念反复提为新二级
 // （真实库 10 条建议中 6 条与既有二级/一级重叠）。注入格局 + 规则 2 后，可归入现有

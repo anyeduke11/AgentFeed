@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getDb } from '../db.js'
+import { getDb, DOMAIN_MEMBER_PAIRS_SQL } from '../db.js'
 import { llmQueue } from '../llm/index.js'
 import { resolveAgentDirs } from '../agents.js'
 import { clusterSessions, computeFunnel, attributeSearches } from '../funnelCore.js'
@@ -13,10 +13,9 @@ statsRouter.get('/overview', async (req, res) => {
     const filesByStatusStmt = await db.prepare("SELECT status, COUNT(*) as count FROM files GROUP BY status")
     const filesByStatus = await filesByStatusStmt.all() as any[]
     const filesByDomainStmt = await db.prepare(`
-      SELECT d.name, COUNT(f.id) as count
+      SELECT d.name, COALESCE(m.count, 0) as count
       FROM domains d
-      LEFT JOIN files f ON f.domain_id = d.id AND f.status = 'active'
-      GROUP BY d.id
+      LEFT JOIN (${DOMAIN_MEMBER_PAIRS_SQL}) m ON m.domain_id = d.id
       ORDER BY d.sort, d.name
     `)
     const filesByDomain = await filesByDomainStmt.all() as any[]
@@ -106,11 +105,12 @@ statsRouter.get('/dashboard', async (req, res) => {
       SUM(CASE WHEN llm_state = 'skipped' THEN 1 ELSE 0 END) as skipped
       FROM files WHERE status = 'active'`)
 
-    // 领域树（两级）+ 有效文件计数
+    // 领域树（两级）+ 有效文件计数（与分拣区同口径：共享派生表）
     const domainRows = await (await db.prepare(`
-      SELECT d.id, d.name, d.parent_id, d.color,
-        (SELECT COUNT(*) FROM files f WHERE f.domain_id = d.id AND f.status = 'active') as count
-      FROM domains d ORDER BY d.sort, d.name
+      SELECT d.id, d.name, d.parent_id, d.color, COALESCE(m.count, 0) as count
+      FROM domains d
+      LEFT JOIN (${DOMAIN_MEMBER_PAIRS_SQL}) m ON m.domain_id = d.id
+      ORDER BY d.sort, d.name
     `)).all() as any[]
     const domains: any[] = []
     const dmap = new Map<number, any>()
@@ -242,11 +242,12 @@ statsRouter.get('/board', async (req, res) => {
     }
     agentProd.sort((x, y) => y.count - x.count)
 
-    // 领域占比气泡：一级领域（含子领域份额），颜色与分拣区同源
+    // 领域占比气泡：一级领域（含子领域份额），颜色与计数均与分拣区同源
     const rows = await (await db.prepare(`
-      SELECT d.id, d.name, d.parent_id, d.color,
-        (SELECT COUNT(*) FROM files f WHERE f.domain_id = d.id AND f.status = 'active') as count
-      FROM domains d ORDER BY d.sort, d.name
+      SELECT d.id, d.name, d.parent_id, d.color, COALESCE(m.count, 0) as count
+      FROM domains d
+      LEFT JOIN (${DOMAIN_MEMBER_PAIRS_SQL}) m ON m.domain_id = d.id
+      ORDER BY d.sort, d.name
     `)).all() as any[]
     const topRows = rows.filter((r: any) => !r.parent_id)
     const total = topRows.reduce((s: number, r: any) => s + r.count, 0)

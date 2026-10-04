@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getDb, ensureDomainTag, normalizeKey } from '../db.js'
+import { getDb, ensureDomainTag, normalizeKey, DOMAIN_MEMBER_PAIRS_SQL } from '../db.js'
 
 export const domainsRouter = Router()
 
@@ -13,13 +13,9 @@ domainsRouter.get('/', async (req, res) => {
   const db = await getDb()
   const stmt = await db.prepare('SELECT * FROM domains ORDER BY sort, name')
   const rows = (await stmt.all()) as any[]
-  // 每个领域的活跃文件数（含子领域聚合为父级 total）
-  const countRows = await (await db.prepare(`
-    SELECT domain_id, COUNT(*) as count FROM files
-    WHERE status = 'active' AND domain_id IS NOT NULL
-    GROUP BY domain_id
-  `)).all() as any[]
-  const countMap = new Map<number, number>(countRows.map(r => [r.domain_id, r.count]))
+  // 每个领域的活跃成员数（归类 ∪ 标签体系挂载，共享派生表；含子领域聚合为父级 total）
+  const countRows = await (await db.prepare(DOMAIN_MEMBER_PAIRS_SQL)).all() as any[]
+  const countMap = new Map<number, number>(countRows.map(r => [Number(r.domain_id), Number(r.count)]))
   const tree: any[] = []
   const map = new Map<number, any>()
   for (const r of rows) {

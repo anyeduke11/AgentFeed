@@ -174,6 +174,7 @@
               <span class="cap">语义归组建议 {{ semanticPending }} 条。批量接受仅自动合并普通标签；规范名已失效的建议跳过并保留，待人工处理。</span>
               <span style="flex:1"></span>
               <button class="btn sm primary" :disabled="batchAccepting" @click="acceptAllSemantic"><Icon name="check" :size="12" /> {{ batchAccepting ? '执行中…' : '全部接受语义归组' }}</button>
+              <button class="btn sm" :disabled="batchAccepting" @click="rejectOversized" title="驳回全部 >12 成员的「同前缀全家桶」建议（批量接受永远不会消化它们，只能逐条拆分或在此驳回）">驳回超大组</button>
             </div>
             <div v-if="!proposals.length" class="cap">暂无待审建议。运行 AI 语义归组 / 二级选拔后，结果会在这里逐条确认。</div>
             <div v-for="p in proposals" :key="p.id" class="pcard">
@@ -195,9 +196,15 @@
               </div>
               <div v-else class="trow" style="flex-wrap:wrap">
                 <span class="cap">设为次要领域：</span>
-                <span v-for="m in pMembers(p.members)" :key="m" class="tagc" :title="memberParentOf(p, m) ? `拟挂靠一级领域「${memberParentOf(p, m)}」` : '一级归属未定'">
-                  {{ m }}<template v-if="memberParentOf(p, m)"> <span class="cap mono">→ {{ memberParentOf(p, m) }}</span></template>
-                </span>
+                <template v-for="m in pMembers(p.members)" :key="`${p.id}-${m}`">
+                  <select v-if="editingMember?.pid === p.id && editingMember?.name === m" v-focus class="inp" style="width:auto;padding:2px 6px" :value="memberParentOf(p, m)" @change="onReparent(p, m, $event)" @blur="editingMember = null">
+                    <option value="" disabled>选择一级领域…</option>
+                    <option v-for="pt in primaryOptions" :key="pt.id" :value="pt.name">{{ pt.name }}</option>
+                  </select>
+                  <span v-else class="tagc tagpick" :title="memberParentOf(p, m) ? `拟挂靠一级「${memberParentOf(p, m)}」· 点击微调` : '一级归属未定 · 点击选择挂靠'" @click="editingMember = { pid: p.id, name: m }">
+                    {{ m }}<template v-if="memberParentOf(p, m)"> <span class="cap mono">→ {{ memberParentOf(p, m) }}</span></template>
+                  </span>
+                </template>
               </div>
               <div class="cap" v-if="p.reason">{{ p.reason }}</div>
             </div>
@@ -476,7 +483,13 @@ async function loadGov() {
   try { scan.value = await api.tags.scanStatus() } catch { /* 保持现状 */ }
   try { stats.value = await api.tags.stats() } catch { /* 保持现状 */ }
   try { proposals.value = await api.tags.proposals('pending') } catch { /* 保持现状 */ }
-  try { treeTags.value = (await api.tags.list({ status: 'active', sort: 'name', limit: '5000' })).items || [] } catch { /* 保持现状 */ }
+  // 一级/二级按 level 精确拉取（两个小集合）：曾拉「全量 active 前五千」——标签总量 5.1 万后，
+  // 字典序前 5000 里一级为 0，标签树空置、提案挂靠下拉无选项（2026-10-02 实测复现）
+  try {
+    const prim = (await api.tags.list({ status: 'active', level: 'primary', limit: '5000' })).items || []
+    const sec = (await api.tags.list({ status: 'active', level: 'secondary', limit: '5000' })).items || []
+    treeTags.value = [...prim, ...sec]
+  } catch { /* 保持现状 */ }
 }
 
 // 孤儿二级 AI 批量挂靠（同步端点，多批 LLM 可达 30-60s——按钮转态防「没反应」）
@@ -556,6 +569,29 @@ function levelParentOf(p: any): string {
   return m ? m[1] : ''
 }
 
+// ---- 提案成员手动微调挂靠：点击成员 → 内联下拉选一级（reparent 同步 tags.parent_tag_id + attach_map） ----
+const editingMember = ref<{ pid: number; name: string } | null>(null)
+const primaryOptions = computed(() => treeTags.value.filter((t: any) => t.level === 'primary'))
+// 内联 select 渲染即聚焦：失焦（点击别处）自然收起编辑态
+const vFocus = { mounted: (el: HTMLSelectElement) => el.focus() }
+
+async function onReparent(p: any, m: string, e: Event) {
+  const name = (e.target as HTMLSelectElement).value
+  editingMember.value = null
+  if (!name || name === memberParentOf(p, m)) return
+  const pt = primaryOptions.value.find((x: any) => x.name === name)
+  if (!pt) return
+  try {
+    const r: any = await api.tags.proposalReparent(p.id, m, pt.id)
+    if (r.success === false) return ui.toast(r.message || '微调失败')
+    ui.toast(`「${m}」已挂靠到「${name}」`)
+    loadTags(true)
+    loadGov()
+  } catch (e2: any) {
+    ui.toast('微调失败：' + String(e2?.message || e2))
+  }
+}
+
 // 提案操作执行态：服务高负载时请求可达十几秒——无反馈即「点了没反应」，按钮即时转执行中并锁其他提案
 const actingId = ref<number | null>(null)
 
@@ -599,9 +635,32 @@ async function acceptAllSemantic() {
   try {
     const r: any = await api.tags.proposalAcceptBatch()
     if (r.success === false) return ui.toast(r.message || '批量接受失败')
-    ui.toast(`批量接受完成：合并 ${r.accepted} 条，转移 ${r.moved} 处挂载${r.skipped ? `，${r.skipped} 条待人工` : ''}`)
+    // accepted=0 说明剩余 pending 全是超大组/失效项——与「完成合并 N 条」是两种用户语义，
+    // 不区分会让用户以为点了没反应（271 条 pending 全 oversized 时实测）
+    if (!r.accepted) {
+      ui.toast(`没有可自动合并的建议：${r.oversized ?? 0} 条超大组可用「驳回超大组」一键清理${r.skipped ? `，${r.skipped} 条规范名已失效待人工处理` : ''}`)
+    } else {
+      ui.toast(`批量接受完成：合并 ${r.accepted} 条，转移 ${r.moved} 处挂载${r.skipped ? `，${r.skipped} 条待人工` : ''}${r.oversized ? `，${r.oversized} 条超大组留待拆分` : ''}`)
+    }
     loadTags(true)
     loadGov()
+  } catch (e: any) {
+    ui.toast('批量接受失败：' + String(e?.message || e))
+  } finally {
+    batchAccepting.value = false
+  }
+}
+
+async function rejectOversized() {
+  if (!confirm(`确认驳回全部超大组（>12 成员）语义归组建议？它们是「同前缀全家桶」式过度合并，批量接受永远不会消化；驳回后可重新运行 AI 语义归组（输出已受成员数约束）。`)) return
+  batchAccepting.value = true
+  try {
+    const r: any = await api.tags.proposalRejectOversized()
+    if (r.success === false) return ui.toast(r.message || '驳回失败')
+    ui.toast(r.rejected ? `已驳回 ${r.rejected} 条超大组建议` : '没有超大组建议')
+    loadGov()
+  } catch (e: any) {
+    ui.toast('驳回失败：' + String(e?.message || e))
   } finally {
     batchAccepting.value = false
   }

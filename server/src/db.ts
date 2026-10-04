@@ -1,4 +1,5 @@
-import { SqliteDatabase } from '@homeofthings/sqlite3'
+import { SqliteDatabase, SqliteStatement } from '@homeofthings/sqlite3'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs/promises'
@@ -12,13 +13,53 @@ export const DATA_DIR = process.env.AGENTFEED_DATA_DIR
   : path.join(__dirname, '../data')
 const DB_PATH = path.join(DATA_DIR, 'app.db')
 
+// ---- 连接级语句/事务卫生（修复自动扫描 SQLITE_BUSY 整轮报废）----
+// 根因 = node-sqlite3 语义 × 应用调用模式叠加：
+// 1. SqliteStatement.get() 只 step 一次，命中行后游标停在 SQLITE_ROW（sqlite3_stmt_busy=true）且包装层
+//    不 reset——全局 `prepare().get()` 模式每个命中查询漏一个 busy 游标，平时靠 GC 回收孤儿语句兜底；
+//    扫描分批事务 COMMIT 撞上未回收游标 → SQLITE_BUSY cannot commit - statements in progress
+//    （scan_jobs 台账 interval 轮连续报废）。get 自动 reset 消灭源头（空结果驱动已自复位，无需处理）。
+// 2. 驱动 transactionalize 无进程内互斥：事务回调的 await 间隙（fs.stat/md5）其他任务插入 BEGIN →
+//    SQLITE_ERROR cannot start a transaction within a transaction（台账亦有实例）。互斥链串行化全部事务；
+//    嵌套调用（同一异步链）显式报错 fail-fast——静默排队会死锁。
+class AutoReleaseStatement {
+  constructor(private s: SqliteStatement) {}
+  bind(...params: any[]) { return this.s.bind(...params) }
+  reset() { return this.s.reset() }
+  finalize() { return this.s.finalize() }
+  run(params?: any) { return this.s.run(params) }
+  async get(params?: any) {
+    const row = await this.s.get(params)
+    if (row !== undefined) await this.s.reset()
+    return row
+  }
+  all(params?: any) { return this.s.all(params) }
+  each(params?: any, callback?: (err: Error | null, row: any) => void) { return this.s.each(params, callback) }
+}
+
+const txCtx = new AsyncLocalStorage<true>()
+let txChain: Promise<unknown> = Promise.resolve()
+
+class AppSqliteDatabase extends SqliteDatabase {
+  override async prepare(sql: string, params?: any): Promise<SqliteStatement> {
+    return new AutoReleaseStatement(await super.prepare(sql, params)) as unknown as SqliteStatement
+  }
+  override async transactionalize<T>(callback: () => Promise<T>): Promise<T> {
+    if (txCtx.getStore()) throw new Error('transactionalize: 同连接嵌套事务不支持（外层事务未提交），请拆分事务边界')
+    const run = txChain.then(() => txCtx.run(true, () => super.transactionalize(callback)))
+    txChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+}
+
 let db: SqliteDatabase | null = null
 
 export async function getDb(): Promise<SqliteDatabase> {
   if (!db) {
     await fs.mkdir(DATA_DIR, { recursive: true })
     await fs.mkdir(path.join(DATA_DIR, 'wiki', 'entries'), { recursive: true })
-    db = await SqliteDatabase.open(DB_PATH)
+    db = new AppSqliteDatabase()
+    await db.open(DB_PATH)
     await db.exec('PRAGMA journal_mode = WAL')
     await db.exec('PRAGMA foreign_keys = ON')
     // 蒸馏任务高频写库，写写冲突时等待而非立刻抛 SQLITE_BUSY
@@ -172,6 +213,48 @@ export async function getDb(): Promise<SqliteDatabase> {
 export function normalizeKey(name: string): string {
   return String(name).normalize('NFKC').toLowerCase().replace(/\s+/g, '')
 }
+
+/** 领域成员统一口径（「领域 ≡ 同名一级标签」不变式的文件半边）：
+ * active 文件 ∧（归类 ∨ 挂同名锚点标签 ∨ 挂挂靠锚点的次要标签）。
+ * WHY：归类（files.domain_id，手动分拣+蒸馏精确匹配）与打标（file_tags，蒸馏自由打标）是两条独立写入链路，
+ * 只取归类会出现「领域卡 0 有效文件 vs 挂靠次要标签 288 篇挂载」同卡自相矛盾（2026-10-03 金融科技实测）。
+ * 分拣区/标签墙/Entry 筛选/Overview/Pipeline 消费同一口径，任一视图可校验另一视图。
+ * 两个形状（真实库 7.5w files × 24.8w file_tags 实测：OR+IN 相关子查询 >90s，以下形状 <0.5s）：
+ * - 行级谓词 domainMemberPredicate(domExpr)：IN-UNION 三分支，domExpr 传 '?' 占位符时调用方 push 3 份参数，
+ *   传列引用（如 t.domain_id）无参数。供 files 领域筛选 / tags 锚点计数等单领域场景。
+ * - 计数派生表 DOMAIN_MEMBER_PAIRS_SQL：一次扫描产出全部 (domain_id, file_id) 对，
+ *   供 domains 树 / stats 三处按领域聚合。 */
+export function domainMemberPredicate(domExpr: string): string {
+  return `f.id IN (
+    SELECT id FROM files WHERE status = 'active' AND domain_id = ${domExpr}
+    UNION
+    SELECT ft.file_id FROM file_tags ft
+    JOIN tags mt ON mt.id = ft.tag_id AND mt.status = 'active' AND mt.level = 'primary'
+    WHERE mt.domain_id = ${domExpr}
+    UNION
+    SELECT ft.file_id FROM file_tags ft
+    JOIN tags st ON st.id = ft.tag_id AND st.status = 'active' AND st.level = 'secondary'
+    JOIN tags pt ON pt.id = st.parent_tag_id AND pt.status = 'active' AND pt.level = 'primary'
+    WHERE pt.domain_id = ${domExpr}
+  )`
+}
+
+export const DOMAIN_MEMBER_PAIRS_SQL = `
+  SELECT mm.did AS domain_id, COUNT(DISTINCT f.id) AS count
+  FROM (
+    SELECT domain_id AS did, id AS file_id FROM files WHERE status = 'active' AND domain_id IS NOT NULL
+    UNION
+    SELECT mt.domain_id, ft.file_id FROM file_tags ft
+      JOIN tags mt ON mt.id = ft.tag_id AND mt.status = 'active' AND mt.level = 'primary'
+      WHERE mt.domain_id IS NOT NULL
+    UNION
+    SELECT pt.domain_id, ft.file_id FROM file_tags ft
+      JOIN tags st ON st.id = ft.tag_id AND st.status = 'active' AND st.level = 'secondary'
+      JOIN tags pt ON pt.id = st.parent_tag_id AND pt.status = 'active' AND pt.level = 'primary'
+      WHERE pt.domain_id IS NOT NULL
+  ) mm
+  JOIN files f ON f.id = mm.file_id AND f.status = 'active'
+  GROUP BY mm.did`
 
 /** 强一致不变式：领域 ≡ 一级主要标签——确保领域拥有同名 active 一级标签（缺则建，同名普通/停用标签则升格绑定） */
 export async function ensureDomainTag(db: SqliteDatabase, domainId: number, name: string) {

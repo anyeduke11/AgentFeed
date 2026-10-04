@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { getDb, normalizeKey } from '../db.js'
+import { getDb, normalizeKey, DOMAIN_MEMBER_PAIRS_SQL } from '../db.js'
 import {
   mergeTagsInto, runNormalizeScan, startSemanticScan, startLevelScan,
   scanState, relatedTags, tagStats, exportTags, importTags, acceptSemanticProposal, attachOrphanSecondary
@@ -33,19 +33,27 @@ tagsRouter.get('/', wrap(async (req, res) => {
     ? 't.name'
     : "CASE t.level WHEN 'primary' THEN 0 WHEN 'secondary' THEN 1 ELSE 2 END, file_count DESC, t.name"
   // 挂载计数口径（修复「一级标签挂载 ≠ 分拣区领域成员数」失真）：
-  // - 一级锚定标签（领域化身）→ 直接取领域 active 成员数。「领域 ≡ 同名一级标签」不变式的成员半边：
-  //   标签挂载（蒸馏自由打标）与领域归属（蒸馏精确匹配 + 手动）是两条独立写入链路，展示层各数各的
-  //   必然失真（曾现 72 vs 13,989 的 194 倍倒挂）；与分拣区同为 active 口径后两视图天然一致。
+  // - 一级锚定标签（领域化身）→ 领域成员统一口径（归类 ∪ 标签体系挂载）。
+  //   「领域 ≡ 同名一级标签」不变式的成员半边：标签挂载（蒸馏自由打标）与领域归属（蒸馏精确匹配 + 手动）
+  //   是两条独立写入链路，展示层各数各的必然失真（曾现 72 vs 13,989 的 194 倍倒挂）；
+  //   与分拣区同口径后两视图天然一致。计数先物化到 TEMP 表再 JOIN——LEFT JOIN 派生表会被
+  //   planner 逐行下推重执行（真实库 7.5w files × 24.8w file_tags 实测致本接口 312s，禁改回）。
   // - 其余标签 → 只数 active 文件的挂载（删除文件不清理 file_tags，raw 计数曾混入 7k+ 死挂载）
+  await db.exec(`CREATE TEMP TABLE IF NOT EXISTS _domain_member_counts (domain_id INTEGER PRIMARY KEY, count INTEGER)`)
+  await db.exec('DELETE FROM _domain_member_counts')
+  await db.exec(`INSERT INTO _domain_member_counts (domain_id, count)
+    SELECT domain_id, count FROM (${DOMAIN_MEMBER_PAIRS_SQL})`)
   const items = await (await db.prepare(`
     SELECT t.*, pt.name AS parent_name, d.color AS domain_color,
       CASE WHEN t.level = 'primary' AND t.domain_id IS NOT NULL
-        THEN (SELECT COUNT(*) FROM files f WHERE f.domain_id = t.domain_id AND f.status = 'active')
-        ELSE (SELECT COUNT(*) FROM file_tags x JOIN files f2 ON f2.id = x.file_id AND f2.status = 'active' WHERE x.tag_id = t.id)
+        THEN COALESCE(dmc.count, 0)
+        ELSE (SELECT COUNT(*) FROM file_tags x WHERE x.tag_id = t.id
+               AND EXISTS (SELECT 1 FROM files f2 WHERE f2.id = x.file_id AND f2.status = 'active'))
       END AS file_count
     FROM tags t
     LEFT JOIN tags pt ON pt.id = t.parent_tag_id
-    LEFT JOIN domains d ON d.id = t.domain_id${whereSql}
+    LEFT JOIN domains d ON d.id = t.domain_id
+    LEFT JOIN _domain_member_counts dmc ON dmc.domain_id = t.domain_id${whereSql}
     ORDER BY ${orderSql} LIMIT ${lim} OFFSET ${off}
   `)).all(params) as any[]
   const totalRow = await (await db.prepare(`
@@ -235,7 +243,8 @@ tagsRouter.post('/proposals/:id/accept', wrap(async (req, res) => {
     if (!r.ok) return res.json({ success: false, message: r.message })
     return res.json({ success: true, merged: r.merged, moved: r.moved })
   }
-  // level：按名字批量降为次要（软挂：不指父，落「未挂靠」组，由前端补挂；已被合并/停用的自动跳过）。
+  // level：按名字批量降为次要，保留 parent_tag_id——挂靠在落提案/手动微调时已就位，接受只升格不清挂
+  // （曾置 NULL 会把「落提案即挂靠」的成果抹掉，标签全落「未挂靠」组）；已被合并/停用的自动跳过。
   // 领域锚点保护：与领域同名（归一比对）的标签是「领域 ≡ 一级标签」的锚，降级会让领域失锚且同名阻塞重建——跳过并计数
   const members: string[] = JSON.parse(p.members || '[]')
   const domainKeys = new Set(((await (await db.prepare('SELECT name FROM domains')).all()) as any[]).map(r => normalizeKey(r.name)))
@@ -244,7 +253,7 @@ tagsRouter.post('/proposals/:id/accept', wrap(async (req, res) => {
   for (const name of members) {
     if (domainKeys.has(normalizeKey(name))) { skippedPrimary++; continue }
     const esc = String(name).replace(/'/g, "''")
-    await db.exec(`UPDATE tags SET level = 'secondary', parent_tag_id = NULL WHERE name = '${esc}' AND status = 'active' AND level != 'primary'`)
+    await db.exec(`UPDATE tags SET level = 'secondary' WHERE name = '${esc}' AND status = 'active' AND level != 'primary'`)
     downgraded++
   }
   await db.exec(`UPDATE tag_proposals SET status = 'accepted' WHERE id = ${p.id}`)
@@ -261,21 +270,77 @@ tagsRouter.post('/proposals/:id/reject', wrap(async (req, res) => {
   res.json({ success: true })
 }))
 
+/** 手动微调 level 提案成员的一级挂靠：改 tags.parent_tag_id 并同步提案 attach_map（未挂靠成员可借此补挂）。
+ * 守卫：仅 pending level 提案 + 成员必须在 members 内 + 目标父必须是 active 一级 + 领域锚点不可被改挂 */
+tagsRouter.post('/proposals/:id/reparent', wrap(async (req, res) => {
+  const db = await getDb()
+  const id = parseInt(req.params.id)
+  const p = await (await db.prepare("SELECT * FROM tag_proposals WHERE id = ? AND status = 'pending' AND kind = 'level'")).get(id) as any
+  if (!p) return res.status(404).json({ success: false, message: '建议不存在或已处理' })
+  const member = String(req.body?.member || '').trim()
+  const parentId = parseInt(req.body?.parentTagId)
+  if (!member || !parentId) return res.status(400).json({ success: false, message: 'member 与 parentTagId 必填' })
+  const parent = await (await db.prepare("SELECT id, name FROM tags WHERE id = ? AND status = 'active' AND level = 'primary'")).get(parentId) as any
+  if (!parent) return res.status(400).json({ success: false, message: 'parentTagId 必须指向有效的 active 一级标签' })
+  const members: string[] = JSON.parse(p.members || '[]')
+  if (!members.includes(member)) return res.status(400).json({ success: false, message: `「${member}」不在该提案成员中` })
+  const domainKeys = new Set(((await (await db.prepare('SELECT name FROM domains')).all()) as any[]).map(r => normalizeKey(r.name)))
+  if (domainKeys.has(normalizeKey(member))) return res.status(400).json({ success: false, message: '领域锚点标签不可挂靠' })
+  const tag = await (await db.prepare("SELECT id FROM tags WHERE name = ? AND status = 'active' AND level != 'primary'")).get(member) as any
+  if (!tag) return res.status(400).json({ success: false, message: `成员「${member}」不存在或不可用` })
+  await db.exec(`UPDATE tags SET parent_tag_id = ${Number(parent.id)} WHERE id = ${Number(tag.id)}`)
+  // 同步 attach_map（成员 → 一级名）：前端显示与接受后状态一致
+  let am: Record<string, string> = {}
+  try { am = JSON.parse(p.attach_map || '{}') || {} } catch { am = {} }
+  am[member] = String(parent.name)
+  await db.exec(`UPDATE tag_proposals SET attach_map = '${JSON.stringify(am).replace(/'/g, "''")}' WHERE id = ${id}`)
+  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('reparent_level', '{"proposal":${id},"member":"${member.replace(/'/g, "''")}","parent":"${String(parent.name).replace(/'/g, "''")}"}')`)
+  res.json({ success: true, attach_map: JSON.stringify(am), parent: String(parent.name) })
+}))
+
 /** 批量接受语义归组建议（长尾大规模收敛）：比单条更严的守卫——仅合并 normal 成员（一级/二级归属人工处理），
  * 规范名失效的整条跳过并保持 pending 留待人工。无上限逐条执行，前端 confirm 后调用 */
+// 尺寸守卫（accept/reject-oversized 两端点共用）：>12 成员的组几乎都是「同前缀全家桶」式过度合并
+// （真实库 1310 条中 ~105 条 ≥13，如 GitHub 50 成员把 Actions/CLI/Copilot 等不同工具吞并）——
+// ≤12 的同前缀变体族是安全主体；超大组保持 pending 留待人工拆分或批量驳回，不计入 skipped（skipped 专指规范名失效）
+const MAX_BATCH_MEMBERS = 12
 tagsRouter.post('/proposals/accept-batch', wrap(async (req, res) => {
   const db = await getDb()
   if ((req.body?.kind || 'semantic') !== 'semantic') return res.status(400).json({ success: false, message: '批量接受仅支持 kind=semantic' })
   const pending = await (await db.prepare("SELECT * FROM tag_proposals WHERE status = 'pending' AND kind = 'semantic' ORDER BY id")).all() as any[]
   let accepted = 0
   let skipped = 0
+  let oversized = 0
   let moved = 0
   for (const p of pending) {
+    let members: string[] = []
+    try { members = JSON.parse(p.members || '[]') } catch { members = [] }
+    if (Array.isArray(members) && members.length > MAX_BATCH_MEMBERS) { oversized++; continue }
     const r = await acceptSemanticProposal(db, p, true)
     if (r.ok) { accepted++; moved += r.moved } else { skipped++ }
   }
-  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('accept_semantic_batch', '{"accepted":${accepted},"skipped":${skipped},"moved":${moved}}')`)
-  res.json({ success: true, accepted, skipped, moved })
+  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('accept_semantic_batch', '{"accepted":${accepted},"skipped":${skipped},"oversized":${oversized},"moved":${moved}}')`)
+  res.json({ success: true, accepted, skipped, oversized, moved })
+}))
+
+/** 批量驳回超大组语义建议（>12 成员）：accept-batch 永远跳过它们（守卫同口径），按钮消化不了的
+ * 死库存需要一条显式出口。仅驳回 kind=semantic + 成员超阈值的 pending；规范名失效的小组不在此列
+ * （留给逐条人工判断）。审计落 tag_ops 供回溯。 */
+tagsRouter.post('/proposals/reject-oversized', wrap(async (req, res) => {
+  const db = await getDb()
+  if ((req.body?.kind || 'semantic') !== 'semantic') return res.status(400).json({ success: false, message: '批量驳回仅支持 kind=semantic' })
+  const pending = await (await db.prepare("SELECT id, members FROM tag_proposals WHERE status = 'pending' AND kind = 'semantic' ORDER BY id")).all() as any[]
+  let rejected = 0
+  for (const p of pending) {
+    let members: string[] = []
+    try { members = JSON.parse(p.members || '[]') } catch { members = [] }
+    if (Array.isArray(members) && members.length > MAX_BATCH_MEMBERS) {
+      await db.exec(`UPDATE tag_proposals SET status = 'rejected' WHERE id = ${Number(p.id)}`)
+      rejected++
+    }
+  }
+  await db.exec(`INSERT INTO tag_ops (op, detail) VALUES ('reject_semantic_oversized', '{"rejected":${rejected},"threshold":${MAX_BATCH_MEMBERS}}')`)
+  res.json({ success: true, rejected })
 }))
 
 // ---- 收敛扫描 ----

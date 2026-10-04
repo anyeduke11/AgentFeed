@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import fs from 'fs/promises'
 import path from 'path'
-import { getDb } from '../db.js'
+import { getDb, domainMemberPredicate } from '../db.js'
 import { touchFiles, getHook } from '../attention.js'
 import { openFile, revealFile } from '../opener.js'
 import { buildReaderDoc } from '../reader.js'
@@ -49,8 +49,9 @@ filesRouter.get('/', async (req, res) => {
       const domainStmt = await db.prepare('SELECT id FROM domains WHERE name = ?')
       const domainRow = await domainStmt.get(domain) as any
       if (domainRow) {
-        where += ' AND f.domain_id = ?'
-        params.push(domainRow.id)
+        // 与分拣区领域卡同一成员口径（归类 ∪ 标签体系挂载）——卡片数字必须等于点击后列表条数
+        where += ` AND ${domainMemberPredicate('?')}`
+        params.push(domainRow.id, domainRow.id, domainRow.id)
       }
     }
     if (agent) {
